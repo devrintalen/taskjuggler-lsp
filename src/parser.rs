@@ -400,7 +400,7 @@ impl<'a> Lexer<'a> {
 
 // ─── Symbols ──────────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Symbol {
     pub name: String,
     pub detail: String,

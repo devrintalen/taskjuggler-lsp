@@ -1,4 +1,5 @@
 mod backend;
+mod completion;
 mod hover;
 mod parser;
 mod signature;

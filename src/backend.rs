@@ -3,6 +3,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
+use crate::completion;
 use crate::hover;
 use crate::parser::{self, ParseResult, Symbol};
 use crate::signature;
@@ -65,6 +66,13 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![" ".to_string()]),
                     retrigger_characters: None,
                     work_done_progress_options: Default::default(),
+                }),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: None,
+                    resolve_provider: Some(false),
+                    work_done_progress_options: Default::default(),
+                    all_commit_characters: None,
+                    completion_item: None,
                 }),
                 ..Default::default()
             },
@@ -151,5 +159,28 @@ impl LanguageServer for Backend {
                 end: tok.end,
             }),
         }))
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> Result<Option<CompletionResponse>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+
+        let Some(text) = self.texts.get(uri) else {
+            return Ok(None);
+        };
+        let symbols = self
+            .documents
+            .get(uri)
+            .map(|r| r.symbols.clone())
+            .unwrap_or_default();
+
+        let items = completion::completions(&text, pos, &symbols);
+        if items.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(CompletionResponse::Array(items)))
     }
 }
