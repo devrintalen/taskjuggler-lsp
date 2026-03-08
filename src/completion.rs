@@ -301,13 +301,25 @@ pub fn completions(src: &str, cursor: Position, symbols: &[Symbol]) -> Vec<Compl
     if let Some(kind) = id_sym_kind {
         let mut ids: Vec<(String, String)> = Vec::new();
         collect_ids(symbols, kind, "", &mut ids);
+        let partial_lc = partial.to_lowercase();
         for (id, name) in ids {
-            if partial.is_empty() || id.to_lowercase().starts_with(&partial.to_lowercase()) {
+            let id_match =
+                partial.is_empty() || id.to_lowercase().starts_with(&partial_lc);
+            let name_match =
+                !partial.is_empty() && name.to_lowercase().contains(&partial_lc);
+            if id_match || name_match {
                 items.push(CompletionItem {
                     label: id,
                     kind: Some(completion_kind_for(kind)),
                     detail: Some(name),
                     sort_text: Some("0".into()), // ids sort before keywords
+                    // When matched only by name, set filter_text to the typed
+                    // partial so client-side filtering doesn't discard the item.
+                    filter_text: if name_match && !id_match {
+                        Some(partial.clone())
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 });
             }
@@ -481,6 +493,24 @@ mod tests {
         assert!(lbls.contains(&"a"), "should offer task id 'a' on continuation line");
         assert!(lbls.contains(&"b"), "should offer task id 'b' on continuation line");
         assert!(!lbls.contains(&"effort"), "no keyword completions on depends continuation");
+    }
+
+    #[test]
+    fn depends_id_matches_by_name() {
+        // "version" is a substring of "Beta version" but not a prefix of id "beta".
+        let mini = "task beta \"Beta version\" {}\ntask other \"Something\" {}\ntask c \"C\" {\n  depends version\n}";
+        let syms = parser::parse(mini).symbols;
+        // col 16 = last char of "version" → partial_word returns "version"
+        let items = completions(mini, pos(3, 16), &syms);
+        let lbls = labels(&items);
+        assert!(
+            lbls.contains(&"beta"),
+            "'Beta version' should match partial 'version' by name"
+        );
+        assert!(
+            !lbls.contains(&"other"),
+            "'Something' should not match 'version'"
+        );
     }
 
     #[test]

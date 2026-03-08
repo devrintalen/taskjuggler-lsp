@@ -204,6 +204,9 @@ impl LanguageServer for Backend {
         if items.is_empty() {
             return Ok(None);
         }
-        Ok(Some(CompletionResponse::Array(items)))
+        Ok(Some(CompletionResponse::List(CompletionList {
+            is_incomplete: true,
+            items,
+        })))
     }
 }
