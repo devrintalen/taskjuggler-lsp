@@ -105,6 +105,24 @@ impl<'a> Lexer<'a> {
             Some(c) => c,
         };
 
+        // Hash line comment
+        if ch == '#' {
+            let mut text = String::new();
+            while let Some(c) = self.current() {
+                if c == '\n' {
+                    break;
+                }
+                text.push(c);
+                self.advance();
+            }
+            return Token {
+                kind: TokenKind::LineComment,
+                start,
+                end: self.position(),
+                text,
+            };
+        }
+
         // Line comment
         if ch == '/' && self.peek_at(1) == Some('/') {
             let mut text = String::new();
@@ -532,28 +550,39 @@ impl Parser {
         kw: Token,
         diagnostics: &mut Vec<Diagnostic>,
     ) -> Option<Symbol> {
-        // id is required
-        if self.peek().kind != TokenKind::Ident {
+        // id is optional — if the next token is a string, the id was omitted
+        let (id, selection_start, selection_end) = if self.peek().kind == TokenKind::Ident {
+            let t = self.advance();
+            self.skip_trivia();
+            let (s, e) = (t.start, t.end);
+            (t.text, s, e)
+        } else if self.peek().kind == TokenKind::Str {
+            // No id; use the keyword position as the selection range
+            (String::new(), kw.start, kw.end)
+        } else {
             self.skip_item_tail();
             return None;
-        }
-        let id = self.advance();
-        self.skip_trivia();
-
-        // optional quoted display name
-        let name = if self.peek().kind == TokenKind::Str {
-            let s = self.advance().text.clone();
-            self.skip_trivia();
-            s
-        } else {
-            id.text.clone()
         };
 
-        // skip remaining inline arguments
-        self.skip_args();
+        // optional quoted display name
+        let mut range_end = selection_end;
+        let name = if self.peek().kind == TokenKind::Str {
+            let tok = self.advance();
+            range_end = tok.end;
+            self.skip_trivia();
+            tok.text
+        } else if id.is_empty() {
+            // No id and no string — nothing useful to show
+            self.skip_item_tail();
+            return None;
+        } else {
+            id.clone()
+        };
 
-        // optional body
-        let mut range_end = id.end;
+        // skip remaining inline arguments, extending range_end to cover them
+        if let Some(end) = self.skip_args() {
+            range_end = end;
+        }
         let children = if self.peek().kind == TokenKind::LBrace {
             let open = self.advance(); // consume {
             let ch = self.parse_items(diagnostics);
@@ -577,32 +606,43 @@ impl Parser {
 
         Some(Symbol {
             name,
-            detail: kw.text.clone(),
+            // Show the TJP identifier as detail (e.g. "AcSo", "spec") so
+            // the cross-reference id is visible in lsp-ui-imenu alongside
+            // the human-readable name.  Fall back to the keyword if no id.
+            detail: if id.is_empty() {
+                kw.text.clone()
+            } else {
+                id.clone()
+            },
             kind: symbol_kind_for(&kw.text),
             range: Range {
                 start: kw.start,
                 end: range_end,
             },
             selection_range: Range {
-                start: id.start,
-                end: id.end,
+                start: selection_start,
+                end: selection_end,
             },
             children,
         })
     }
 
     /// Skip inline argument tokens: stop at `{`, `}`, EOF, or a declaration keyword.
-    fn skip_args(&mut self) {
+    /// Returns the end position of the last consumed token, or None if nothing was consumed.
+    fn skip_args(&mut self) -> Option<Position> {
+        let mut last_end: Option<Position> = None;
         loop {
             self.skip_trivia();
             match self.peek().kind {
                 TokenKind::LBrace | TokenKind::RBrace | TokenKind::Eof => break,
                 TokenKind::Ident if is_decl_keyword(&self.peek().text) => break,
                 _ => {
-                    self.advance();
+                    let tok = self.advance();
+                    last_end = Some(tok.end);
                 }
             }
         }
+        last_end
     }
 
     /// Skip the tail of a non-symbol item (args + optional body block).
@@ -643,6 +683,41 @@ impl Parser {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn print_symbols(symbols: &[Symbol], indent: usize) {
+        for sym in symbols {
+            println!(
+                "{}[{}] {} \"{}\"",
+                "  ".repeat(indent),
+                sym.detail,
+                format!("{:?}", sym.kind).to_lowercase(),
+                sym.name
+            );
+            print_symbols(&sym.children, indent + 1);
+        }
+    }
+
+    #[test]
+    fn test_tutorial() {
+        let src = include_str!("../test/tutorial.tjp");
+        let result = parse(src);
+        println!("Diagnostics ({}):", result.diagnostics.len());
+        for diag in &result.diagnostics {
+            println!(
+                "  line {} col {}: {}",
+                diag.range.start.line + 1,
+                diag.range.start.character + 1,
+                diag.message
+            );
+        }
+        println!("\nSymbols:");
+        print_symbols(&result.symbols, 0);
     }
 }
 
