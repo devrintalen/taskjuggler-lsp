@@ -2,6 +2,7 @@ mod backend;
 mod completion;
 mod hover;
 mod parser;
+mod semantic_tokens;
 mod signature;
 
 use backend::Backend;

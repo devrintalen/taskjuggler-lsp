@@ -20,6 +20,8 @@ pub enum TokenKind {
     Comma,
     LineComment,
     BlockComment,
+    /// Multi-line string delimited by `-8<-` ... `->8-` (scissors notation).
+    MultiLineStr,
     Eof,
     Error,
 }
@@ -234,6 +236,51 @@ impl<'a> Lexer<'a> {
                 };
             }
             '-' => {
+                // Check for scissors open: -8<-  ...  ->8-
+                if self.peek_at(1) == Some('8')
+                    && self.peek_at(2) == Some('<')
+                    && self.peek_at(3) == Some('-')
+                {
+                    self.advance(); // -
+                    self.advance(); // 8
+                    self.advance(); // <
+                    self.advance(); // -
+                    let mut text = String::from("-8<-");
+                    loop {
+                        match self.current() {
+                            None => {
+                                return Token {
+                                    kind: TokenKind::Error,
+                                    start,
+                                    end: self.position(),
+                                    text: "unterminated scissors string".into(),
+                                };
+                            }
+                            Some('-')
+                                if self.peek_at(1) == Some('>')
+                                    && self.peek_at(2) == Some('8')
+                                    && self.peek_at(3) == Some('-') =>
+                            {
+                                self.advance(); // -
+                                self.advance(); // >
+                                self.advance(); // 8
+                                self.advance(); // -
+                                text.push_str("->8-");
+                                break;
+                            }
+                            Some(c) => {
+                                text.push(c);
+                                self.advance();
+                            }
+                        }
+                    }
+                    return Token {
+                        kind: TokenKind::MultiLineStr,
+                        start,
+                        end: self.position(),
+                        text,
+                    };
+                }
                 self.advance();
                 return Token {
                     kind: TokenKind::Minus,

@@ -6,6 +6,7 @@ use tower_lsp::{Client, LanguageServer};
 use crate::completion;
 use crate::hover;
 use crate::parser::{self, ParseResult, Symbol};
+use crate::semantic_tokens;
 use crate::signature;
 
 pub struct Backend {
@@ -74,6 +75,15 @@ impl LanguageServer for Backend {
                     all_commit_characters: None,
                     completion_item: None,
                 }),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: semantic_tokens::legend(),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            ..Default::default()
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
             ..Default::default()
@@ -159,6 +169,19 @@ impl LanguageServer for Backend {
                 end: tok.end,
             }),
         }))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = &params.text_document.uri;
+        let Some(text) = self.texts.get(uri) else {
+            return Ok(None);
+        };
+        Ok(Some(SemanticTokensResult::Tokens(
+            semantic_tokens::build_semantic_tokens(&text),
+        )))
     }
 
     async fn completion(
