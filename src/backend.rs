@@ -3,11 +3,14 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
+use crate::hover;
 use crate::parser::{self, ParseResult, Symbol};
+use crate::signature;
 
 pub struct Backend {
     client: Client,
     documents: DashMap<Url, ParseResult>,
+    texts: DashMap<Url, String>,
 }
 
 impl Backend {
@@ -15,6 +18,7 @@ impl Backend {
         Self {
             client,
             documents: DashMap::new(),
+            texts: DashMap::new(),
         }
     }
 
@@ -22,6 +26,7 @@ impl Backend {
         let result = parser::parse(&text);
         let diagnostics = result.diagnostics.clone();
         self.documents.insert(uri.clone(), result);
+        self.texts.insert(uri.clone(), text);
         self.client
             .publish_diagnostics(uri, diagnostics, None)
             .await;
@@ -55,6 +60,12 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec![" ".to_string()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: Default::default(),
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -85,6 +96,7 @@ impl LanguageServer for Backend {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
         self.documents.remove(&uri);
+        self.texts.remove(&uri);
         self.client.publish_diagnostics(uri, vec![], None).await;
     }
 
@@ -97,5 +109,47 @@ impl LanguageServer for Backend {
             .get(&params.text_document.uri)
             .map(|r| r.symbols.iter().map(to_document_symbol).collect::<Vec<_>>());
         Ok(doc_symbols.map(DocumentSymbolResponse::Nested))
+    }
+
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let Some(text) = self.texts.get(uri) else {
+            return Ok(None);
+        };
+        let Some((kw, arg_count)) = signature::active_context(&text, pos) else {
+            return Ok(None);
+        };
+        Ok(signature::build_signature_help(&kw, arg_count))
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let Some(text) = self.texts.get(uri) else {
+            return Ok(None);
+        };
+        let Some(tok) = hover::token_at(&text, pos) else {
+            return Ok(None);
+        };
+        let Some(docs) = hover::keyword_docs(&tok.text) else {
+            return Ok(None);
+        };
+
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: docs.to_string(),
+            }),
+            range: Some(Range {
+                start: tok.start,
+                end: tok.end,
+            }),
+        }))
     }
 }

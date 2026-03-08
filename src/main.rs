@@ -1,5 +1,7 @@
 mod backend;
+mod hover;
 mod parser;
+mod signature;
 
 use backend::Backend;
 use tower_lsp::{LspService, Server};

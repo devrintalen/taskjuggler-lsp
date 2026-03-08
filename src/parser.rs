@@ -16,6 +16,8 @@ pub enum TokenKind {
     Bang,
     Plus,
     Minus,
+    Colon,
+    Comma,
     LineComment,
     BlockComment,
     Eof,
@@ -220,6 +222,24 @@ impl<'a> Lexer<'a> {
                     start,
                     end: self.position(),
                     text: "-".into(),
+                };
+            }
+            ':' => {
+                self.advance();
+                return Token {
+                    kind: TokenKind::Colon,
+                    start,
+                    end: self.position(),
+                    text: ":".into(),
+                };
+            }
+            ',' => {
+                self.advance();
+                return Token {
+                    kind: TokenKind::Comma,
+                    start,
+                    end: self.position(),
+                    text: ",".into(),
                 };
             }
             _ => {}
