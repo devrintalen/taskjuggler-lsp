@@ -1,5 +1,5 @@
 use crate::hover;
-use crate::parser::{Lexer, Symbol, TokenKind};
+use crate::parser::{Lexer, Symbol, Token, TokenKind};
 use crate::signature;
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position, SymbolKind};
 
@@ -160,6 +160,117 @@ fn collect_ids(
     }
 }
 
+// ─── Scope-aware helpers ──────────────────────────────────────────────────────
+
+/// Scan tokens up to `cursor` and return the stack of task ids representing
+/// the nesting path of the innermost task at the cursor position.
+/// E.g. cursor inside `task AcSo { task software { task gui { … } } }`
+/// returns `["AcSo", "software", "gui"]`.
+fn current_task_scope(src: &str, cursor: Position) -> Vec<String> {
+    #[derive(PartialEq)]
+    enum SState { Scan, ExpectId, BeforeLBrace }
+
+    let mut lexer = Lexer::new(src);
+    let mut state = SState::Scan;
+    let mut pending_id: Option<String> = None;
+    let mut brace_depth: u32 = 0;
+    let mut task_stack: Vec<(String, u32)> = Vec::new();
+
+    loop {
+        let tok = lexer.next_token();
+        if tok.kind == TokenKind::Eof || pos_before(cursor, tok.start) {
+            break;
+        }
+        match tok.kind {
+            TokenKind::LineComment | TokenKind::BlockComment => {}
+
+            TokenKind::LBrace => {
+                brace_depth += 1;
+                if state == SState::BeforeLBrace {
+                    if let Some(id) = pending_id.take() {
+                        task_stack.push((id, brace_depth));
+                    }
+                }
+                pending_id = None;
+                state = SState::Scan;
+            }
+
+            TokenKind::RBrace => {
+                task_stack.retain(|(_, d)| *d < brace_depth);
+                if brace_depth > 0 {
+                    brace_depth -= 1;
+                }
+                state = SState::Scan;
+                pending_id = None;
+            }
+
+            TokenKind::Ident => {
+                if tok.text == "task" {
+                    state = SState::ExpectId;
+                    pending_id = None;
+                } else if state == SState::ExpectId {
+                    pending_id = Some(tok.text.clone());
+                    state = SState::BeforeLBrace;
+                }
+                // In BeforeLBrace: non-"task" Idents (args/names) are ignored.
+            }
+
+            _ => {
+                // Non-Ident tokens reset ExpectId (e.g. unexpected token after "task").
+                if state == SState::ExpectId {
+                    state = SState::Scan;
+                    pending_id = None;
+                }
+                // In BeforeLBrace (e.g. a display-name string): stay put, awaiting `{`.
+            }
+        }
+    }
+
+    task_stack.into_iter().map(|(id, _)| id).collect()
+}
+
+/// Count consecutive `!` tokens immediately before the cursor (after skipping
+/// any partial identifier the user is currently typing).
+fn count_leading_bangs(src: &str, cursor: Position) -> usize {
+    let mut lexer = Lexer::new(src);
+    let mut tokens: Vec<Token> = Vec::new();
+    loop {
+        let tok = lexer.next_token();
+        if tok.kind == TokenKind::Eof || pos_before(cursor, tok.start) {
+            break;
+        }
+        if !matches!(tok.kind, TokenKind::LineComment | TokenKind::BlockComment) {
+            tokens.push(tok);
+        }
+    }
+    // Skip trailing Ident (the partial word currently being typed).
+    let end = match tokens.last() {
+        Some(t) if t.kind == TokenKind::Ident => tokens.len() - 1,
+        _ => tokens.len(),
+    };
+    tokens[..end]
+        .iter()
+        .rev()
+        .take_while(|t| t.kind == TokenKind::Bang)
+        .count()
+}
+
+/// Navigate the symbol tree following `path` (matching `sym.detail` at each
+/// step) and return the children of the matched node.
+/// Returns `syms` unchanged when `path` is empty (root level),
+/// and `&[]` when any segment is not found.
+fn find_scope_children<'a>(syms: &'a [Symbol], path: &[String]) -> &'a [Symbol] {
+    if path.is_empty() {
+        return syms;
+    }
+    for sym in syms {
+        if sym.kind == SymbolKind::FUNCTION && sym.detail == path[0] {
+            return find_scope_children(&sym.children, &path[1..]);
+        }
+    }
+    &[]
+}
+
 // ─── Keyword tables ───────────────────────────────────────────────────────────
 
 const TOPLEVEL_KWS: &[(&str, &str)] = &[
@@ -299,8 +410,35 @@ pub fn completions(src: &str, cursor: Position, symbols: &[Symbol]) -> Vec<Compl
     };
 
     if let Some(kind) = id_sym_kind {
-        let mut ids: Vec<(String, String)> = Vec::new();
-        collect_ids(symbols, kind, "", &mut ids);
+        // For depends/precedes, offer scope-relative IDs based on leading `!` count.
+        // n=0 bangs → absolute/global lookup (all IDs).
+        // n≥1 bangs → look in scope[..k-n] (n levels up from the current task's parent).
+        let ids: Vec<(String, String)> =
+            if matches!(active_kw.as_deref(), Some("depends") | Some("precedes")) {
+                let scope = current_task_scope(src, cursor);
+                let bang_count = count_leading_bangs(src, cursor);
+                if bang_count == 0 || scope.is_empty() {
+                    // Absolute reference or not inside any task — global IDs.
+                    let mut v = Vec::new();
+                    collect_ids(symbols, kind, "", &mut v);
+                    v
+                } else {
+                    let k = scope.len();
+                    if bang_count > k {
+                        Vec::new() // too many `!` — no valid completions
+                    } else {
+                        let lookup_path = &scope[..k - bang_count];
+                        let children = find_scope_children(symbols, lookup_path);
+                        let mut v = Vec::new();
+                        collect_ids(children, kind, "", &mut v);
+                        v
+                    }
+                }
+            } else {
+                let mut v = Vec::new();
+                collect_ids(symbols, kind, "", &mut v);
+                v
+            };
         let partial_lc = partial.to_lowercase();
         for (id, name) in ids {
             let id_match =
@@ -493,6 +631,46 @@ mod tests {
         assert!(lbls.contains(&"a"), "should offer task id 'a' on continuation line");
         assert!(lbls.contains(&"b"), "should offer task id 'b' on continuation line");
         assert!(!lbls.contains(&"effort"), "no keyword completions on depends continuation");
+    }
+
+    #[test]
+    fn scope_aware_one_bang() {
+        // Inside parent.current with 1 bang → offers siblings (parent's children).
+        let mini = "task parent \"P\" {\n  task sibling \"S\" {}\n  task current \"C\" {\n    depends !\n  }\n}";
+        let syms = parser::parse(mini).symbols;
+        // Line 3: "    depends !" — cursor after `!` (col 13)
+        let items = completions(mini, pos(3, 13), &syms);
+        let lbls = labels(&items);
+        assert!(
+            lbls.contains(&"sibling"),
+            "1 bang inside current should offer sibling; got: {:?}",
+            lbls
+        );
+        assert!(
+            lbls.contains(&"current"),
+            "1 bang inside current should offer itself; got: {:?}",
+            lbls
+        );
+        // Fully-qualified IDs should NOT appear — we're offering relative IDs only.
+        assert!(
+            !lbls.contains(&"parent"),
+            "parent itself should not appear; got: {:?}",
+            lbls
+        );
+    }
+
+    #[test]
+    fn scope_aware_too_many_bangs() {
+        // `foo` is a single top-level task (depth 1); `!!` needs depth ≥ 2.
+        let mini = "task foo \"Foo\" {\n  depends !!\n}";
+        let syms = parser::parse(mini).symbols;
+        // Line 1: "  depends !!" — cursor after second `!` (col 12)
+        let items = completions(mini, pos(1, 12), &syms);
+        assert!(
+            items.is_empty(),
+            "!! inside single-level task should give empty completions; got: {:?}",
+            items
+        );
     }
 
     #[test]

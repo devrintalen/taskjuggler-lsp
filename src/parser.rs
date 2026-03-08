@@ -733,6 +733,242 @@ impl Parser {
     }
 }
 
+// ─── Dependency validation ────────────────────────────────────────────────────
+
+/// Recursively resolve a dotted path into the symbol tree.
+/// `segments` is the result of splitting a task reference by `.`.
+fn resolve_from(syms: &[Symbol], segments: &[&str]) -> bool {
+    if segments.is_empty() {
+        return true;
+    }
+    for sym in syms {
+        if sym.kind == SymbolKind::FUNCTION && sym.detail == segments[0] {
+            return resolve_from(&sym.children, &segments[1..]);
+        }
+    }
+    false
+}
+
+/// Navigate the symbol tree following `path` and return the children of the
+/// matched node (local copy for use within this module).
+fn find_scope_children_local<'a>(syms: &'a [Symbol], path: &[String]) -> &'a [Symbol] {
+    if path.is_empty() {
+        return syms;
+    }
+    for sym in syms {
+        if sym.kind == SymbolKind::FUNCTION && sym.detail == path[0] {
+            return find_scope_children_local(&sym.children, &path[1..]);
+        }
+    }
+    &[]
+}
+
+/// Returns `true` when `id` resolves correctly given `scope` and `bang_count`.
+///
+/// - `bang_count == 0`: absolute reference — resolved from root.
+/// - `bang_count >= 1`: relative — look in `scope[..k - bang_count]`.
+/// - `bang_count > scope.len()`: too many `!`, returns `false`.
+fn validate_ref_check(symbols: &[Symbol], scope: &[String], bang_count: usize, id: &str) -> bool {
+    let scope_children: &[Symbol] = if bang_count == 0 {
+        symbols
+    } else {
+        let k = scope.len();
+        if bang_count > k {
+            return false;
+        }
+        find_scope_children_local(symbols, &scope[..k - bang_count])
+    };
+    let segments: Vec<&str> = id.split('.').collect();
+    resolve_from(scope_children, &segments)
+}
+
+/// Second-pass validator: scan the source for `depends`/`precedes` arguments
+/// and emit diagnostics for references that don't resolve.
+///
+/// WARNING  — emitted when the number of `!` tokens exceeds the task depth.
+/// ERROR    — emitted when the dotted path after `!*` is not found in the tree.
+fn validate_deps(src: &str, symbols: &[Symbol]) -> Vec<Diagnostic> {
+    let mut lexer = Lexer::new(src);
+    let mut diagnostics = Vec::new();
+
+    // Scope-tracking state (mirrors current_task_scope in completion.rs).
+    #[derive(PartialEq)]
+    enum SState { Scan, ExpectId, BeforeLBrace }
+
+    let mut sstate = SState::Scan;
+    let mut pending_id: Option<String> = None;
+    let mut brace_depth: u32 = 0;
+    let mut task_stack: Vec<(String, u32)> = Vec::new();
+
+    // Deps-argument collection state.
+    let mut in_deps = false;
+    // After consuming a dep argument we require a comma before accepting the
+    // next one.  Any other token (including a new-statement keyword) terminates
+    // the dep list.  This prevents keywords on the next line from being
+    // mistaken for dependency identifiers.
+    let mut needs_comma = false;
+    let mut bang_tokens: Vec<Token> = Vec::new();
+
+    loop {
+        let tok = lexer.next_token();
+        if tok.kind == TokenKind::Eof {
+            break;
+        }
+        if matches!(tok.kind, TokenKind::LineComment | TokenKind::BlockComment) {
+            continue;
+        }
+
+        match tok.kind {
+            // `{` ends any active depends list and updates scope depth.
+            TokenKind::LBrace => {
+                in_deps = false;
+                needs_comma = false;
+                bang_tokens.clear();
+                brace_depth += 1;
+                if sstate == SState::BeforeLBrace {
+                    if let Some(id) = pending_id.take() {
+                        task_stack.push((id, brace_depth));
+                    }
+                }
+                pending_id = None;
+                sstate = SState::Scan;
+            }
+
+            // `}` ends any active depends list and pops the innermost task scope.
+            TokenKind::RBrace => {
+                in_deps = false;
+                needs_comma = false;
+                bang_tokens.clear();
+                task_stack.retain(|(_, d)| *d < brace_depth);
+                if brace_depth > 0 {
+                    brace_depth -= 1;
+                }
+                sstate = SState::Scan;
+                pending_id = None;
+            }
+
+            TokenKind::Bang => {
+                if in_deps {
+                    if needs_comma {
+                        // `!` after a dep arg without a preceding comma is
+                        // unexpected — exit deps mode.
+                        in_deps = false;
+                        needs_comma = false;
+                        bang_tokens.clear();
+                    } else {
+                        bang_tokens.push(tok);
+                    }
+                }
+            }
+
+            TokenKind::Comma => {
+                if in_deps {
+                    bang_tokens.clear();
+                    needs_comma = false;
+                }
+            }
+
+            TokenKind::Ident => {
+                if in_deps {
+                    if is_decl_keyword(&tok.text) {
+                        // A declaration keyword ends the deps list; fall through
+                        // to scope-tracking below.
+                        in_deps = false;
+                        needs_comma = false;
+                        bang_tokens.clear();
+                    } else if tok.text == "depends" || tok.text == "precedes" {
+                        // Back-to-back depends/precedes: restart argument collection.
+                        bang_tokens.clear();
+                        needs_comma = false;
+                        // Stay in_deps = true.
+                        continue;
+                    } else if needs_comma {
+                        // Ident after a dep arg without a preceding comma → the
+                        // dep list has ended and this starts a new statement.
+                        // Exit deps mode and fall through to scope tracking.
+                        in_deps = false;
+                        needs_comma = false;
+                        bang_tokens.clear();
+                    } else {
+                        // Validate this identifier as a dependency reference.
+                        let scope: Vec<String> =
+                            task_stack.iter().map(|(id, _)| id.clone()).collect();
+                        let bang_count = bang_tokens.len();
+                        if !validate_ref_check(symbols, &scope, bang_count, &tok.text) {
+                            let k = scope.len();
+                            if bang_count > 0 && bang_count > k {
+                                let bang_start =
+                                    bang_tokens.first().map(|t| t.start).unwrap_or(tok.start);
+                                let bang_end =
+                                    bang_tokens.last().map(|t| t.end).unwrap_or(tok.start);
+                                diagnostics.push(Diagnostic {
+                                    range: Range {
+                                        start: bang_start,
+                                        end: bang_end,
+                                    },
+                                    severity: Some(DiagnosticSeverity::WARNING),
+                                    message: "dependency reference escapes beyond project root"
+                                        .into(),
+                                    ..Default::default()
+                                });
+                            } else {
+                                diagnostics.push(Diagnostic {
+                                    range: Range {
+                                        start: tok.start,
+                                        end: tok.end,
+                                    },
+                                    severity: Some(DiagnosticSeverity::ERROR),
+                                    message: format!("unresolved task: `{}`", tok.text),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                        bang_tokens.clear();
+                        needs_comma = true; // Require comma before next dep arg.
+                        continue; // Don't do scope tracking for dep identifiers.
+                    }
+                }
+
+                // Scope tracking for Ident tokens.
+                if tok.text == "depends" || tok.text == "precedes" {
+                    in_deps = true;
+                    needs_comma = false;
+                    bang_tokens.clear();
+                    sstate = SState::Scan;
+                } else if tok.text == "task" {
+                    sstate = SState::ExpectId;
+                    pending_id = None;
+                } else if sstate == SState::ExpectId {
+                    pending_id = Some(tok.text.clone());
+                    sstate = SState::BeforeLBrace;
+                }
+                // In Scan or BeforeLBrace with a non-"task" keyword: no change.
+            }
+
+            _ => {
+                if in_deps {
+                    if needs_comma {
+                        // Non-comma token after dep arg → end of dep list.
+                        in_deps = false;
+                        needs_comma = false;
+                        bang_tokens.clear();
+                    } else {
+                        // Unexpected token (string, number, …) before any arg —
+                        // just clear pending bangs and stay in deps mode.
+                        bang_tokens.clear();
+                    }
+                }
+                if sstate == SState::ExpectId {
+                    sstate = SState::Scan;
+                    pending_id = None;
+                }
+            }
+        }
+    }
+
+    diagnostics
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,6 +1001,88 @@ mod tests {
         }
         println!("\nSymbols:");
         print_symbols(&result.symbols, 0);
+    }
+
+    #[test]
+    fn valid_dep_no_diagnostic() {
+        // Absolute reference (0 bangs) to an existing task — no diagnostic expected.
+        let src = "task a \"A\" {}\ntask b \"B\" {\n  depends a\n}";
+        let result = parse(src);
+        let dep_diags: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                d.message.contains("unresolved task")
+                    || d.message.contains("escapes beyond")
+            })
+            .collect();
+        assert!(
+            dep_diags.is_empty(),
+            "valid absolute dep should have no diagnostic; got: {:?}",
+            dep_diags
+        );
+    }
+
+    #[test]
+    fn invalid_dep_produces_error() {
+        // Reference to a task id that doesn't exist.
+        let src = "task a \"A\" {}\ntask b \"B\" {\n  depends nonexistent\n}";
+        let result = parse(src);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                d.severity == Some(DiagnosticSeverity::ERROR)
+                    && d.message.contains("unresolved task")
+            })
+            .collect();
+        assert_eq!(
+            errors.len(),
+            1,
+            "should have exactly one unresolved-dep error; got: {:?}",
+            errors
+        );
+        assert!(errors[0].message.contains("nonexistent"));
+    }
+
+    #[test]
+    fn too_many_bangs_warning() {
+        // `a` is a top-level task (depth 1); `!!x` uses 2 bangs — one too many.
+        let src = "task x \"X\" {}\ntask a \"A\" {\n  depends !!x\n}";
+        let result = parse(src);
+        let warnings: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                d.severity == Some(DiagnosticSeverity::WARNING)
+                    && d.message.contains("escapes beyond")
+            })
+            .collect();
+        assert!(
+            !warnings.is_empty(),
+            "!! inside single top-level task should produce a warning; diagnostics: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn tutorial_no_dep_diagnostics() {
+        // All dependency references in tutorial.tjp should resolve cleanly.
+        let src = include_str!("../test/tutorial.tjp");
+        let result = parse(src);
+        let dep_diags: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                d.message.contains("unresolved task")
+                    || d.message.contains("escapes beyond")
+            })
+            .collect();
+        assert!(
+            dep_diags.is_empty(),
+            "tutorial.tjp should have no dependency diagnostics; got: {:?}",
+            dep_diags
+        );
     }
 }
 
@@ -799,6 +1117,9 @@ pub fn parse(src: &str) -> ParseResult {
             parser.advance();
         }
     }
+
+    let dep_diagnostics = validate_deps(src, &symbols);
+    diagnostics.extend(dep_diagnostics);
 
     ParseResult {
         diagnostics,
