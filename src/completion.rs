@@ -1,5 +1,6 @@
 use crate::hover;
 use crate::parser::{Lexer, Symbol, TokenKind};
+use crate::signature;
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position, SymbolKind};
 
 // ─── Position helper ──────────────────────────────────────────────────────────
@@ -286,8 +287,11 @@ pub fn completions(src: &str, cursor: Position, symbols: &[Symbol]) -> Vec<Compl
         return items;
     }
 
-    // ── ID completions based on the leading keyword of the current line ───────
-    let id_sym_kind: Option<SymbolKind> = match first_word.as_deref() {
+    // ── ID completions based on the active statement keyword ─────────────────
+    // Use active_context (which tracks across line boundaries) so that
+    // multi-line `depends` continuations also offer task-id completions.
+    let active_kw = signature::active_context(src, cursor).map(|(kw, _)| kw);
+    let id_sym_kind: Option<SymbolKind> = match active_kw.as_deref() {
         Some("depends") | Some("precedes") => Some(SymbolKind::FUNCTION),
         Some("allocate") | Some("responsible") | Some("managers") => Some(SymbolKind::OBJECT),
         Some("chargeset") | Some("balance") => Some(SymbolKind::VARIABLE),
@@ -429,6 +433,54 @@ mod tests {
         let syms = parser::parse(src).symbols;
         let items = completions(src, pos(0, 5), &syms);
         assert!(items.is_empty(), "no completions while typing task id");
+    }
+
+    #[test]
+    fn tutorial_depends_after_inserted_comma() {
+        let original = include_str!("../test/tutorial.tjp");
+        // Line 175 (1-indexed) = index 174 (0-indexed): "      depends !database, !backend"
+        let lines: Vec<&str> = original.lines().collect();
+        assert_eq!(lines[174].trim(), "depends !database, !backend");
+        // Simulate inserting ", " at the end of that line.
+        let modified: String = lines
+            .iter()
+            .enumerate()
+            .map(|(i, &line)| {
+                if i == 174 {
+                    format!("{}, ", line)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let syms = parser::parse(&modified).symbols;
+        let modified_line = modified.lines().nth(174).unwrap();
+        let cursor = pos(174, modified_line.len() as u32);
+        let items = completions(&modified, cursor, &syms);
+        let lbls = labels(&items);
+        assert!(
+            !items.is_empty(),
+            "should offer task ids after 'depends ... , '; got none. active_context dbg follows"
+        );
+        assert!(
+            lbls.iter().any(|l| l.starts_with("AcSo")),
+            "should include AcSo tasks; got: {:?}",
+            lbls
+        );
+    }
+
+    #[test]
+    fn depends_multiline_continuation() {
+        // Second dependency on a continuation line — cursor line does not start with "depends".
+        let mini = "task a \"A\" {}\ntask b \"B\" {}\ntask c \"C\" {\n  depends a,\n    \n}";
+        let syms = parser::parse(mini).symbols;
+        // Line 4, col 4 — indented blank line after "depends a,"
+        let items = completions(mini, pos(4, 4), &syms);
+        let lbls = labels(&items);
+        assert!(lbls.contains(&"a"), "should offer task id 'a' on continuation line");
+        assert!(lbls.contains(&"b"), "should offer task id 'b' on continuation line");
+        assert!(!lbls.contains(&"effort"), "no keyword completions on depends continuation");
     }
 
     #[test]
