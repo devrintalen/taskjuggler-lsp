@@ -51,6 +51,82 @@ Token token_at(const char *src, LspPos pos) {
     }
 }
 
+/* ── active_keyword_at ───────────────────────────────────────────────────── */
+
+ActiveKeyword active_keyword_at(const char *src, LspPos cursor) {
+    typedef struct { char *text; LspRange range; uint32_t depth; } KwEntry;
+
+    Lexer l;
+    lexer_init(&l, src);
+
+    uint32_t brace_depth = 0;
+    KwEntry  stack[128];
+    int      stack_n = 0;
+
+    for (;;) {
+        Token tok = lexer_next(&l);
+        if (tok.kind == TK_EOF) { token_free(&tok); break; }
+
+        /* Stop once a token starts past the cursor */
+        if (tok.start.line > cursor.line
+         || (tok.start.line == cursor.line
+          && tok.start.character > cursor.character)) {
+            token_free(&tok);
+            break;
+        }
+
+        switch (tok.kind) {
+        case TK_LINE_COMMENT:
+        case TK_BLOCK_COMMENT:
+            break;
+
+        case TK_LBRACE:
+            brace_depth++;
+            break;
+
+        case TK_RBRACE:
+            if (brace_depth > 0) brace_depth--;
+            /* Pop keywords at depths now deeper than the current level */
+            while (stack_n > 0 && stack[stack_n - 1].depth > brace_depth)
+                free(stack[--stack_n].text);
+            break;
+
+        case TK_IDENT:
+            if (keyword_docs(tok.text) != NULL) {
+                /* A new keyword at this depth terminates any previous one here */
+                while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth)
+                    free(stack[--stack_n].text);
+                if (stack_n < 128) {
+                    stack[stack_n++] = (KwEntry){
+                        strdup(tok.text),
+                        (LspRange){ tok.start, tok.end },
+                        brace_depth
+                    };
+                }
+            }
+            break;
+
+        default:
+            break;
+        }
+
+        token_free(&tok);
+    }
+
+    /* Return the innermost keyword at the current brace depth */
+    for (int i = stack_n - 1; i >= 0; i--) {
+        if (stack[i].depth == brace_depth) {
+            ActiveKeyword ak = { stack[i].text, stack[i].range };
+            for (int j = 0; j < stack_n; j++)
+                if (j != i) free(stack[j].text);
+            return ak;
+        }
+    }
+
+    for (int i = 0; i < stack_n; i++) free(stack[i].text);
+    return (ActiveKeyword){ NULL, {{0,0},{0,0}} };
+}
+
 /* ── keyword_docs ────────────────────────────────────────────────────────── */
 
 const char *keyword_docs(const char *kw) {

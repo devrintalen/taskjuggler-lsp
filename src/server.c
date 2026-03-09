@@ -359,37 +359,32 @@ static cJSON *handle_hover(cJSON *id, cJSON *params) {
     if (!d) return make_response(id, cJSON_CreateNull());
 
     LspPos pos = json_to_pos(pos_obj);
-    Token  tok = token_at(d->text, pos);
-    if (tok.kind == TK_EOF || !tok.text || !tok.text[0]) {
-        token_free(&tok);
-        return make_response(id, cJSON_CreateNull());
-    }
 
-    const char *docs = keyword_docs(tok.text);
-    if (!docs) {
-        token_free(&tok);
-        return make_response(id, cJSON_CreateNull());
-    }
+    ActiveKeyword ak = active_keyword_at(d->text, pos);
+    if (!ak.keyword) return make_response(id, cJSON_CreateNull());
+
+    const char *doc_text = keyword_docs(ak.keyword);
+    free(ak.keyword);
+    if (!doc_text) return make_response(id, cJSON_CreateNull());
 
     cJSON *contents = cJSON_CreateObject();
     cJSON_AddStringToObject(contents, "kind",  "markdown");
-    cJSON_AddStringToObject(contents, "value", docs);
+    cJSON_AddStringToObject(contents, "value", doc_text);
+
+    cJSON *range = cJSON_CreateObject();
+    cJSON *start = cJSON_CreateObject();
+    cJSON_AddNumberToObject(start, "line",      ak.range.start.line);
+    cJSON_AddNumberToObject(start, "character", ak.range.start.character);
+    cJSON *end = cJSON_CreateObject();
+    cJSON_AddNumberToObject(end, "line",      pos.line);
+    cJSON_AddNumberToObject(end, "character", pos.character);
+    cJSON_AddItemToObject(range, "start", start);
+    cJSON_AddItemToObject(range, "end",   end);
 
     cJSON *hover = cJSON_CreateObject();
     cJSON_AddItemToObject(hover, "contents", contents);
+    cJSON_AddItemToObject(hover, "range",    range);
 
-    cJSON *range = cJSON_CreateObject();
-    cJSON *st = cJSON_CreateObject();
-    cJSON_AddNumberToObject(st, "line",      tok.start.line);
-    cJSON_AddNumberToObject(st, "character", tok.start.character);
-    cJSON *en = cJSON_CreateObject();
-    cJSON_AddNumberToObject(en, "line",      tok.end.line);
-    cJSON_AddNumberToObject(en, "character", tok.end.character);
-    cJSON_AddItemToObject(range, "start", st);
-    cJSON_AddItemToObject(range, "end",   en);
-    cJSON_AddItemToObject(hover, "range", range);
-
-    token_free(&tok);
     return make_response(id, hover);
 }
 

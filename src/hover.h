@@ -26,3 +26,19 @@ Token token_at(const char *src, LspPos pos);
 
 /* Return Markdown documentation for a TJP keyword, or NULL if unknown. */
 const char *keyword_docs(const char *kw);
+
+/*
+ * Find the keyword that is "active" at cursor — the most recent documentable
+ * keyword whose argument list encompasses the cursor position (i.e. it has
+ * been started but not yet terminated by a deeper block or a sibling keyword).
+ *
+ * result.keyword is heap-allocated; caller must free it.
+ * result.range is the span of the keyword token itself (not its arguments).
+ * Returns {NULL, {0}} when no active keyword exists.
+ */
+typedef struct {
+    char    *keyword;
+    LspRange range;
+} ActiveKeyword;
+
+ActiveKeyword active_keyword_at(const char *src, LspPos cursor);
