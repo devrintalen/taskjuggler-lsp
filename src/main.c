@@ -23,6 +23,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Maximum allowed length (in bytes) for a message */
+#define CONTENT_LENGTH_MAX 2056
+
 /* Read one LSP message from stdin.
  * Returns heap-allocated body string, or NULL on EOF/error.
  * Caller must free. */
@@ -43,7 +46,8 @@ static char *read_message(void) {
             content_length = atoi(line + 16);
     }
 
-    if (content_length <= 0) return NULL;
+    if (content_length <= 0 || content_length >= CONTENT_LENGTH_MAX)
+        return NULL;
 
     char *buf = malloc((size_t)content_length + 1);
     if (!buf) return NULL;
