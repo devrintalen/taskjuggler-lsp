@@ -24,7 +24,7 @@
 #include <string.h>
 
 /* Maximum allowed length (in bytes) for a message */
-#define CONTENT_LENGTH_MAX 2056
+#define CONTENT_LENGTH_MAX 4096
 
 /* Read one LSP message from stdin.
  * Returns heap-allocated body string, or NULL on EOF/error.
