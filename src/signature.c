@@ -167,16 +167,17 @@ static cJSON *make_sig_json(const SigDef *def, uint32_t active_param) {
     cJSON_AddStringToObject(doc_obj, "value", def->doc);
     cJSON_AddItemToObject(sig, "documentation", doc_obj);
     cJSON_AddItemToObject(sig, "parameters", param_arr);
+    /* LSP 3.16: activeParameter lives inside SignatureInformation */
+    if (nparams > 0)
+        cJSON_AddNumberToObject(sig, "activeParameter", (double)clamped);
+    else
+        cJSON_AddNullToObject(sig, "activeParameter");
 
     cJSON *root = cJSON_CreateObject();
     cJSON *sigs = cJSON_CreateArray();
     cJSON_AddItemToArray(sigs, sig);
     cJSON_AddItemToObject(root, "signatures", sigs);
     cJSON_AddNumberToObject(root, "activeSignature", 0);
-    if (nparams > 0)
-        cJSON_AddNumberToObject(root, "activeParameter", (double)clamped);
-    else
-        cJSON_AddNullToObject(root, "activeParameter");
 
     return root;
 }
