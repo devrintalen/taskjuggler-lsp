@@ -69,7 +69,7 @@ impl LanguageServer for Backend {
                     work_done_progress_options: Default::default(),
                 }),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![",".to_string(), " ".to_string()]),
+                    trigger_characters: Some(vec![",".to_string(), " ".to_string(), "!".to_string()]),
                     resolve_provider: Some(false),
                     work_done_progress_options: Default::default(),
                     all_commit_characters: None,

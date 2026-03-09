@@ -469,6 +469,45 @@ fn is_symbol_keyword(s: &str) -> bool {
     matches!(s, "project" | "task" | "resource" | "account" | "shift")
 }
 
+/// Task-body statement keywords that can appear on the line after a `depends`
+/// list.  Used to terminate dep-arg collection when no comma precedes them.
+fn is_task_attr_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "effort"
+            | "duration"
+            | "length"
+            | "milestone"
+            | "scheduled"
+            | "allocate"
+            | "responsible"
+            | "managers"
+            | "start"
+            | "end"
+            | "maxstart"
+            | "maxend"
+            | "minstart"
+            | "minend"
+            | "priority"
+            | "complete"
+            | "note"
+            | "rate"
+            | "efficiency"
+            | "limits"
+            | "overtime"
+            | "statusnote"
+            | "dailyworkinghours"
+            | "weeklyworkinghours"
+            | "outputdir"
+            | "purge"
+            | "charge"
+            | "chargeset"
+            | "shift"
+            | "credit"
+            | "debit"
+    )
+}
+
 /// Broader set of declaration keywords used as "stop" markers when skipping
 /// argument lists, to avoid accidentally consuming a following declaration.
 fn is_decl_keyword(s: &str) -> bool {
@@ -870,9 +909,9 @@ fn validate_deps(src: &str, symbols: &[Symbol]) -> Vec<Diagnostic> {
 
             TokenKind::Ident => {
                 if in_deps {
-                    if is_decl_keyword(&tok.text) {
-                        // A declaration keyword ends the deps list; fall through
-                        // to scope-tracking below.
+                    if is_decl_keyword(&tok.text) || is_task_attr_keyword(&tok.text) {
+                        // Any recognised statement keyword ends the deps list;
+                        // fall through to scope-tracking below.
                         in_deps = false;
                         needs_comma = false;
                         bang_tokens.clear();

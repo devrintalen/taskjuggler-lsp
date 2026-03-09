@@ -411,16 +411,30 @@ pub fn completions(src: &str, cursor: Position, symbols: &[Symbol]) -> Vec<Compl
 
     if let Some(kind) = id_sym_kind {
         // For depends/precedes, offer scope-relative IDs based on leading `!` count.
-        // n=0 bangs → absolute/global lookup (all IDs).
-        // n≥1 bangs → look in scope[..k-n] (n levels up from the current task's parent).
-        let ids: Vec<(String, String)> =
+        // n=0 bangs inside a task → current task's own children (bare id = child ref).
+        // n=0 bangs at top level (no task scope) → global IDs.
+        // n≥1 bangs → look in scope[..k-n] (siblings at n=1, parent's siblings at n=2, …).
+        // TODO: filter the current task itself from n≥1 bang candidates.
+        //
+        // dep_filter_prefix: the "!" characters that precede the id at the cursor.
+        // Set as filter_text on items so that clients filtering by the `!` prefix
+        // (e.g. after a backspace) still see the items instead of an empty list.
+        let (ids, dep_filter_prefix): (Vec<(String, String)>, String) =
             if matches!(active_kw.as_deref(), Some("depends") | Some("precedes")) {
                 let scope = current_task_scope(src, cursor);
                 let bang_count = count_leading_bangs(src, cursor);
-                if bang_count == 0 || scope.is_empty() {
-                    // Absolute reference or not inside any task — global IDs.
+                let bang_prefix = "!".repeat(bang_count);
+                let ids = if scope.is_empty() {
+                    // Not inside any task — offer all global IDs.
                     let mut v = Vec::new();
                     collect_ids(symbols, kind, "", &mut v);
+                    v
+                } else if bang_count == 0 {
+                    // Inside a task with 0 bangs: show the current task's own children.
+                    // Use ! to get sibling suggestions, !! for parent's siblings, etc.
+                    let children = find_scope_children(symbols, &scope);
+                    let mut v = Vec::new();
+                    collect_ids(children, kind, "", &mut v);
                     v
                 } else {
                     let k = scope.len();
@@ -433,11 +447,12 @@ pub fn completions(src: &str, cursor: Position, symbols: &[Symbol]) -> Vec<Compl
                         collect_ids(children, kind, "", &mut v);
                         v
                     }
-                }
+                };
+                (ids, bang_prefix)
             } else {
                 let mut v = Vec::new();
                 collect_ids(symbols, kind, "", &mut v);
-                v
+                (v, String::new())
             };
         let partial_lc = partial.to_lowercase();
         for (id, name) in ids {
@@ -446,18 +461,24 @@ pub fn completions(src: &str, cursor: Position, symbols: &[Symbol]) -> Vec<Compl
             let name_match =
                 !partial.is_empty() && name.to_lowercase().contains(&partial_lc);
             if id_match || name_match {
+                // Compute filter_text:
+                // - name-only match: use partial so client doesn't discard the item.
+                // - bang-prefix dep (no partial word yet): prepend bangs so that
+                //   clients filtering by `!` or `!!` as prefix keep the item visible,
+                //   e.g. after a backspace without a fresh server request.
+                let filter_text = if name_match && !id_match {
+                    Some(partial.clone())
+                } else if !dep_filter_prefix.is_empty() && partial.is_empty() {
+                    Some(format!("{}{}", dep_filter_prefix, id))
+                } else {
+                    None
+                };
                 items.push(CompletionItem {
                     label: id,
                     kind: Some(completion_kind_for(kind)),
                     detail: Some(name),
                     sort_text: Some("0".into()), // ids sort before keywords
-                    // When matched only by name, set filter_text to the typed
-                    // partial so client-side filtering doesn't discard the item.
-                    filter_text: if name_match && !id_match {
-                        Some(partial.clone())
-                    } else {
-                        None
-                    },
+                    filter_text,
                     ..Default::default()
                 });
             }
@@ -491,12 +512,6 @@ pub fn completions(src: &str, cursor: Position, symbols: &[Symbol]) -> Vec<Compl
 mod tests {
     use super::*;
     use crate::parser;
-
-    fn tutorial() -> (String, Vec<Symbol>) {
-        let src = include_str!("../test/tutorial.tjp").to_string();
-        let result = parser::parse(&src);
-        (src, result.symbols)
-    }
 
     fn labels(items: &[CompletionItem]) -> Vec<&str> {
         let mut v: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
@@ -537,21 +552,16 @@ mod tests {
 
     #[test]
     fn depends_id_completion() {
-        let (src, syms) = tutorial();
-        // Line of `depends !deliveries.start` in tutorial is line 137 (0-based).
-        // Place cursor after "depends " on that line.
-        // We synthesise a simpler scenario: just check that task ids are offered.
-        let mini = "task a \"A\" {}\ntask b \"B\" {}\ntask c \"C\" {\n  depends \n}";
+        // Use `!` so we get sibling IDs (0 bangs = current task's own children,
+        // which would be empty for task c that has no subtasks).
+        let mini = "task a \"A\" {}\ntask b \"B\" {}\ntask c \"C\" {\n  depends !\n}";
         let syms2 = parser::parse(mini).symbols;
-        let items = completions(mini, pos(3, 10), &syms2); // after "  depends "
+        let items = completions(mini, pos(3, 11), &syms2); // after "  depends !"
         let lbls = labels(&items);
         assert!(lbls.contains(&"a"), "should offer task id 'a'");
         assert!(lbls.contains(&"b"), "should offer task id 'b'");
         // Should not offer keywords.
         assert!(!lbls.contains(&"effort"), "should not offer keywords in depends context");
-
-        // Also verify against the full tutorial: depends offers task ids.
-        let _ = (src, syms); // used above
     }
 
     #[test]
@@ -591,13 +601,13 @@ mod tests {
         // Line 175 (1-indexed) = index 174 (0-indexed): "      depends !database, !backend"
         let lines: Vec<&str> = original.lines().collect();
         assert_eq!(lines[174].trim(), "depends !database, !backend");
-        // Simulate inserting ", " at the end of that line.
+        // Simulate appending ", !" at the end of that line (1 bang → siblings).
         let modified: String = lines
             .iter()
             .enumerate()
             .map(|(i, &line)| {
                 if i == 174 {
-                    format!("{}, ", line)
+                    format!("{}, !", line)
                 } else {
                     line.to_string()
                 }
@@ -611,11 +621,13 @@ mod tests {
         let lbls = labels(&items);
         assert!(
             !items.is_empty(),
-            "should offer task ids after 'depends ... , '; got none. active_context dbg follows"
+            "should offer task ids after 'depends ... , !'; got none"
         );
+        // Cursor is inside AcSo.software.gui with 1 bang → siblings
+        // (children of AcSo.software): database, gui, backend.
         assert!(
-            lbls.iter().any(|l| l.starts_with("AcSo")),
-            "should include AcSo tasks; got: {:?}",
+            lbls.iter().any(|l| matches!(*l, "database" | "gui" | "backend")),
+            "should include siblings of AcSo.software.gui; got: {:?}",
             lbls
         );
     }
@@ -623,10 +635,11 @@ mod tests {
     #[test]
     fn depends_multiline_continuation() {
         // Second dependency on a continuation line — cursor line does not start with "depends".
-        let mini = "task a \"A\" {}\ntask b \"B\" {}\ntask c \"C\" {\n  depends a,\n    \n}";
+        // Use `!` on the continuation line (0 bangs would show current task's children = none).
+        let mini = "task a \"A\" {}\ntask b \"B\" {}\ntask c \"C\" {\n  depends a,\n    !\n}";
         let syms = parser::parse(mini).symbols;
-        // Line 4, col 4 — indented blank line after "depends a,"
-        let items = completions(mini, pos(4, 4), &syms);
+        // Line 4, col 5 — after the `!` on the continuation line
+        let items = completions(mini, pos(4, 5), &syms);
         let lbls = labels(&items);
         assert!(lbls.contains(&"a"), "should offer task id 'a' on continuation line");
         assert!(lbls.contains(&"b"), "should offer task id 'b' on continuation line");
@@ -674,12 +687,104 @@ mod tests {
     }
 
     #[test]
+    fn tutorial_gui_scope_completion() {
+        let original = include_str!("../test/tutorial.tjp");
+        let lines: Vec<&str> = original.lines().collect();
+        // Line 175 (1-indexed) = index 174 (0-indexed): "      depends !database, !backend"
+        assert_eq!(lines[174].trim(), "depends !database, !backend");
+
+        // Insert "      depends <suffix>" after line 174 (new line is at index 175).
+        const INSERT_IDX: usize = 175;
+        let make_src = |suffix: &str| -> String {
+            let new_line = format!("      depends {}", suffix);
+            let mut v: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+            v.insert(INSERT_IDX, new_line);
+            v.join("\n")
+        };
+
+        // ── Scenario 1: "depends " (0 bangs) ─────────────────────────────────
+        // task gui has no child tasks, so the completion list should be empty.
+        {
+            let src = make_src("");
+            let syms = parser::parse(&src).symbols;
+            let line_text = src.lines().nth(INSERT_IDX).unwrap();
+            let cursor = pos(INSERT_IDX as u32, line_text.len() as u32);
+            let items = completions(&src, cursor, &syms);
+            assert!(
+                items.is_empty(),
+                "0 bangs inside gui (no children): expected empty; got: {:?}",
+                labels(&items)
+            );
+        }
+
+        // ── Scenario 2: "depends !" (1 bang) ──────────────────────────────────
+        // 1 bang → siblings = children of AcSo.software: database, gui, backend.
+        {
+            let src = make_src("!");
+            let syms = parser::parse(&src).symbols;
+            let line_text = src.lines().nth(INSERT_IDX).unwrap();
+            let cursor = pos(INSERT_IDX as u32, line_text.len() as u32);
+            let items = completions(&src, cursor, &syms);
+            let lbls = labels(&items);
+            assert!(
+                lbls.contains(&"database"),
+                "1 bang: expected 'database'; got: {:?}",
+                lbls
+            );
+            assert!(
+                lbls.contains(&"backend"),
+                "1 bang: expected 'backend'; got: {:?}",
+                lbls
+            );
+            // TODO: filter current task — gui should eventually be excluded.
+            // assert!(!lbls.contains(&"gui"), "current task should not appear");
+        }
+
+        // ── Scenario 3: "depends !!" (2 bangs) ───────────────────────────────
+        // 2 bangs → children of AcSo: spec, software (+subtasks), test (+subtasks),
+        // manual, deliveries (+subtasks).
+        {
+            let src = make_src("!!");
+            let syms = parser::parse(&src).symbols;
+            let line_text = src.lines().nth(INSERT_IDX).unwrap();
+            let cursor = pos(INSERT_IDX as u32, line_text.len() as u32);
+            let items = completions(&src, cursor, &syms);
+            let lbls = labels(&items);
+            for expected_id in &[
+                "spec",
+                "software",
+                "software.database",
+                "software.backend",
+                "test",
+                "test.alpha",
+                "test.beta",
+                "manual",
+                "deliveries",
+                "deliveries.start",
+                "deliveries.prev",
+                "deliveries.beta",
+                "deliveries.done",
+            ] {
+                assert!(
+                    lbls.contains(expected_id),
+                    "2 bangs: expected '{}'; got: {:?}",
+                    expected_id,
+                    lbls
+                );
+            }
+            // TODO: filter current task — software.gui should eventually be excluded.
+            // assert!(!lbls.contains(&"software.gui"), "current task should not appear");
+        }
+    }
+
+    #[test]
     fn depends_id_matches_by_name() {
         // "version" is a substring of "Beta version" but not a prefix of id "beta".
-        let mini = "task beta \"Beta version\" {}\ntask other \"Something\" {}\ntask c \"C\" {\n  depends version\n}";
+        // Use `!` so the sibling tasks are in scope (0 bangs = c's children = none).
+        let mini = "task beta \"Beta version\" {}\ntask other \"Something\" {}\ntask c \"C\" {\n  depends !version\n}";
         let syms = parser::parse(mini).symbols;
-        // col 16 = last char of "version" → partial_word returns "version"
-        let items = completions(mini, pos(3, 16), &syms);
+        // col 18 = last char of "version" after "  depends !" → partial_word returns "version"
+        let items = completions(mini, pos(3, 18), &syms);
         let lbls = labels(&items);
         assert!(
             lbls.contains(&"beta"),
@@ -693,11 +798,13 @@ mod tests {
 
     #[test]
     fn qualified_ids_for_nested_tasks() {
-        let mini = "task parent \"P\" {\n  task child \"C\" {}\n}\ntask other \"O\" {\n  depends \n}";
+        // Use `!` so we get sibling scope (0 bangs = other's own children = none).
+        let mini = "task parent \"P\" {\n  task child \"C\" {}\n}\ntask other \"O\" {\n  depends !\n}";
         let syms = parser::parse(mini).symbols;
-        let items = completions(mini, pos(4, 10), &syms);
+        // col 11 = after "  depends !"
+        let items = completions(mini, pos(4, 11), &syms);
         let lbls = labels(&items);
-        // Top-level task ids.
+        // Top-level task ids (1 bang from other → root children).
         assert!(lbls.contains(&"parent"), "top-level id");
         assert!(lbls.contains(&"other"), "top-level id");
         // Qualified nested id.
