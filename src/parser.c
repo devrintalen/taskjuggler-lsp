@@ -525,14 +525,13 @@ static Symbol *parse_items(Parser *p, ParseResult *r, int *out_n) {
             if (is_symbol_keyword(kw.text)) {
                 int ok = 0;
                 Symbol sym = try_parse_symbol(p, r, kw, &ok);
+                /* try_parse_symbol always takes ownership of kw and frees it */
                 if (ok) {
                     if (n >= cap) {
                         cap = cap ? cap * 2 : 4;
                         syms = realloc(syms, cap * sizeof(Symbol));
                     }
                     syms[n++] = sym;
-                } else {
-                    token_free(&kw);
                 }
             } else {
                 skip_item_tail(p);

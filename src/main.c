@@ -68,6 +68,7 @@ static void write_message(const char *msg) {
 }
 
 int main(void) {
+    server_init();
     for (;;) {
         char *body = read_message();
         if (!body) break;

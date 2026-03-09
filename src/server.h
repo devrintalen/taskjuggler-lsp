@@ -21,6 +21,8 @@
 
 #include <cjson/cJSON.h>
 
+void server_init();
+
 /* Process one JSON-RPC request/notification.
  * Returns a heap-allocated JSON string response, or NULL for notifications.
  * Caller must free the returned string. */

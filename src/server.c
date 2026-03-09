@@ -116,24 +116,6 @@ static void publish_diagnostics(const char *uri, const ParseResult *r) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   on_change: parse + store + publish
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-static void on_change(const char *uri, const char *text) {
-    Document *d = doc_find(uri);
-    if (!d) d = doc_alloc(uri);
-    if (!d) return;
-
-    free(d->text);
-    d->text = strdup(text);
-
-    parse_result_free(&d->parse);
-    d->parse = parse(text);
-
-    publish_diagnostics(uri, &d->parse);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
    JSON helpers
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -261,6 +243,84 @@ static cJSON *handle_initialize(cJSON *id, cJSON *params) {
 
 static cJSON *handle_shutdown(cJSON *id) {
     return make_response(id, cJSON_CreateNull());
+}
+
+static void handle_didopen(cJSON *id, cJSON *params) {
+    (void)id;
+    cJSON *tdi = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+    if (!tdi) return;
+
+    const char *uri  = json_str(tdi, "uri");
+    const char *text = json_str(tdi, "text");
+    if (!uri || !text) return;
+
+    int i = 0;
+
+    /* Check each open document */
+    for (i = 0; i < MAX_DOCS; i++) {
+        if (docs[i].in_use && strcmp(docs[i].uri, uri) == 0) {
+            /* The document is already opened, signal an error */
+            return;
+        } else if (!docs[i].in_use) {
+            /* Found a free document slot, use it */
+            break;
+        }
+    }
+
+    if (i == MAX_DOCS && docs[i - 1].in_use) {
+        /* No free document slots */
+        return;
+    }
+
+    docs[i].in_use = 1;
+    docs[i].uri    = strdup(uri);
+    docs[i].text   = strdup(text);
+    docs[i].parse  = parse(text);
+
+    publish_diagnostics(uri, &docs[i].parse);
+}
+
+static void handle_didchange(cJSON *params) {
+    cJSON *tdi     = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+    cJSON *changes = cJSON_GetObjectItemCaseSensitive(params, "contentChanges");
+    if (!tdi || !changes || !cJSON_IsArray(changes)) return;
+
+    const char *uri = json_str(tdi, "uri");
+    if (!uri) return;
+
+    int n = cJSON_GetArraySize(changes);
+    if (n <= 0) return;
+
+    /* Use the last change (full sync) */
+    cJSON      *last = cJSON_GetArrayItem(changes, n - 1);
+    const char *text = json_str(last, "text");
+    if (!text) return;
+
+    Document *d = doc_find(uri);
+    if (!d) d = doc_alloc(uri);
+    if (!d) return;
+
+    free(d->text);
+    d->text = strdup(text);
+    parse_result_free(&d->parse);
+    d->parse = parse(text);
+    publish_diagnostics(uri, &d->parse);
+}
+
+static void handle_didclose(cJSON *params) {
+    cJSON *tdi = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+    if (!tdi) return;
+
+    const char *uri = json_str(tdi, "uri");
+    if (!uri) return;
+
+    Document *d = doc_find(uri);
+    if (!d) return;
+
+    /* Publish empty diagnostics to clear client-side errors */
+    ParseResult empty = {0};
+    publish_diagnostics(uri, &empty);
+    doc_free(d);
 }
 
 static cJSON *handle_document_symbol(cJSON *id, cJSON *params) {
@@ -432,41 +492,14 @@ char *server_process(const char *json_text) {
         exit(0);
 
     } else if (strcmp(m, "textDocument/didOpen") == 0) {
-        cJSON *tdi = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
-        if (tdi) {
-            const char *uri  = json_str(tdi, "uri");
-            const char *text = json_str(tdi, "text");
-            if (uri && text) on_change(uri, text);
-        }
+	 handle_didopen(id_item, params);
+	 /* no response needed */
 
     } else if (strcmp(m, "textDocument/didChange") == 0) {
-        cJSON *tdi = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
-        cJSON *changes = cJSON_GetObjectItemCaseSensitive(params, "contentChanges");
-        if (tdi && changes && cJSON_IsArray(changes)) {
-            const char *uri = json_str(tdi, "uri");
-            /* Use the last change (full sync) */
-            int n = cJSON_GetArraySize(changes);
-            if (n > 0 && uri) {
-                cJSON *last = cJSON_GetArrayItem(changes, n - 1);
-                const char *text = json_str(last, "text");
-                if (text) on_change(uri, text);
-            }
-        }
+        handle_didchange(params);
 
     } else if (strcmp(m, "textDocument/didClose") == 0) {
-        cJSON *tdi = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
-        if (tdi) {
-            const char *uri = json_str(tdi, "uri");
-            if (uri) {
-                Document *d = doc_find(uri);
-                if (d) {
-                    /* Publish empty diagnostics */
-                    ParseResult empty = {0};
-                    publish_diagnostics(uri, &empty);
-                    doc_free(d);
-                }
-            }
-        }
+        handle_didclose(params);
 
     } else if (strcmp(m, "textDocument/documentSymbol") == 0) {
         resp = handle_document_symbol(id_item, params);
@@ -495,4 +528,11 @@ char *server_process(const char *json_text) {
     char *text = cJSON_PrintUnformatted(resp);
     cJSON_Delete(resp);
     return text;
+}
+
+void server_init() {
+     // Initialize array of Document objects
+     for (int i=0; i<MAX_DOCS; i++) {
+	  docs[i].in_use = 0;
+     }
 }
