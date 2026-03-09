@@ -32,50 +32,45 @@ static int pos_in(LspPos p, LspPos start, LspPos end) {
     return after && before;
 }
 
-Token token_at(const char *src, LspPos pos) {
-    Lexer l;
-    lexer_init(&l, src);
-    for (;;) {
-        Token t = lexer_next(&l);
-        if (t.kind == TK_EOF) return t;
+Token token_at(const Token *tokens, int num_tokens, LspPos pos) {
+    for (int i = 0; i < num_tokens; i++) {
+        const Token *t = &tokens[i];
+        if (t->kind == TK_EOF) break;
 
         /* Stop once we've passed the requested position */
-        if (t.start.line > pos.line
-         || (t.start.line == pos.line && t.start.character > pos.character)) {
-            token_free(&t);
+        if (t->start.line > pos.line
+         || (t->start.line == pos.line && t->start.character > pos.character))
             return (Token){ TK_EOF, pos, pos, strdup("") };
-        }
 
-        if (pos_in(pos, t.start, t.end)) return t;
-        token_free(&t);
+        if (pos_in(pos, t->start, t->end)) {
+            Token copy = *t;
+            copy.text = strdup(t->text ? t->text : "");
+            return copy;
+        }
     }
+    return (Token){ TK_EOF, pos, pos, strdup("") };
 }
 
 /* ── active_keyword_at ───────────────────────────────────────────────────── */
 
-ActiveKeyword active_keyword_at(const char *src, LspPos cursor) {
+ActiveKeyword active_keyword_at(const Token *tokens, int num_tokens, LspPos cursor) {
     typedef struct { char *text; LspRange range; uint32_t depth; } KwEntry;
-
-    Lexer l;
-    lexer_init(&l, src);
 
     uint32_t brace_depth = 0;
     KwEntry  stack[128];
     int      stack_n = 0;
 
-    for (;;) {
-        Token tok = lexer_next(&l);
-        if (tok.kind == TK_EOF) { token_free(&tok); break; }
+    for (int i = 0; i < num_tokens; i++) {
+        const Token *tok = &tokens[i];
+        if (tok->kind == TK_EOF) break;
 
         /* Stop once a token starts past the cursor */
-        if (tok.start.line > cursor.line
-         || (tok.start.line == cursor.line
-          && tok.start.character > cursor.character)) {
-            token_free(&tok);
+        if (tok->start.line > cursor.line
+         || (tok->start.line == cursor.line
+          && tok->start.character > cursor.character))
             break;
-        }
 
-        switch (tok.kind) {
+        switch (tok->kind) {
         case TK_LINE_COMMENT:
         case TK_BLOCK_COMMENT:
             break;
@@ -86,20 +81,18 @@ ActiveKeyword active_keyword_at(const char *src, LspPos cursor) {
 
         case TK_RBRACE:
             if (brace_depth > 0) brace_depth--;
-            /* Pop keywords at depths now deeper than the current level */
             while (stack_n > 0 && stack[stack_n - 1].depth > brace_depth)
                 free(stack[--stack_n].text);
             break;
 
         case TK_IDENT:
-            if (keyword_docs(tok.text) != NULL) {
-                /* A new keyword at this depth terminates any previous one here */
+            if (keyword_docs(tok->text) != NULL) {
                 while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth)
                     free(stack[--stack_n].text);
                 if (stack_n < 128) {
                     stack[stack_n++] = (KwEntry){
-                        strdup(tok.text),
-                        (LspRange){ tok.start, tok.end },
+                        strdup(tok->text),
+                        (LspRange){ tok->start, tok->end },
                         brace_depth
                     };
                 }
@@ -109,8 +102,6 @@ ActiveKeyword active_keyword_at(const char *src, LspPos cursor) {
         default:
             break;
         }
-
-        token_free(&tok);
     }
 
     /* Return the innermost keyword at the current brace depth */

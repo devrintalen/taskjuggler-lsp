@@ -122,7 +122,7 @@ task AcSo "Accounting Software" {
 
   task spec "Specification" {
     # The effort to finish this task is 20 man-days.
-    effort 20d
+    effort 20d 
     # Now we use the macro declared above to allocate the resources
     # for this task. Because they can work in parallel, they may finish this
     # task earlier than in 20 working-days.

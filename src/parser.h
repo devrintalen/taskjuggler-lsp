@@ -92,15 +92,24 @@ typedef struct {
     char     *message; /* heap-allocated */
 } Diagnostic;
 
+/* ── SemanticSpan ─────────────────────────────────────────────────────────── */
+
+typedef struct { uint32_t line, col, len; } SemanticSpan;
+
 /* ── ParseResult ─────────────────────────────────────────────────────────── */
 
 typedef struct {
-    Diagnostic *diagnostics;
-    int         num_diagnostics;
-    int         diag_cap;
-    Symbol     *symbols;
-    int         num_symbols;
-    int         sym_cap;
+    Diagnostic  *diagnostics;
+    int          num_diagnostics;
+    int          diag_cap;
+    Symbol      *symbols;
+    int          num_symbols;
+    int          sym_cap;
+    SemanticSpan *sem_spans;
+    int           num_sem_spans;
+    int           sem_cap;
+    Token        *tokens;
+    int           num_tokens;
 } ParseResult;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */

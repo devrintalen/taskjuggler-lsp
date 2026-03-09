@@ -419,6 +419,10 @@ void parse_result_free(ParseResult *r) {
     for (int i = 0; i < r->num_symbols; i++)
         symbol_free(&r->symbols[i]);
     free(r->symbols);
+    free(r->sem_spans);
+    for (int i = 0; i < r->num_tokens; i++)
+        token_free(&r->tokens[i]);
+    free(r->tokens);
     memset(r, 0, sizeof(*r));
 }
 
@@ -438,6 +442,38 @@ static void push_symbol(ParseResult *r, Symbol s) {
         r->sym_cap = nc;
     }
     r->symbols[r->num_symbols++] = s;
+}
+
+static void push_sem_span(ParseResult *r, uint32_t line, uint32_t col, uint32_t len) {
+    if (r->num_sem_spans >= r->sem_cap) {
+        int nc = r->sem_cap ? r->sem_cap * 2 : 16;
+        r->sem_spans = realloc(r->sem_spans, nc * sizeof(SemanticSpan));
+        r->sem_cap = nc;
+    }
+    r->sem_spans[r->num_sem_spans++] = (SemanticSpan){ line, col, len };
+}
+
+/* Scan the token array for scissors strings and split into per-line spans. */
+static void collect_sem_spans(ParseResult *r, const Token *tokens, int num_tokens) {
+    for (int i = 0; i < num_tokens; i++) {
+        if (tokens[i].kind != TK_MULTI_LINE_STR) continue;
+
+        uint32_t    line = tokens[i].start.line;
+        uint32_t    col  = tokens[i].start.character;
+        const char *p    = tokens[i].text;
+
+        while (*p) {
+            const char *q = p;
+            while (*q && *q != '\n') q++;
+            const char *end = q;
+            if (end > p && *(end - 1) == '\r') end--;
+            uint32_t len = (uint32_t)(end - p);
+            if (len > 0) push_sem_span(r, line, col, len);
+            if (*q == '\n') { q++; line++; col = 0; }
+            else break;
+            p = q;
+        }
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -467,10 +503,6 @@ static void parser_init(Parser *p, const char *src) {
     }
 }
 
-static void parser_free(Parser *p) {
-    for (int i = 0; i < p->n; i++) token_free(&p->tokens[i]);
-    free(p->tokens);
-}
 
 static Token *parser_peek(Parser *p) {
     return &p->tokens[p->pos];
@@ -716,36 +748,10 @@ static int validate_ref(const Symbol *syms, int nsym,
     return resolve_from(ctx, nctx, segs, nseg);
 }
 
-/* Token queue for bang collection */
-typedef struct {
-    Token *toks;
-    int    n, cap;
-} TokBuf;
-
-static void tb_push(TokBuf *tb, Token t) {
-    if (tb->n >= tb->cap) {
-        tb->cap = tb->cap ? tb->cap * 2 : 8;
-        tb->toks = realloc(tb->toks, tb->cap * sizeof(Token));
-    }
-    tb->toks[tb->n++] = t;
-}
-
-static void tb_clear(TokBuf *tb) {
-    for (int i = 0; i < tb->n; i++) token_free(&tb->toks[i]);
-    tb->n = 0;
-}
-
-static void tb_free(TokBuf *tb) {
-    tb_clear(tb);
-    free(tb->toks);
-}
-
-static void validate_deps(const char *src, const Symbol *syms, int nsym,
+static void validate_deps(const Token *tokens, int num_tokens,
+                           const Symbol *syms, int nsym,
                            ParseResult *r) {
     typedef enum { SS_SCAN, SS_EXPECT_ID, SS_BEFORE_LBRACE } SState;
-
-    Lexer l;
-    lexer_init(&l, src);
 
     SState sstate     = SS_SCAN;
     char  *pending_id = NULL;
@@ -758,21 +764,21 @@ static void validate_deps(const char *src, const Symbol *syms, int nsym,
     uint32_t  ts_dep[128];
     int       ts_n = 0;
 
-    TokBuf bangs = {0};
+    /* Bang tracking (replaces TokBuf) */
+    int    bang_count       = 0;
+    LspPos bang_first_start = {0};
+    LspPos bang_last_end    = {0};
 
-    for (;;) {
-        Token tok = lexer_next(&l);
-        if (tok.kind == TK_EOF) { token_free(&tok); break; }
-        if (tok.kind == TK_LINE_COMMENT || tok.kind == TK_BLOCK_COMMENT) {
-            token_free(&tok);
-            continue;
-        }
+    for (int ti = 0; ti < num_tokens; ti++) {
+        const Token *tok = &tokens[ti];
+        if (tok->kind == TK_EOF) break;
+        if (tok->kind == TK_LINE_COMMENT || tok->kind == TK_BLOCK_COMMENT) continue;
 
-        switch (tok.kind) {
+        switch (tok->kind) {
         case TK_LBRACE:
             in_deps     = 0;
             needs_comma = 0;
-            tb_clear(&bangs);
+            bang_count  = 0;
             brace_depth++;
             if (sstate == SS_BEFORE_LBRACE && pending_id) {
                 if (ts_n < 128) {
@@ -785,13 +791,12 @@ static void validate_deps(const char *src, const Symbol *syms, int nsym,
             free(pending_id);
             pending_id = NULL;
             sstate     = SS_SCAN;
-            token_free(&tok);
             break;
 
         case TK_RBRACE:
             in_deps     = 0;
             needs_comma = 0;
-            tb_clear(&bangs);
+            bang_count  = 0;
             /* pop tasks at this depth */
             while (ts_n > 0 && ts_dep[ts_n - 1] >= (uint32_t)brace_depth) {
                 free(ts_ids[--ts_n]);
@@ -800,7 +805,6 @@ static void validate_deps(const char *src, const Symbol *syms, int nsym,
             sstate     = SS_SCAN;
             free(pending_id);
             pending_id = NULL;
-            token_free(&tok);
             break;
 
         case TK_BANG:
@@ -808,85 +812,77 @@ static void validate_deps(const char *src, const Symbol *syms, int nsym,
                 if (needs_comma) {
                     in_deps     = 0;
                     needs_comma = 0;
-                    tb_clear(&bangs);
+                    bang_count  = 0;
                 } else {
-                    tb_push(&bangs, tok);
-                    tok.text = NULL; /* ownership transferred */
-                    break;
+                    if (bang_count == 0) bang_first_start = tok->start;
+                    bang_count++;
+                    bang_last_end = tok->end;
                 }
             }
-            token_free(&tok);
             break;
 
         case TK_COMMA:
             if (in_deps) {
-                tb_clear(&bangs);
+                bang_count  = 0;
                 needs_comma = 0;
             }
-            token_free(&tok);
             break;
 
         case TK_IDENT:
             if (in_deps) {
-                if (is_decl_keyword(tok.text) || is_task_attr_keyword(tok.text)) {
+                if (is_decl_keyword(tok->text) || is_task_attr_keyword(tok->text)) {
                     in_deps     = 0;
                     needs_comma = 0;
-                    tb_clear(&bangs);
+                    bang_count  = 0;
                     /* fall through to scope tracking */
-                } else if (strcmp(tok.text, "depends") == 0
-                        || strcmp(tok.text, "precedes") == 0) {
-                    tb_clear(&bangs);
+                } else if (strcmp(tok->text, "depends") == 0
+                        || strcmp(tok->text, "precedes") == 0) {
+                    bang_count  = 0;
                     needs_comma = 0;
-                    token_free(&tok);
                     break;
                 } else if (needs_comma) {
                     in_deps     = 0;
                     needs_comma = 0;
-                    tb_clear(&bangs);
+                    bang_count  = 0;
                     /* fall through to scope tracking */
                 } else {
                     /* Validate this dep reference */
                     const char *scope[128];
                     for (int i = 0; i < ts_n; i++) scope[i] = ts_ids[i];
-                    int bang_count = bangs.n;
 
-                    if (!validate_ref(syms, nsym, scope, ts_n, bang_count, tok.text)) {
+                    if (!validate_ref(syms, nsym, scope, ts_n, bang_count, tok->text)) {
                         if (bang_count > 0 && bang_count > ts_n) {
-                            LspPos bstart = bangs.toks[0].start;
-                            LspPos bend   = bangs.toks[bangs.n - 1].end;
-                            LspRange rng  = { bstart, bend };
+                            LspRange rng = { bang_first_start, bang_last_end };
                             push_diagnostic(r, rng, DIAG_WARNING,
                                 "dependency reference escapes beyond project root");
                         } else {
                             char msg[256];
-                            snprintf(msg, sizeof(msg), "unresolved task: `%s`", tok.text);
-                            LspRange rng = { tok.start, tok.end };
+                            snprintf(msg, sizeof(msg), "unresolved task: `%s`", tok->text);
+                            LspRange rng = { tok->start, tok->end };
                             push_diagnostic(r, rng, DIAG_ERROR, msg);
                         }
                     }
-                    tb_clear(&bangs);
+                    bang_count  = 0;
                     needs_comma = 1;
-                    token_free(&tok);
                     break;
                 }
             }
 
             /* Scope tracking */
-            if (strcmp(tok.text, "depends") == 0 || strcmp(tok.text, "precedes") == 0) {
+            if (strcmp(tok->text, "depends") == 0 || strcmp(tok->text, "precedes") == 0) {
                 in_deps     = 1;
                 needs_comma = 0;
-                tb_clear(&bangs);
+                bang_count  = 0;
                 sstate = SS_SCAN;
-            } else if (strcmp(tok.text, "task") == 0) {
+            } else if (strcmp(tok->text, "task") == 0) {
                 sstate = SS_EXPECT_ID;
                 free(pending_id);
                 pending_id = NULL;
             } else if (sstate == SS_EXPECT_ID) {
                 free(pending_id);
-                pending_id = strdup(tok.text);
+                pending_id = strdup(tok->text);
                 sstate     = SS_BEFORE_LBRACE;
             }
-            token_free(&tok);
             break;
 
         default:
@@ -894,24 +890,20 @@ static void validate_deps(const char *src, const Symbol *syms, int nsym,
                 if (needs_comma) {
                     in_deps     = 0;
                     needs_comma = 0;
-                    tb_clear(&bangs);
-                } else {
-                    tb_clear(&bangs);
                 }
+                bang_count = 0;
             }
             if (sstate == SS_EXPECT_ID) {
                 sstate = SS_SCAN;
                 free(pending_id);
                 pending_id = NULL;
             }
-            token_free(&tok);
             break;
         }
     }
 
     free(pending_id);
     for (int i = 0; i < ts_n; i++) free(ts_ids[i]);
-    tb_free(&bangs);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -943,8 +935,13 @@ ParseResult parse(const char *src) {
         }
     }
 
-    validate_deps(src, r.symbols, r.num_symbols, &r);
+    /* Collect semantic spans and validate deps from the token array */
+    collect_sem_spans(&r, p.tokens, p.n);
+    validate_deps(p.tokens, p.n, r.symbols, r.num_symbols, &r);
 
-    parser_free(&p);
+    /* Transfer token array ownership to ParseResult; don't call parser_free */
+    r.tokens     = p.tokens;
+    r.num_tokens = p.n;
+
     return r;
 }

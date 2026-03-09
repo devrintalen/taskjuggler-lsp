@@ -19,11 +19,12 @@
 
 #pragma once
 
+#include "parser.h"
 #include <cjson/cJSON.h>
 
 /*
- * Build a LSP SemanticTokens JSON object for the given source.
+ * Build a LSP SemanticTokens JSON object from a pre-parsed ParseResult.
  * Only emits tokens for -8<- ... ->8- (scissors) multi-line strings.
  * Caller owns the returned cJSON object.
  */
-cJSON *build_semantic_tokens_json(const char *src);
+cJSON *build_semantic_tokens_json(const ParseResult *r);

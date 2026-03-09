@@ -360,7 +360,7 @@ static cJSON *handle_hover(cJSON *id, cJSON *params) {
 
     LspPos pos = json_to_pos(pos_obj);
 
-    ActiveKeyword ak = active_keyword_at(d->text, pos);
+    ActiveKeyword ak = active_keyword_at(d->parse.tokens, d->parse.num_tokens, pos);
     if (!ak.keyword) return make_response(id, cJSON_CreateNull());
 
     const char *doc_text = keyword_docs(ak.keyword);
@@ -371,19 +371,9 @@ static cJSON *handle_hover(cJSON *id, cJSON *params) {
     cJSON_AddStringToObject(contents, "kind",  "markdown");
     cJSON_AddStringToObject(contents, "value", doc_text);
 
-    cJSON *range = cJSON_CreateObject();
-    cJSON *start = cJSON_CreateObject();
-    cJSON_AddNumberToObject(start, "line",      ak.range.start.line);
-    cJSON_AddNumberToObject(start, "character", ak.range.start.character);
-    cJSON *end = cJSON_CreateObject();
-    cJSON_AddNumberToObject(end, "line",      pos.line);
-    cJSON_AddNumberToObject(end, "character", pos.character);
-    cJSON_AddItemToObject(range, "start", start);
-    cJSON_AddItemToObject(range, "end",   end);
-
     cJSON *hover = cJSON_CreateObject();
     cJSON_AddItemToObject(hover, "contents", contents);
-    cJSON_AddItemToObject(hover, "range",    range);
+    cJSON_AddItemToObject(hover, "range",    range_json(ak.range));
 
     return make_response(id, hover);
 }
@@ -409,7 +399,7 @@ static cJSON *handle_signature_help(cJSON *id, cJSON *params) {
     if (!d) return make_response(id, cJSON_CreateNull());
 
     LspPos pos = json_to_pos(pos_obj);
-    ActiveContext ac = active_context(d->text, pos);
+    ActiveContext ac = active_context(d->parse.tokens, d->parse.num_tokens, pos);
     if (!ac.keyword) return make_response(id, cJSON_CreateNull());
 
     cJSON *sig = build_signature_help_json(ac.keyword, ac.arg_count);
@@ -439,7 +429,7 @@ static cJSON *handle_completion(cJSON *id, cJSON *params) {
     if (!d) return make_response(id, cJSON_CreateNull());
 
     LspPos pos    = json_to_pos(pos_obj);
-    cJSON *result = completions_json(d->text, pos,
+    cJSON *result = completions_json(d->parse.tokens, d->parse.num_tokens, pos,
                                      d->parse.symbols, d->parse.num_symbols);
     return make_response(id, result);
 }
@@ -453,7 +443,7 @@ static cJSON *handle_semantic_tokens(cJSON *id, cJSON *params) {
     Document *d = doc_find(uri);
     if (!d) return make_response(id, cJSON_CreateNull());
 
-    return make_response(id, build_semantic_tokens_json(d->text));
+    return make_response(id, build_semantic_tokens_json(&d->parse));
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

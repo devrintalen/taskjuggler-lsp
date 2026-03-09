@@ -52,22 +52,17 @@ static int is_block_opener(const char *s) {
 }
 
 /* Returns a NULL-terminated array of strings (heap-allocated copies). */
-static char **block_stack(const char *src, LspPos cursor, int *out_n) {
-    Lexer l;
-    lexer_init(&l, src);
-
+static char **block_stack(const Token *tokens, int num_tokens,
+                           LspPos cursor, int *out_n) {
     char **stack = NULL;
     int    n = 0, cap = 0;
     char  *pending = NULL;
 
-    for (;;) {
-        Token tok = lexer_next(&l);
-        if (tok.kind == TK_EOF || pos_before(cursor, tok.start)) {
-            token_free(&tok);
-            break;
-        }
+    for (int i = 0; i < num_tokens; i++) {
+        const Token *tok = &tokens[i];
+        if (tok->kind == TK_EOF || pos_before(cursor, tok->start)) break;
 
-        switch (tok.kind) {
+        switch (tok->kind) {
         case TK_LINE_COMMENT:
         case TK_BLOCK_COMMENT:
             break;
@@ -88,17 +83,15 @@ static char **block_stack(const char *src, LspPos cursor, int *out_n) {
             break;
 
         case TK_IDENT:
-            if (is_block_opener(tok.text)) {
+            if (is_block_opener(tok->text)) {
                 free(pending);
-                pending = strdup(tok.text);
+                pending = strdup(tok->text);
             }
             break;
 
         default:
             break;
         }
-
-        token_free(&tok);
     }
 
     free(pending);
@@ -237,48 +230,39 @@ static const KwEntry *kws_for_stack(char **stack, int n) {
 
 /* ── Line helpers ────────────────────────────────────────────────────────── */
 
-/* Returns heap-allocated first word on the line, or NULL. */
-static char *line_first_word(const char *src, LspPos cursor) {
-    int line = 0;
-    const char *p = src;
-    while (*p && line < (int)cursor.line) {
-        if (*p++ == '\n') line++;
+/* Returns heap-allocated text of the first non-comment token on cursor's line,
+ * or NULL if no such ident exists. */
+static char *line_first_word(const Token *tokens, int num_tokens, LspPos cursor) {
+    for (int i = 0; i < num_tokens; i++) {
+        const Token *t = &tokens[i];
+        if (t->kind == TK_EOF) break;
+        if (t->kind == TK_LINE_COMMENT || t->kind == TK_BLOCK_COMMENT) continue;
+        if (t->start.line < cursor.line) continue;
+        if (t->start.line > cursor.line) break;
+        /* First non-comment token on cursor.line */
+        if (t->kind == TK_IDENT) return strdup(t->text);
+        return NULL;
     }
-    if (line < (int)cursor.line) return NULL;
-
-    /* Skip leading whitespace */
-    while (*p && *p != '\n' && (*p == ' ' || *p == '\t')) p++;
-
-    /* Collect word chars */
-    const char *start = p;
-    while (*p && *p != '\n' && (isalnum((unsigned char)*p) || *p == '_')) p++;
-    if (p == start) return NULL;
-
-    char *w = malloc(p - start + 1);
-    memcpy(w, start, p - start);
-    w[p - start] = '\0';
-    return w;
+    return NULL;
 }
 
-static int at_statement_start(const char *src, LspPos cursor) {
-    int line = 0;
-    const char *p = src;
-    while (*p && line < (int)cursor.line) {
-        if (*p++ == '\n') line++;
-    }
-    if (line < (int)cursor.line) return 1;
-
-    size_t col = (size_t)cursor.character;
-    for (size_t i = 0; i < col && p[i] && p[i] != '\n'; i++) {
-        if (p[i] != ' ' && p[i] != '\t') return 0;
+/* Returns 1 if there are no non-whitespace tokens before cursor on its line. */
+static int at_statement_start(const Token *tokens, int num_tokens, LspPos cursor) {
+    for (int i = 0; i < num_tokens; i++) {
+        const Token *t = &tokens[i];
+        if (t->kind == TK_EOF) break;
+        if (t->kind == TK_LINE_COMMENT || t->kind == TK_BLOCK_COMMENT) continue;
+        if (t->start.line > cursor.line) break;
+        if (t->start.line == cursor.line && t->start.character < cursor.character)
+            return 0;
     }
     return 1;
 }
 
 /* ── partial_word ────────────────────────────────────────────────────────── */
 
-static char *partial_word(const char *src, LspPos cursor) {
-    Token t = token_at(src, cursor);
+static char *partial_word(const Token *tokens, int num_tokens, LspPos cursor) {
+    Token t = token_at(tokens, num_tokens, cursor);
     if (t.kind == TK_IDENT) {
         char *txt = t.text; /* take ownership */
         t.text = NULL;
@@ -342,25 +326,20 @@ static void ss_push(ScopeStack *ss, const char *id, uint32_t depth) {
     ss->n++;
 }
 
-static char **current_task_scope(const char *src, LspPos cursor, int *out_n) {
+static char **current_task_scope(const Token *tokens, int num_tokens,
+                                  LspPos cursor, int *out_n) {
     typedef enum { SS_SCAN, SS_EXPECT_ID, SS_BEFORE_LBRACE } SState;
-
-    Lexer l;
-    lexer_init(&l, src);
 
     SState sstate     = SS_SCAN;
     char  *pending_id = NULL;
     uint32_t brace_depth = 0;
     ScopeStack ts = {0};
 
-    for (;;) {
-        Token tok = lexer_next(&l);
-        if (tok.kind == TK_EOF || pos_before(cursor, tok.start)) {
-            token_free(&tok);
-            break;
-        }
+    for (int i = 0; i < num_tokens; i++) {
+        const Token *tok = &tokens[i];
+        if (tok->kind == TK_EOF || pos_before(cursor, tok->start)) break;
 
-        switch (tok.kind) {
+        switch (tok->kind) {
         case TK_LINE_COMMENT:
         case TK_BLOCK_COMMENT:
             break;
@@ -376,10 +355,8 @@ static char **current_task_scope(const char *src, LspPos cursor, int *out_n) {
             break;
 
         case TK_RBRACE:
-            /* Remove tasks at or deeper than current depth */
-            while (ts.n > 0 && ts.depths[ts.n - 1] >= brace_depth) {
+            while (ts.n > 0 && ts.depths[ts.n - 1] >= brace_depth)
                 free(ts.ids[--ts.n]);
-            }
             if (brace_depth > 0) brace_depth--;
             sstate = SS_SCAN;
             free(pending_id);
@@ -387,13 +364,13 @@ static char **current_task_scope(const char *src, LspPos cursor, int *out_n) {
             break;
 
         case TK_IDENT:
-            if (strcmp(tok.text, "task") == 0) {
+            if (strcmp(tok->text, "task") == 0) {
                 sstate = SS_EXPECT_ID;
                 free(pending_id);
                 pending_id = NULL;
             } else if (sstate == SS_EXPECT_ID) {
                 free(pending_id);
-                pending_id = strdup(tok.text);
+                pending_id = strdup(tok->text);
                 sstate     = SS_BEFORE_LBRACE;
             }
             break;
@@ -406,8 +383,6 @@ static char **current_task_scope(const char *src, LspPos cursor, int *out_n) {
             }
             break;
         }
-
-        token_free(&tok);
     }
 
     free(pending_id);
@@ -425,36 +400,27 @@ static char **current_task_scope(const char *src, LspPos cursor, int *out_n) {
     return result;
 }
 
-static int count_leading_bangs(const char *src, LspPos cursor) {
-    Lexer l;
-    lexer_init(&l, src);
-
-    Token  toks[256];
-    int    n = 0;
-
-    for (;;) {
-        Token tok = lexer_next(&l);
-        if (tok.kind == TK_EOF || pos_before(cursor, tok.start)) {
-            token_free(&tok);
-            break;
-        }
-        if (tok.kind != TK_LINE_COMMENT && tok.kind != TK_BLOCK_COMMENT) {
-            if (n < 256) toks[n++] = tok;
-            else token_free(&tok);
-        } else {
-            token_free(&tok);
-        }
+static int count_leading_bangs(const Token *tokens, int num_tokens, LspPos cursor) {
+    /* Find index past the last non-comment token before (or at) cursor */
+    int last = -1;
+    for (int i = 0; i < num_tokens; i++) {
+        if (tokens[i].kind == TK_EOF) break;
+        if (pos_before(cursor, tokens[i].start)) break;
+        if (tokens[i].kind != TK_LINE_COMMENT && tokens[i].kind != TK_BLOCK_COMMENT)
+            last = i;
     }
 
-    /* Skip trailing Ident (partial word being typed) */
-    int end = n;
-    if (end > 0 && toks[end - 1].kind == TK_IDENT) end--;
+    /* Skip trailing ident (partial word being typed) */
+    if (last >= 0 && tokens[last].kind == TK_IDENT) last--;
 
+    /* Count consecutive bangs scanning backwards, skipping comments */
     int count = 0;
-    for (int i = end - 1; i >= 0 && toks[i].kind == TK_BANG; i--)
+    for (int i = last; i >= 0; i--) {
+        if (tokens[i].kind == TK_LINE_COMMENT || tokens[i].kind == TK_BLOCK_COMMENT)
+            continue;
+        if (tokens[i].kind != TK_BANG) break;
         count++;
-
-    for (int i = 0; i < n; i++) token_free(&toks[i]);
+    }
     return count;
 }
 
@@ -510,12 +476,12 @@ static int completion_kind_for(int sym_kind) {
 
 /* ── completions_json ────────────────────────────────────────────────────── */
 
-cJSON *completions_json(const char *src, LspPos cursor,
+cJSON *completions_json(const Token *tokens, int num_tokens, LspPos cursor,
                          const Symbol *symbols, int num_symbols) {
     int    stack_n = 0;
-    char **stack   = block_stack(src, cursor, &stack_n);
-    char  *partial = partial_word(src, cursor);
-    char  *fw      = line_first_word(src, cursor);
+    char **stack   = block_stack(tokens, num_tokens, cursor, &stack_n);
+    char  *partial = partial_word(tokens, num_tokens, cursor);
+    char  *fw      = line_first_word(tokens, num_tokens, cursor);
 
     cJSON *items = cJSON_CreateArray();
 
@@ -530,7 +496,7 @@ cJSON *completions_json(const char *src, LspPos cursor,
 
     /* ID completions based on active statement keyword */
     {
-        ActiveContext ac = active_context(src, cursor);
+        ActiveContext ac = active_context(tokens, num_tokens, cursor);
         int id_kind = 0;
         if (ac.keyword) {
             if (strcmp(ac.keyword, "depends")  == 0 || strcmp(ac.keyword, "precedes") == 0)
@@ -553,8 +519,8 @@ cJSON *completions_json(const char *src, LspPos cursor,
                     && (strcmp(ac.keyword, "depends") == 0
                      || strcmp(ac.keyword, "precedes") == 0)) {
                 int scope_n = 0;
-                char **scope = current_task_scope(src, cursor, &scope_n);
-                int bang_count = count_leading_bangs(src, cursor);
+                char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
+                int bang_count = count_leading_bangs(tokens, num_tokens, cursor);
 
                 for (int i = 0; i < bang_count; i++)
                     strncat(bang_prefix, "!", sizeof(bang_prefix) - strlen(bang_prefix) - 1);
@@ -620,7 +586,7 @@ cJSON *completions_json(const char *src, LspPos cursor,
 
     /* Keyword completions */
     {
-        int typing = (partial[0] != '\0') || at_statement_start(src, cursor);
+        int typing = (partial[0] != '\0') || at_statement_start(tokens, num_tokens, cursor);
         if (typing) {
             const KwEntry *table = kws_for_stack(stack, stack_n);
             for (int i = 0; table[i].kw; i++) {

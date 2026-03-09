@@ -45,26 +45,21 @@ static int is_any_known_keyword(const char *s) {
 /* Stack entry: (keyword, brace_depth, arg_count) */
 typedef struct { char *kw; uint32_t depth; uint32_t argc; } StackEntry;
 
-ActiveContext active_context(const char *src, LspPos cursor) {
-    Lexer l;
-    lexer_init(&l, src);
-
+ActiveContext active_context(const Token *tokens, int num_tokens, LspPos cursor) {
     uint32_t brace_depth = 0;
     StackEntry stack[128];
     int stack_n = 0;
 
-    for (;;) {
-        Token tok = lexer_next(&l);
-        if (tok.kind == TK_EOF) { token_free(&tok); break; }
+    for (int i = 0; i < num_tokens; i++) {
+        const Token *tok = &tokens[i];
+        if (tok->kind == TK_EOF) break;
 
         /* Stop once token starts past cursor */
-        if (tok.start.line > cursor.line
-         || (tok.start.line == cursor.line && tok.start.character > cursor.character)) {
-            token_free(&tok);
+        if (tok->start.line > cursor.line
+         || (tok->start.line == cursor.line && tok->start.character > cursor.character))
             break;
-        }
 
-        switch (tok.kind) {
+        switch (tok->kind) {
         case TK_LINE_COMMENT:
         case TK_BLOCK_COMMENT:
             break;
@@ -75,39 +70,31 @@ ActiveContext active_context(const char *src, LspPos cursor) {
 
         case TK_RBRACE:
             if (brace_depth > 0) brace_depth--;
-            /* Pop stack entries at deeper or equal depth */
-            while (stack_n > 0 && stack[stack_n - 1].depth > brace_depth) {
+            while (stack_n > 0 && stack[stack_n - 1].depth > brace_depth)
                 free(stack[--stack_n].kw);
-            }
             break;
 
         case TK_IDENT:
-            if (is_any_known_keyword(tok.text)) {
-                /* Pop entries at same or deeper depth */
-                while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth) {
+            if (is_any_known_keyword(tok->text)) {
+                while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth)
                     free(stack[--stack_n].kw);
-                }
-                /* Push if it has a signature */
-                if (build_signature_help_json(tok.text, 0) != NULL) {
-                    cJSON *tmp = build_signature_help_json(tok.text, 0);
+                cJSON *tmp = build_signature_help_json(tok->text, 0);
+                if (tmp) {
                     cJSON_Delete(tmp);
-                    /* Actually just check via the raw approach */
-                    if (stack_n < 128) {
-                        stack[stack_n++] = (StackEntry){ strdup(tok.text), brace_depth, 0 };
-                    }
+                    if (stack_n < 128)
+                        stack[stack_n++] = (StackEntry){ strdup(tok->text), brace_depth, 0 };
                 }
             }
             break;
 
         default: {
             /* Count as completed argument only if token fully before cursor */
-            int fully_before = (tok.end.line < cursor.line)
-                || (tok.end.line == cursor.line && tok.end.character <= cursor.character);
+            int fully_before = (tok->end.line < cursor.line)
+                || (tok->end.line == cursor.line && tok->end.character <= cursor.character);
             if (fully_before) {
-                /* Find innermost stack entry at current brace depth */
-                for (int i = stack_n - 1; i >= 0; i--) {
-                    if (stack[i].depth == brace_depth) {
-                        stack[i].argc++;
+                for (int j = stack_n - 1; j >= 0; j--) {
+                    if (stack[j].depth == brace_depth) {
+                        stack[j].argc++;
                         break;
                     }
                 }
@@ -115,8 +102,6 @@ ActiveContext active_context(const char *src, LspPos cursor) {
             break;
         }
         }
-
-        token_free(&tok);
     }
 
     /* Find innermost entry at current brace_depth */
@@ -125,14 +110,12 @@ ActiveContext active_context(const char *src, LspPos cursor) {
             ActiveContext ac;
             ac.keyword   = stack[i].kw;
             ac.arg_count = stack[i].argc;
-            /* Free others */
             for (int j = 0; j < stack_n; j++)
                 if (j != i) free(stack[j].kw);
             return ac;
         }
     }
 
-    /* Nothing found */
     for (int i = 0; i < stack_n; i++) free(stack[i].kw);
     return (ActiveContext){ NULL, 0 };
 }

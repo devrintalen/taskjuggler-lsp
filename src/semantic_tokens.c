@@ -18,76 +18,27 @@
  */
 
 #include "semantic_tokens.h"
-#include "parser.h"
-
-#include <stdlib.h>
-#include <string.h>
 
 /* Token type index 0 = "string" (only type in the legend). */
 #define TOKEN_TYPE_STRING 0
 
-cJSON *build_semantic_tokens_json(const char *src) {
-    Lexer l;
-    lexer_init(&l, src);
-
-    /* Collect (line, start_char, length) spans. */
-    typedef struct { uint32_t line, col, len; } Span;
-    Span  *spans = NULL;
-    int    ns = 0, caps = 0;
-
-    for (;;) {
-        Token tok = lexer_next(&l);
-        if (tok.kind == TK_EOF) { token_free(&tok); break; }
-        if (tok.kind != TK_MULTI_LINE_STR) { token_free(&tok); continue; }
-
-        /* Split token text on newlines, emit one span per line. */
-        uint32_t line = tok.start.line;
-        uint32_t col  = tok.start.character;
-
-        const char *p = tok.text;
-        while (*p) {
-            /* Find end of this line segment. */
-            const char *q = p;
-            while (*q && *q != '\n') q++;
-
-            /* Length in characters, trim \r */
-            const char *end = q;
-            if (end > p && *(end - 1) == '\r') end--;
-
-            uint32_t len = (uint32_t)(end - p);
-
-            if (len > 0) {
-                if (ns >= caps) {
-                    caps = caps ? caps * 2 : 16;
-                    spans = realloc(spans, caps * sizeof(Span));
-                }
-                spans[ns++] = (Span){ line, col, len };
-            }
-
-            if (*q == '\n') { q++; line++; col = 0; }
-            else break;
-            p = q;
-        }
-
-        token_free(&tok);
-    }
-
-    /* Encode as delta-relative SemanticToken entries: [dl, ds, len, type, mod] */
+cJSON *build_semantic_tokens_json(const ParseResult *r) {
+    /* Encode stored spans as delta-relative SemanticToken entries:
+     * [deltaLine, deltaStart, length, tokenType, tokenModifiers] */
     cJSON *data = cJSON_CreateArray();
     uint32_t prev_line = 0, prev_start = 0;
-    for (int i = 0; i < ns; i++) {
-        uint32_t dl = spans[i].line - prev_line;
-        uint32_t ds = (dl == 0) ? (spans[i].col - prev_start) : spans[i].col;
+    for (int i = 0; i < r->num_sem_spans; i++) {
+        const SemanticSpan *s = &r->sem_spans[i];
+        uint32_t dl = s->line - prev_line;
+        uint32_t ds = (dl == 0) ? (s->col - prev_start) : s->col;
         cJSON_AddItemToArray(data, cJSON_CreateNumber(dl));
         cJSON_AddItemToArray(data, cJSON_CreateNumber(ds));
-        cJSON_AddItemToArray(data, cJSON_CreateNumber(spans[i].len));
+        cJSON_AddItemToArray(data, cJSON_CreateNumber(s->len));
         cJSON_AddItemToArray(data, cJSON_CreateNumber(TOKEN_TYPE_STRING));
         cJSON_AddItemToArray(data, cJSON_CreateNumber(0)); /* no modifiers */
-        prev_line  = spans[i].line;
-        prev_start = spans[i].col;
+        prev_line  = s->line;
+        prev_start = s->col;
     }
-
-    free(spans);
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNullToObject(root, "resultId");

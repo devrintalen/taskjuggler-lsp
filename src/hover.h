@@ -21,8 +21,9 @@
 
 #include "parser.h"
 
-/* Return the token that spans `pos`, or a token with kind TK_EOF if none. */
-Token token_at(const char *src, LspPos pos);
+/* Return a copy of the token that spans `pos`, or a token with kind TK_EOF if none.
+ * Caller must free the returned token. */
+Token token_at(const Token *tokens, int num_tokens, LspPos pos);
 
 /* Return Markdown documentation for a TJP keyword, or NULL if unknown. */
 const char *keyword_docs(const char *kw);
@@ -41,4 +42,4 @@ typedef struct {
     LspRange range;
 } ActiveKeyword;
 
-ActiveKeyword active_keyword_at(const char *src, LspPos cursor);
+ActiveKeyword active_keyword_at(const Token *tokens, int num_tokens, LspPos cursor);
