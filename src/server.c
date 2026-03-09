@@ -202,6 +202,15 @@ static cJSON *symbol_to_json(const Symbol *sym) {
 static cJSON *handle_initialize(cJSON *id, cJSON *params) {
     (void)params;
 
+    // TODO none of the client capabilities are checked here.
+
+    /* Server info */
+    cJSON *server_info = cJSON_CreateObject();
+    cJSON *sn = cJSON_CreateArray();
+    // TODO add server version, with program version macro so it is always up to date
+    cJSON_AddItemToArray(sn, cJSON_CreateString("taskjuggler-lsp"));
+    cJSON_AddItemToObject(server_info, "name", sn);
+
     /* SemanticTokensLegend */
     cJSON *legend = cJSON_CreateObject();
     cJSON *tt = cJSON_CreateArray();
@@ -245,6 +254,7 @@ static cJSON *handle_initialize(cJSON *id, cJSON *params) {
 
     cJSON *result = cJSON_CreateObject();
     cJSON_AddItemToObject(result, "capabilities", caps);
+    cJSON_AddItemToObject(result, "serverInfo",   server_info);
 
     return make_response(id, result);
 }
