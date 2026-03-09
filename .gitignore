@@ -1,4 +1,5 @@
-/target/
 .env
 .claude/
 *~
+/src/*.o
+/taskjuggler-lsp
