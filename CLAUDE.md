@@ -22,6 +22,25 @@ To be documented as the codebase develops. Expected structure:
 - TaskJuggler `.tjp`/`.tji` file parser
 - Language features: diagnostics, completion, hover, go-to-definition
 
+## LSP Feature Status
+
+| Feature | Method | Status | Notes |
+|---|---|---|---|
+| Lifecycle | `initialize` / `shutdown` / `exit` | Implemented | Negotiates capabilities on init |
+| Document Sync | `textDocument/didOpen`, `didChange`, `didClose` | Implemented | Full-document sync; caches up to 64 open files |
+| Diagnostics | `textDocument/publishDiagnostics` | Implemented | Reports unresolved `depends`/`precedes` targets as errors; out-of-scope relative refs as warnings |
+| Hover | `textDocument/hover` | Implemented | Markdown docs for 40+ TaskJuggler keywords |
+| Completion | `textDocument/completion` | Implemented | Context-aware keyword and identifier suggestions; supports hierarchical and relative (`!`) references |
+| Signature Help | `textDocument/signatureHelp` | Implemented | Parameter descriptions for 35+ keywords |
+| Document Symbols | `textDocument/documentSymbol` | Implemented | Hierarchical symbol tree for projects, tasks, resources, accounts, shifts |
+| Go to Definition | `textDocument/definition` | Not implemented | |
+| Find References | `textDocument/references` | Not implemented | |
+| Rename | `textDocument/rename` | Not implemented | |
+| Code Actions | `textDocument/codeAction` | Not implemented | |
+| Formatting | `textDocument/formatting` | Not implemented | |
+| Folding Ranges | `textDocument/foldingRange` | Not implemented | |
+| Workspace Symbols | `workspace/symbol` | Not implemented | |
+
 
 ## Workflow
 
