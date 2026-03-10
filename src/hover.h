@@ -20,6 +20,7 @@
 #pragma once
 
 #include "parser.h"
+#include "grammar.tab.h"
 
 /* Return a copy of the token that spans `pos`, or a token with kind TK_EOF if none.
  * Caller must free the returned token. */

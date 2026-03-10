@@ -18,338 +18,111 @@
  */
 
 #include "parser.h"
+#include "grammar.tab.h"  /* yyparse() */
 
-#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   Dynamic string buffer
-   ═══════════════════════════════════════════════════════════════════════════ */
+/* ── flex scanner interface ──────────────────────────────────────────────── *
+ *
+ * These are declared in the flex-generated lexer.yy.c.  We use void * for
+ * YY_BUFFER_STATE to avoid pulling in the full flex header.
+ */
+typedef void *YY_BUFFER_STATE;
+extern YY_BUFFER_STATE yy_scan_string(const char *str);
+extern void            yy_delete_buffer(YY_BUFFER_STATE buf);
+extern int             yycolumn; /* column tracker defined in lexer.l */
 
-typedef struct {
-    char  *data;
-    size_t len, cap;
-} StrBuf;
+/* ── Shared globals (used by lexer.l and grammar.y via extern) ───────────── */
 
-static void strbuf_push(StrBuf *b, const char *bytes, size_t n) {
-    if (b->len + n + 1 > b->cap) {
-        size_t nc = b->cap ? b->cap : 32;
-        while (nc < b->len + n + 1) nc *= 2;
-        b->data = realloc(b->data, nc);
-        b->cap  = nc;
+ParseResult *g_result      = NULL;
+Token       *g_tokens      = NULL;
+int          g_num_tokens  = 0;
+int          g_tok_cap     = 0;
+
+/* Called from lexer.l for every scanned token. */
+void g_push_token(int kind, const char *text,
+                  uint32_t sl, uint32_t sc,
+                  uint32_t el, uint32_t ec) {
+    if (g_num_tokens >= g_tok_cap) {
+        g_tok_cap = g_tok_cap ? g_tok_cap * 2 : 64;
+        g_tokens  = realloc(g_tokens, (size_t)g_tok_cap * sizeof(Token));
     }
-    memcpy(b->data + b->len, bytes, n);
-    b->len += n;
-    b->data[b->len] = '\0';
+    g_tokens[g_num_tokens++] = (Token){
+        .kind  = kind,
+        .start = { sl, sc },
+        .end   = { el, ec },
+        .text  = strdup(text),
+    };
 }
 
-/* Returns ownership of data (caller must free). */
-static char *strbuf_finish(StrBuf *b) {
-    if (!b->data) {
-        char *e = malloc(1);
-        *e = '\0';
-        return e;
-    }
-    char *d = b->data;
-    b->data = NULL;
-    b->len  = 0;
-    b->cap  = 0;
-    return d;
-}
-
-static void strbuf_free(StrBuf *b) {
-    free(b->data);
-    b->data = NULL;
-    b->len  = 0;
-    b->cap  = 0;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   UTF-8 helpers
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-/* Decode one UTF-8 codepoint from src at byte *pos (updated on return). */
-static uint32_t utf8_decode(const char *src, size_t *pos, size_t len) {
-    if (*pos >= len) return 0;
-    unsigned char c = (unsigned char)src[*pos];
-    if (c < 0x80) { (*pos)++; return c; }
-    if ((c & 0xE0) == 0xC0 && *pos + 1 < len) {
-        uint32_t cp = ((c & 0x1F) << 6) | ((unsigned char)src[*pos + 1] & 0x3F);
-        *pos += 2;
-        return cp;
-    }
-    if ((c & 0xF0) == 0xE0 && *pos + 2 < len) {
-        uint32_t cp = ((c & 0x0F) << 12)
-                    | (((unsigned char)src[*pos + 1] & 0x3F) << 6)
-                    | ((unsigned char)src[*pos + 2] & 0x3F);
-        *pos += 3;
-        return cp;
-    }
-    if ((c & 0xF8) == 0xF0 && *pos + 3 < len) {
-        uint32_t cp = ((c & 0x07) << 18)
-                    | (((unsigned char)src[*pos + 1] & 0x3F) << 12)
-                    | (((unsigned char)src[*pos + 2] & 0x3F) << 6)
-                    | ((unsigned char)src[*pos + 3] & 0x3F);
-        *pos += 4;
-        return cp;
-    }
-    (*pos)++;
-    return (uint32_t)c;
-}
-
-/* Byte length of the codepoint starting at src[pos]. */
-static int utf8_char_len(const char *src, size_t pos, size_t len) {
-    if (pos >= len) return 0;
-    unsigned char c = (unsigned char)src[pos];
-    if (c < 0x80)        return 1;
-    if ((c & 0xE0) == 0xC0 && pos + 1 < len) return 2;
-    if ((c & 0xF0) == 0xE0 && pos + 2 < len) return 3;
-    if ((c & 0xF8) == 0xF0 && pos + 3 < len) return 4;
-    return 1;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   Lexer
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-void lexer_init(Lexer *l, const char *src) {
-    l->src  = src;
-    l->pos  = 0;
-    l->len  = strlen(src);
-    l->line = 0;
-    l->col  = 0;
-}
-
-static uint32_t lexer_current(const Lexer *l) {
-    if (l->pos >= l->len) return 0;
-    size_t p = l->pos;
-    return utf8_decode(l->src, &p, l->len);
-}
-
-/* Peek at the n-th character after the current position (0 = current). */
-static uint32_t lexer_peek_at(const Lexer *l, int n) {
-    size_t p = l->pos;
-    uint32_t cp = 0;
-    for (int i = 0; i <= n; i++) {
-        if (p >= l->len) return 0;
-        cp = utf8_decode(l->src, &p, l->len);
-    }
-    return cp;
-}
-
-/* Advance lexer, optionally push consumed bytes to buf. */
-static uint32_t lexer_advance_opt(Lexer *l, StrBuf *buf) {
-    if (l->pos >= l->len) return 0;
-    int clen = utf8_char_len(l->src, l->pos, l->len);
-    size_t p = l->pos;
-    uint32_t cp = utf8_decode(l->src, &p, l->len);
-    if (buf) strbuf_push(buf, l->src + l->pos, clen);
-    l->pos = p;
-    if (cp == '\n') { l->line++; l->col = 0; }
-    else            { l->col++; }
-    return cp;
-}
-
-#define lexer_advance(l)       lexer_advance_opt((l), NULL)
-#define lexer_advance_push(l, b) lexer_advance_opt((l), (b))
-
-static LspPos lexer_position(const Lexer *l) {
-    return (LspPos){ l->line, l->col };
-}
-
-static int is_ws(uint32_t cp) {
-    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r'
-        || cp == '\f' || cp == '\v';
-}
-
-static int is_id_start(uint32_t cp) {
-    return (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z')
-        || cp == '_' || cp > 0x7F;
-}
-
-static int is_id_cont(uint32_t cp) {
-    return is_id_start(cp) || (cp >= '0' && cp <= '9')
-        || cp == '.' || cp == ':';
-}
-
-static void lexer_skip_whitespace(Lexer *l) {
-    while (l->pos < l->len && is_ws(lexer_current(l)))
-        lexer_advance(l);
-}
+/* ── Token helpers ───────────────────────────────────────────────────────── */
 
 void token_free(Token *t) {
     free(t->text);
     t->text = NULL;
 }
 
-Token lexer_next(Lexer *l) {
-    lexer_skip_whitespace(l);
+/* ── Symbol helpers ──────────────────────────────────────────────────────── */
 
-    LspPos start = lexer_position(l);
-    uint32_t ch  = lexer_current(l);
-
-    if (!ch) {
-        return (Token){ TK_EOF, start, start, strdup("") };
-    }
-
-    /* Hash / line comment */
-    if (ch == '#') {
-        StrBuf b = {0};
-        while (l->pos < l->len && lexer_current(l) != '\n')
-            lexer_advance_push(l, &b);
-        return (Token){ TK_LINE_COMMENT, start, lexer_position(l), strbuf_finish(&b) };
-    }
-
-    /* // line comment */
-    if (ch == '/' && lexer_peek_at(l, 1) == '/') {
-        StrBuf b = {0};
-        while (l->pos < l->len && lexer_current(l) != '\n')
-            lexer_advance_push(l, &b);
-        return (Token){ TK_LINE_COMMENT, start, lexer_position(l), strbuf_finish(&b) };
-    }
-
-    /* slash-star block comment */
-    if (ch == '/' && lexer_peek_at(l, 1) == '*') {
-        StrBuf b = {0};
-        lexer_advance_push(l, &b); /* / */
-        lexer_advance_push(l, &b); /* * */
-        for (;;) {
-            if (!lexer_current(l)) {
-                strbuf_free(&b);
-                return (Token){ TK_ERROR, start, lexer_position(l),
-                                strdup("unterminated block comment") };
-            }
-            if (lexer_current(l) == '*' && lexer_peek_at(l, 1) == '/') {
-                lexer_advance_push(l, &b); /* * */
-                lexer_advance_push(l, &b); /* / */
-                break;
-            }
-            lexer_advance_push(l, &b);
-        }
-        return (Token){ TK_BLOCK_COMMENT, start, lexer_position(l), strbuf_finish(&b) };
-    }
-
-    /* Single-character tokens */
-    switch (ch) {
-    case '{': lexer_advance(l); return (Token){ TK_LBRACE,   start, lexer_position(l), strdup("{") };
-    case '}': lexer_advance(l); return (Token){ TK_RBRACE,   start, lexer_position(l), strdup("}") };
-    case '[': lexer_advance(l); return (Token){ TK_LBRACKET, start, lexer_position(l), strdup("[") };
-    case ']': lexer_advance(l); return (Token){ TK_RBRACKET, start, lexer_position(l), strdup("]") };
-    case '!': lexer_advance(l); return (Token){ TK_BANG,     start, lexer_position(l), strdup("!") };
-    case '+': lexer_advance(l); return (Token){ TK_PLUS,     start, lexer_position(l), strdup("+") };
-    case ':': lexer_advance(l); return (Token){ TK_COLON,    start, lexer_position(l), strdup(":") };
-    case ',': lexer_advance(l); return (Token){ TK_COMMA,    start, lexer_position(l), strdup(",") };
-    default:  break;
-    }
-
-    /* '-' or scissors -8<- ... ->8- */
-    if (ch == '-') {
-        if (lexer_peek_at(l, 1) == '8' && lexer_peek_at(l, 2) == '<'
-                && lexer_peek_at(l, 3) == '-') {
-            StrBuf b = {0};
-            lexer_advance_push(l, &b); /* - */
-            lexer_advance_push(l, &b); /* 8 */
-            lexer_advance_push(l, &b); /* < */
-            lexer_advance_push(l, &b); /* - */
-            for (;;) {
-                if (!lexer_current(l)) {
-                    strbuf_free(&b);
-                    return (Token){ TK_ERROR, start, lexer_position(l),
-                                    strdup("unterminated scissors string") };
-                }
-                if (lexer_current(l) == '-' && lexer_peek_at(l, 1) == '>'
-                        && lexer_peek_at(l, 2) == '8' && lexer_peek_at(l, 3) == '-') {
-                    lexer_advance_push(l, &b); /* - */
-                    lexer_advance_push(l, &b); /* > */
-                    lexer_advance_push(l, &b); /* 8 */
-                    lexer_advance_push(l, &b); /* - */
-                    break;
-                }
-                lexer_advance_push(l, &b);
-            }
-            return (Token){ TK_MULTI_LINE_STR, start, lexer_position(l), strbuf_finish(&b) };
-        }
-        lexer_advance(l);
-        return (Token){ TK_MINUS, start, lexer_position(l), strdup("-") };
-    }
-
-    /* String literal */
-    if (ch == '"') {
-        lexer_advance(l); /* opening " */
-        StrBuf b = {0};
-        for (;;) {
-            uint32_t c = lexer_current(l);
-            if (!c || c == '\n') {
-                strbuf_free(&b);
-                return (Token){ TK_ERROR, start, lexer_position(l),
-                                strdup("unterminated string literal") };
-            }
-            if (c == '"') { lexer_advance(l); break; }
-            if (c == '\\') {
-                lexer_advance(l); /* backslash */
-                uint32_t esc = lexer_current(l);
-                if (esc) lexer_advance_push(l, &b);
-            } else {
-                lexer_advance_push(l, &b);
-            }
-        }
-        return (Token){ TK_STR, start, lexer_position(l), strbuf_finish(&b) };
-    }
-
-    /* Number or date: starts with ASCII digit */
-    if (ch >= '0' && ch <= '9') {
-        StrBuf b = {0};
-        while (l->pos < l->len && lexer_current(l) >= '0' && lexer_current(l) <= '9')
-            lexer_advance_push(l, &b);
-
-        /* Check for date YYYY-MM-DD */
-        if (b.len == 4 && lexer_current(l) == '-') {
-            /* peek: -DD-DD */
-            size_t p = l->pos + 1;
-            if (p + 5 <= l->len
-                    && isdigit((unsigned char)l->src[p])
-                    && isdigit((unsigned char)l->src[p + 1])
-                    && l->src[p + 2] == '-'
-                    && isdigit((unsigned char)l->src[p + 3])
-                    && isdigit((unsigned char)l->src[p + 4])) {
-                for (int i = 0; i < 6; i++) lexer_advance_push(l, &b);
-                return (Token){ TK_DATE, start, lexer_position(l), strbuf_finish(&b) };
-            }
-        }
-
-        /* Float */
-        if (lexer_current(l) == '.') {
-            lexer_advance_push(l, &b); /* . */
-            while (l->pos < l->len && lexer_current(l) >= '0' && lexer_current(l) <= '9')
-                lexer_advance_push(l, &b);
-            return (Token){ TK_FLOAT, start, lexer_position(l), strbuf_finish(&b) };
-        }
-
-        return (Token){ TK_INTEGER, start, lexer_position(l), strbuf_finish(&b) };
-    }
-
-    /* Identifier / keyword */
-    if (is_id_start(ch)) {
-        StrBuf b = {0};
-        while (l->pos < l->len && is_id_cont(lexer_current(l)))
-            lexer_advance_push(l, &b);
-        return (Token){ TK_IDENT, start, lexer_position(l), strbuf_finish(&b) };
-    }
-
-    /* Unknown */
-    {
-        char msg[64];
-        snprintf(msg, sizeof(msg), "unexpected character: '%c'", (char)ch);
-        lexer_advance(l);
-        return (Token){ TK_ERROR, start, lexer_position(l), strdup(msg) };
-    }
+void symbol_free(Symbol *s) {
+    free(s->name);
+    free(s->detail);
+    for (int i = 0; i < s->num_children; i++)
+        symbol_free(&s->children[i]);
+    free(s->children);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   Keyword classification
-   ═══════════════════════════════════════════════════════════════════════════ */
+/* ── ParseResult helpers ─────────────────────────────────────────────────── */
+
+void parse_result_free(ParseResult *r) {
+    for (int i = 0; i < r->num_diagnostics; i++)
+        free(r->diagnostics[i].message);
+    free(r->diagnostics);
+    for (int i = 0; i < r->num_symbols; i++)
+        symbol_free(&r->symbols[i]);
+    free(r->symbols);
+    free(r->sem_spans);
+    for (int i = 0; i < r->num_tokens; i++)
+        token_free(&r->tokens[i]);
+    free(r->tokens);
+    memset(r, 0, sizeof(*r));
+}
+
+void push_diagnostic(ParseResult *r, LspRange range, int severity,
+                     const char *msg) {
+    if (r->num_diagnostics >= r->diag_cap) {
+        int nc = r->diag_cap ? r->diag_cap * 2 : 4;
+        r->diagnostics = realloc(r->diagnostics,
+                                 (size_t)nc * sizeof(Diagnostic));
+        r->diag_cap = nc;
+    }
+    r->diagnostics[r->num_diagnostics++] =
+        (Diagnostic){ range, severity, strdup(msg) };
+}
+
+void push_symbol(ParseResult *r, Symbol s) {
+    if (r->num_symbols >= r->sym_cap) {
+        int nc = r->sym_cap ? r->sym_cap * 2 : 4;
+        r->symbols = realloc(r->symbols, (size_t)nc * sizeof(Symbol));
+        r->sym_cap = nc;
+    }
+    r->symbols[r->num_symbols++] = s;
+}
+
+static void push_sem_span(ParseResult *r, uint32_t line, uint32_t col,
+                          uint32_t len) {
+    if (r->num_sem_spans >= r->sem_cap) {
+        int nc = r->sem_cap ? r->sem_cap * 2 : 16;
+        r->sem_spans = realloc(r->sem_spans,
+                               (size_t)nc * sizeof(SemanticSpan));
+        r->sem_cap = nc;
+    }
+    r->sem_spans[r->num_sem_spans++] = (SemanticSpan){ line, col, len };
+}
+
+/* ── Keyword classification ──────────────────────────────────────────────── */
 
 static int is_symbol_keyword(const char *s) {
     return strcmp(s, "project")  == 0 || strcmp(s, "task")     == 0
@@ -388,7 +161,7 @@ static int is_decl_keyword(const char *s) {
         || strcmp(s, "balance")         == 0 || strcmp(s, "booking")         == 0;
 }
 
-static int symbol_kind_for(const char *kw) {
+int symbol_kind_for(const char *kw) {
     if (strcmp(kw, "project")  == 0) return SK_MODULE;
     if (strcmp(kw, "resource") == 0) return SK_OBJECT;
     if (strcmp(kw, "account")  == 0) return SK_VARIABLE;
@@ -396,65 +169,11 @@ static int symbol_kind_for(const char *kw) {
     return SK_FUNCTION;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   Symbol helpers
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-void symbol_free(Symbol *s) {
-    free(s->name);
-    free(s->detail);
-    for (int i = 0; i < s->num_children; i++)
-        symbol_free(&s->children[i]);
-    free(s->children);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   ParseResult helpers
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-void parse_result_free(ParseResult *r) {
-    for (int i = 0; i < r->num_diagnostics; i++)
-        free(r->diagnostics[i].message);
-    free(r->diagnostics);
-    for (int i = 0; i < r->num_symbols; i++)
-        symbol_free(&r->symbols[i]);
-    free(r->symbols);
-    free(r->sem_spans);
-    for (int i = 0; i < r->num_tokens; i++)
-        token_free(&r->tokens[i]);
-    free(r->tokens);
-    memset(r, 0, sizeof(*r));
-}
-
-static void push_diagnostic(ParseResult *r, LspRange range, int severity, const char *msg) {
-    if (r->num_diagnostics >= r->diag_cap) {
-        int nc = r->diag_cap ? r->diag_cap * 2 : 4;
-        r->diagnostics = realloc(r->diagnostics, nc * sizeof(Diagnostic));
-        r->diag_cap = nc;
-    }
-    r->diagnostics[r->num_diagnostics++] = (Diagnostic){ range, severity, strdup(msg) };
-}
-
-static void push_symbol(ParseResult *r, Symbol s) {
-    if (r->num_symbols >= r->sym_cap) {
-        int nc = r->sym_cap ? r->sym_cap * 2 : 4;
-        r->symbols = realloc(r->symbols, nc * sizeof(Symbol));
-        r->sym_cap = nc;
-    }
-    r->symbols[r->num_symbols++] = s;
-}
-
-static void push_sem_span(ParseResult *r, uint32_t line, uint32_t col, uint32_t len) {
-    if (r->num_sem_spans >= r->sem_cap) {
-        int nc = r->sem_cap ? r->sem_cap * 2 : 16;
-        r->sem_spans = realloc(r->sem_spans, nc * sizeof(SemanticSpan));
-        r->sem_cap = nc;
-    }
-    r->sem_spans[r->num_sem_spans++] = (SemanticSpan){ line, col, len };
-}
+/* ── Semantic span collection ────────────────────────────────────────────── */
 
 /* Scan the token array for scissors strings and split into per-line spans. */
-static void collect_sem_spans(ParseResult *r, const Token *tokens, int num_tokens) {
+static void collect_sem_spans(ParseResult *r, const Token *tokens,
+                               int num_tokens) {
     for (int i = 0; i < num_tokens; i++) {
         if (tokens[i].kind != TK_MULTI_LINE_STR) continue;
 
@@ -476,244 +195,27 @@ static void collect_sem_spans(ParseResult *r, const Token *tokens, int num_token
     }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   Parser state
-   ═══════════════════════════════════════════════════════════════════════════ */
+/* ── Dependency validation (second pass over token array) ───────────────── */
 
-typedef struct {
-    Token *tokens;
-    int    n, pos;
-} Parser;
-
-static void parser_init(Parser *p, const char *src) {
-    int cap = 0;
-    p->tokens = NULL;
-    p->n = 0;
-    p->pos = 0;
-    Lexer l;
-    lexer_init(&l, src);
-    for (;;) {
-        if (p->n >= cap) {
-            cap = cap ? cap * 2 : 64;
-            p->tokens = realloc(p->tokens, cap * sizeof(Token));
-        }
-        Token t = lexer_next(&l);
-        p->tokens[p->n++] = t;
-        if (t.kind == TK_EOF) break;
-    }
-}
-
-
-static Token *parser_peek(Parser *p) {
-    return &p->tokens[p->pos];
-}
-
-static Token parser_advance(Parser *p) {
-    Token t = p->tokens[p->pos];
-    /* Duplicate text since the token owns it */
-    t.text = strdup(t.text);
-    if (p->pos + 1 < p->n) p->pos++;
-    return t;
-}
-
-static int parser_at_eof(Parser *p) {
-    return parser_peek(p)->kind == TK_EOF;
-}
-
-static void parser_skip_trivia(Parser *p) {
-    while (parser_peek(p)->kind == TK_LINE_COMMENT
-        || parser_peek(p)->kind == TK_BLOCK_COMMENT)
-        p->pos++;
-}
-
-/* Forward declarations */
-static Symbol *parse_items(Parser *p, ParseResult *r, int *out_n);
-static Symbol  try_parse_symbol(Parser *p, ParseResult *r, Token kw, int *ok);
-static LspPos  skip_args(Parser *p);
-static void    skip_item_tail(Parser *p);
-static void    skip_block_body(Parser *p);
-
-static Symbol *parse_items(Parser *p, ParseResult *r, int *out_n) {
-    Symbol *syms = NULL;
-    int n = 0, cap = 0;
-
-    for (;;) {
-        parser_skip_trivia(p);
-        TokenKind k = parser_peek(p)->kind;
-
-        if (k == TK_EOF || k == TK_RBRACE) break;
-
-        if (k == TK_ERROR) {
-            Token t = parser_advance(p);
-            LspRange rng = { t.start, t.end };
-            push_diagnostic(r, rng, DIAG_ERROR, t.text);
-            token_free(&t);
-            continue;
-        }
-
-        if (k == TK_IDENT) {
-            Token kw = parser_advance(p);
-            parser_skip_trivia(p);
-            if (is_symbol_keyword(kw.text)) {
-                int ok = 0;
-                Symbol sym = try_parse_symbol(p, r, kw, &ok);
-                /* try_parse_symbol always takes ownership of kw and frees it */
-                if (ok) {
-                    if (n >= cap) {
-                        cap = cap ? cap * 2 : 4;
-                        syms = realloc(syms, cap * sizeof(Symbol));
-                    }
-                    syms[n++] = sym;
-                }
-            } else {
-                skip_item_tail(p);
-                token_free(&kw);
-            }
-            continue;
-        }
-
-        p->pos++;
-    }
-
-    *out_n = n;
-    return syms;
-}
-
-static Symbol try_parse_symbol(Parser *p, ParseResult *r, Token kw, int *ok) {
-    *ok = 0;
-
-    /* Optional id */
-    char *id = NULL;
-    LspPos sel_start = kw.start, sel_end = kw.end;
-    if (parser_peek(p)->kind == TK_IDENT) {
-        Token t = parser_advance(p);
-        id       = t.text; /* take ownership */
-        sel_start = t.start;
-        sel_end   = t.end;
-        parser_skip_trivia(p);
-    } else if (parser_peek(p)->kind != TK_STR) {
-        /* Neither ident nor string — skip */
-        skip_item_tail(p);
-        token_free(&kw);
-        return (Symbol){0};
-    }
-
-    /* Optional display name (quoted string) */
-    LspPos range_end = sel_end;
-    char *name = NULL;
-    if (parser_peek(p)->kind == TK_STR) {
-        Token t = parser_advance(p);
-        name      = t.text; /* take ownership */
-        range_end = t.end;
-        parser_skip_trivia(p);
-    } else if (!id) {
-        /* No id and no string — nothing useful */
-        skip_item_tail(p);
-        token_free(&kw);
-        return (Symbol){0};
-    } else {
-        name = strdup(id);
-    }
-
-    /* Skip remaining inline args */
-    LspPos args_end = skip_args(p);
-    if (args_end.line > range_end.line
-            || (args_end.line == range_end.line && args_end.character > range_end.character))
-        range_end = args_end;
-
-    /* Optional body block */
-    Symbol children_holder = {0};
-    if (parser_peek(p)->kind == TK_LBRACE) {
-        Token open = parser_advance(p);
-        int cn = 0;
-        Symbol *ch = parse_items(p, r, &cn);
-        children_holder.children = ch;
-        children_holder.num_children = cn;
-        if (parser_peek(p)->kind == TK_RBRACE) {
-            Token close = parser_advance(p);
-            range_end = close.end;
-            token_free(&close);
-        } else {
-            LspRange rng = { open.start, open.end };
-            push_diagnostic(r, rng, DIAG_ERROR, "unclosed `{`");
-        }
-        token_free(&open);
-    }
-
-    Symbol sym = {0};
-    sym.name   = name;
-    sym.detail = id ? id : strdup(kw.text);
-    sym.kind   = symbol_kind_for(kw.text);
-    sym.range  = (LspRange){ kw.start, range_end };
-    sym.selection_range = (LspRange){ sel_start, sel_end };
-    sym.children     = children_holder.children;
-    sym.num_children = children_holder.num_children;
-    sym.children_cap = children_holder.num_children;
-
-    token_free(&kw);
-    *ok = 1;
-    return sym;
-}
-
-/* Skip inline args; returns end position of last consumed token (or zero). */
-static LspPos skip_args(Parser *p) {
-    LspPos last = {0};
-    for (;;) {
-        parser_skip_trivia(p);
-        TokenKind k = parser_peek(p)->kind;
-        if (k == TK_LBRACE || k == TK_RBRACE || k == TK_EOF) break;
-        if (k == TK_IDENT && is_decl_keyword(parser_peek(p)->text)) break;
-        Token t = parser_advance(p);
-        last = t.end;
-        token_free(&t);
-    }
-    return last;
-}
-
-static void skip_item_tail(Parser *p) {
-    for (;;) {
-        parser_skip_trivia(p);
-        TokenKind k = parser_peek(p)->kind;
-        if (k == TK_EOF || k == TK_RBRACE) break;
-        if (k == TK_LBRACE) {
-            p->pos++;
-            skip_block_body(p);
-            break;
-        }
-        if (k == TK_IDENT && is_decl_keyword(parser_peek(p)->text)) break;
-        p->pos++;
-    }
-}
-
-static void skip_block_body(Parser *p) {
-    int depth = 1;
-    while (depth > 0 && !parser_at_eof(p)) {
-        TokenKind k = parser_peek(p)->kind;
-        if (k == TK_LBRACE) depth++;
-        else if (k == TK_RBRACE) depth--;
-        p->pos++;
-    }
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   Dependency validation (second pass)
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-static int resolve_from(const Symbol *syms, int n, const char **segs, int nseg) {
+static int resolve_from(const Symbol *syms, int n, const char **segs,
+                        int nseg) {
     if (nseg == 0) return 1;
     for (int i = 0; i < n; i++) {
-        if (syms[i].kind == SK_FUNCTION && strcmp(syms[i].detail, segs[0]) == 0)
-            return resolve_from(syms[i].children, syms[i].num_children, segs + 1, nseg - 1);
+        if (syms[i].kind == SK_FUNCTION
+                && strcmp(syms[i].detail, segs[0]) == 0)
+            return resolve_from(syms[i].children, syms[i].num_children,
+                                segs + 1, nseg - 1);
     }
     return 0;
 }
 
 static const Symbol *find_scope_local(const Symbol *syms, int n,
-                                       const char **path, int plen,
-                                       int *out_n) {
+                                      const char **path, int plen,
+                                      int *out_n) {
     if (plen == 0) { *out_n = n; return syms; }
     for (int i = 0; i < n; i++) {
-        if (syms[i].kind == SK_FUNCTION && strcmp(syms[i].detail, path[0]) == 0)
+        if (syms[i].kind == SK_FUNCTION
+                && strcmp(syms[i].detail, path[0]) == 0)
             return find_scope_local(syms[i].children, syms[i].num_children,
                                     path + 1, plen - 1, out_n);
     }
@@ -722,8 +224,8 @@ static const Symbol *find_scope_local(const Symbol *syms, int n,
 }
 
 static int validate_ref(const Symbol *syms, int nsym,
-                         const char **scope, int scope_len,
-                         int bang_count, const char *id_text) {
+                        const char **scope, int scope_len,
+                        int bang_count, const char *id_text) {
     const Symbol *ctx;
     int nctx;
     if (bang_count == 0) {
@@ -736,7 +238,6 @@ static int validate_ref(const Symbol *syms, int nsym,
         if (!ctx) { nctx = 0; ctx = NULL; }
     }
 
-    /* Split id_text by '.' */
     char buf[512];
     strncpy(buf, id_text, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
@@ -749,32 +250,31 @@ static int validate_ref(const Symbol *syms, int nsym,
 }
 
 static void validate_deps(const Token *tokens, int num_tokens,
-                           const Symbol *syms, int nsym,
-                           ParseResult *r) {
+                          const Symbol *syms, int nsym,
+                          ParseResult *r) {
     typedef enum { SS_SCAN, SS_EXPECT_ID, SS_BEFORE_LBRACE } SState;
 
-    SState sstate     = SS_SCAN;
-    char  *pending_id = NULL;
+    SState sstate      = SS_SCAN;
+    char  *pending_id  = NULL;
     int    brace_depth = 0;
-    int    in_deps    = 0;
+    int    in_deps     = 0;
     int    needs_comma = 0;
 
-    /* task_stack: (id, depth) pairs — using two parallel arrays */
     char     *ts_ids[128];
     uint32_t  ts_dep[128];
     int       ts_n = 0;
 
-    /* Bang tracking (replaces TokBuf) */
     int    bang_count       = 0;
     LspPos bang_first_start = {0};
     LspPos bang_last_end    = {0};
 
     for (int ti = 0; ti < num_tokens; ti++) {
-        const Token *tok = &tokens[ti];
-        if (tok->kind == TK_EOF) break;
-        if (tok->kind == TK_LINE_COMMENT || tok->kind == TK_BLOCK_COMMENT) continue;
+        const Token *t = &tokens[ti];
+        if (t->kind == TK_EOF) break;
+        if (t->kind == TK_LINE_COMMENT || t->kind == TK_BLOCK_COMMENT)
+            continue;
 
-        switch (tok->kind) {
+        switch (t->kind) {
         case TK_LBRACE:
             in_deps     = 0;
             needs_comma = 0;
@@ -783,7 +283,7 @@ static void validate_deps(const Token *tokens, int num_tokens,
             if (sstate == SS_BEFORE_LBRACE && pending_id) {
                 if (ts_n < 128) {
                     ts_ids[ts_n] = pending_id;
-                    ts_dep[ts_n] = brace_depth;
+                    ts_dep[ts_n] = (uint32_t)brace_depth;
                     ts_n++;
                     pending_id = NULL;
                 }
@@ -797,10 +297,8 @@ static void validate_deps(const Token *tokens, int num_tokens,
             in_deps     = 0;
             needs_comma = 0;
             bang_count  = 0;
-            /* pop tasks at this depth */
-            while (ts_n > 0 && ts_dep[ts_n - 1] >= (uint32_t)brace_depth) {
+            while (ts_n > 0 && ts_dep[ts_n - 1] >= (uint32_t)brace_depth)
                 free(ts_ids[--ts_n]);
-            }
             if (brace_depth > 0) brace_depth--;
             sstate     = SS_SCAN;
             free(pending_id);
@@ -814,9 +312,9 @@ static void validate_deps(const Token *tokens, int num_tokens,
                     needs_comma = 0;
                     bang_count  = 0;
                 } else {
-                    if (bang_count == 0) bang_first_start = tok->start;
+                    if (bang_count == 0) bang_first_start = t->start;
                     bang_count++;
-                    bang_last_end = tok->end;
+                    bang_last_end = t->end;
                 }
             }
             break;
@@ -830,13 +328,12 @@ static void validate_deps(const Token *tokens, int num_tokens,
 
         case TK_IDENT:
             if (in_deps) {
-                if (is_decl_keyword(tok->text) || is_task_attr_keyword(tok->text)) {
+                if (is_decl_keyword(t->text) || is_task_attr_keyword(t->text)) {
                     in_deps     = 0;
                     needs_comma = 0;
                     bang_count  = 0;
-                    /* fall through to scope tracking */
-                } else if (strcmp(tok->text, "depends") == 0
-                        || strcmp(tok->text, "precedes") == 0) {
+                } else if (strcmp(t->text, "depends") == 0
+                        || strcmp(t->text, "precedes") == 0) {
                     bang_count  = 0;
                     needs_comma = 0;
                     break;
@@ -844,21 +341,21 @@ static void validate_deps(const Token *tokens, int num_tokens,
                     in_deps     = 0;
                     needs_comma = 0;
                     bang_count  = 0;
-                    /* fall through to scope tracking */
                 } else {
-                    /* Validate this dep reference */
                     const char *scope[128];
                     for (int i = 0; i < ts_n; i++) scope[i] = ts_ids[i];
 
-                    if (!validate_ref(syms, nsym, scope, ts_n, bang_count, tok->text)) {
+                    if (!validate_ref(syms, nsym, scope, ts_n,
+                                      bang_count, t->text)) {
                         if (bang_count > 0 && bang_count > ts_n) {
                             LspRange rng = { bang_first_start, bang_last_end };
                             push_diagnostic(r, rng, DIAG_WARNING,
                                 "dependency reference escapes beyond project root");
                         } else {
                             char msg[256];
-                            snprintf(msg, sizeof(msg), "unresolved task: `%s`", tok->text);
-                            LspRange rng = { tok->start, tok->end };
+                            snprintf(msg, sizeof(msg),
+                                     "unresolved task: `%s`", t->text);
+                            LspRange rng = { t->start, t->end };
                             push_diagnostic(r, rng, DIAG_ERROR, msg);
                         }
                     }
@@ -868,19 +365,19 @@ static void validate_deps(const Token *tokens, int num_tokens,
                 }
             }
 
-            /* Scope tracking */
-            if (strcmp(tok->text, "depends") == 0 || strcmp(tok->text, "precedes") == 0) {
+            if (strcmp(t->text, "depends") == 0
+                    || strcmp(t->text, "precedes") == 0) {
                 in_deps     = 1;
                 needs_comma = 0;
                 bang_count  = 0;
                 sstate = SS_SCAN;
-            } else if (strcmp(tok->text, "task") == 0) {
+            } else if (strcmp(t->text, "task") == 0) {
                 sstate = SS_EXPECT_ID;
                 free(pending_id);
                 pending_id = NULL;
             } else if (sstate == SS_EXPECT_ID) {
                 free(pending_id);
-                pending_id = strdup(tok->text);
+                pending_id = strdup(t->text);
                 sstate     = SS_BEFORE_LBRACE;
             }
             break;
@@ -906,42 +403,36 @@ static void validate_deps(const Token *tokens, int num_tokens,
     for (int i = 0; i < ts_n; i++) free(ts_ids[i]);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   Public parse() entry point
-   ═══════════════════════════════════════════════════════════════════════════ */
+/* ── Public parse() entry point ──────────────────────────────────────────── */
 
 ParseResult parse(const char *src) {
-    Parser p;
-    parser_init(&p, src);
+    /* Set up global state for lexer.l and grammar.y */
+    ParseResult result = {0};
+    g_result     = &result;
+    g_tokens     = NULL;
+    g_num_tokens = 0;
+    g_tok_cap    = 0;
+    yycolumn     = 0;
 
-    ParseResult r = {0};
+    /* Feed source to flex and run the bison parser */
+    YY_BUFFER_STATE buf = yy_scan_string(src);
+    yyparse();
+    yy_delete_buffer(buf);
 
-    for (;;) {
-        int n = 0;
-        Symbol *syms = parse_items(&p, &r, &n);
-        for (int i = 0; i < n; i++) push_symbol(&r, syms[i]);
-        free(syms); /* outer array only; symbols were copied */
+    /* Post-processing passes */
+    collect_sem_spans(&result, g_tokens, g_num_tokens);
+    validate_deps(g_tokens, g_num_tokens,
+                  result.symbols, result.num_symbols, &result);
 
-        parser_skip_trivia(&p);
-        if (parser_at_eof(&p)) break;
+    /* Transfer token-array ownership to the ParseResult */
+    result.tokens     = g_tokens;
+    result.num_tokens = g_num_tokens;
 
-        if (parser_peek(&p)->kind == TK_RBRACE) {
-            Token t = parser_advance(&p);
-            LspRange rng = { t.start, t.end };
-            push_diagnostic(&r, rng, DIAG_ERROR, "unmatched `}`");
-            token_free(&t);
-        } else {
-            p.pos++;
-        }
-    }
+    /* Clear globals */
+    g_result     = NULL;
+    g_tokens     = NULL;
+    g_num_tokens = 0;
+    g_tok_cap    = 0;
 
-    /* Collect semantic spans and validate deps from the token array */
-    collect_sem_spans(&r, p.tokens, p.n);
-    validate_deps(p.tokens, p.n, r.symbols, r.num_symbols, &r);
-
-    /* Transfer token array ownership to ParseResult; don't call parser_free */
-    r.tokens     = p.tokens;
-    r.num_tokens = p.n;
-
-    return r;
+    return result;
 }

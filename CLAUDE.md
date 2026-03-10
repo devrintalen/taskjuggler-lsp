@@ -10,7 +10,10 @@ The project supports TaskJuggler v3 and does not support earlier versions.
 
 ## Dependencies
 
-Depends on cJSON.
+Depends on:
+- cJSON
+- Flex
+- Bison
 
 ## Architecture
 
