@@ -19,6 +19,9 @@ all: $(BIN)
 $(BIN): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+# All object files need the generated header for token type definitions.
+$(OBJ): $(GEN_HDR)
+
 # Bison must run before flex so that grammar.tab.h exists when lexer.l is
 # compiled (the flex output #includes grammar.tab.h for token codes).
 $(GEN_GRAM) $(GEN_HDR): src/grammar.y
