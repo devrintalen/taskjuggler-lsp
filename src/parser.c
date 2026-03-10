@@ -83,7 +83,7 @@ void parse_result_free(ParseResult *r) {
     for (int i = 0; i < r->num_symbols; i++)
         symbol_free(&r->symbols[i]);
     free(r->symbols);
-    free(r->sem_spans);
+
     for (int i = 0; i < r->num_tokens; i++)
         token_free(&r->tokens[i]);
     free(r->tokens);
@@ -109,17 +109,6 @@ void push_symbol(ParseResult *r, Symbol s) {
         r->sym_cap = nc;
     }
     r->symbols[r->num_symbols++] = s;
-}
-
-static void push_sem_span(ParseResult *r, uint32_t line, uint32_t col,
-                          uint32_t len) {
-    if (r->num_sem_spans >= r->sem_cap) {
-        int nc = r->sem_cap ? r->sem_cap * 2 : 16;
-        r->sem_spans = realloc(r->sem_spans,
-                               (size_t)nc * sizeof(SemanticSpan));
-        r->sem_cap = nc;
-    }
-    r->sem_spans[r->num_sem_spans++] = (SemanticSpan){ line, col, len };
 }
 
 /* ── Keyword classification ──────────────────────────────────────────────── */
@@ -170,30 +159,6 @@ int symbol_kind_for(const char *kw) {
 }
 
 /* ── Semantic span collection ────────────────────────────────────────────── */
-
-/* Scan the token array for scissors strings and split into per-line spans. */
-static void collect_sem_spans(ParseResult *r, const Token *tokens,
-                               int num_tokens) {
-    for (int i = 0; i < num_tokens; i++) {
-        if (tokens[i].kind != TK_MULTI_LINE_STR) continue;
-
-        uint32_t    line = tokens[i].start.line;
-        uint32_t    col  = tokens[i].start.character;
-        const char *p    = tokens[i].text;
-
-        while (*p) {
-            const char *q = p;
-            while (*q && *q != '\n') q++;
-            const char *end = q;
-            if (end > p && *(end - 1) == '\r') end--;
-            uint32_t len = (uint32_t)(end - p);
-            if (len > 0) push_sem_span(r, line, col, len);
-            if (*q == '\n') { q++; line++; col = 0; }
-            else break;
-            p = q;
-        }
-    }
-}
 
 /* ── Dependency validation (second pass over token array) ───────────────── */
 
@@ -540,7 +505,7 @@ ParseResult parse(const char *src) {
     yy_delete_buffer(buf);
 
     /* Post-processing passes */
-    collect_sem_spans(&result, g_tokens, g_num_tokens);
+
     validate_deps(g_tokens, g_num_tokens,
                   result.symbols, result.num_symbols, &result);
 

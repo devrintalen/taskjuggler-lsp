@@ -22,7 +22,6 @@
 #include "hover.h"
 #include "signature.h"
 #include "completion.h"
-#include "semantic_tokens.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -193,19 +192,6 @@ static cJSON *handle_initialize(cJSON *id, cJSON *params) {
     cJSON_AddItemToArray(sn, cJSON_CreateString("taskjuggler-lsp"));
     cJSON_AddItemToObject(server_info, "name", sn);
 
-    /* SemanticTokensLegend */
-    cJSON *legend = cJSON_CreateObject();
-    cJSON *tt = cJSON_CreateArray();
-    cJSON_AddItemToArray(tt, cJSON_CreateString("string"));
-    cJSON *tm = cJSON_CreateArray();
-    cJSON_AddItemToArray(tm, cJSON_CreateString("declaration"));
-    cJSON_AddItemToObject(legend, "tokenTypes",     tt);
-    cJSON_AddItemToObject(legend, "tokenModifiers", tm);
-
-    cJSON *sem_opts = cJSON_CreateObject();
-    cJSON_AddItemToObject(sem_opts, "legend", legend);
-    cJSON_AddBoolToObject(sem_opts, "full", 1);
-
     /* Completion options */
     cJSON *comp_triggers = cJSON_CreateArray();
     cJSON_AddItemToArray(comp_triggers, cJSON_CreateString(","));
@@ -232,7 +218,6 @@ static cJSON *handle_initialize(cJSON *id, cJSON *params) {
     cJSON_AddBoolToObject(caps, "hoverProvider",          1);
     cJSON_AddItemToObject(caps, "signatureHelpProvider",  sig_opts);
     cJSON_AddItemToObject(caps, "completionProvider",     comp_opts);
-    cJSON_AddItemToObject(caps, "semanticTokensProvider", sem_opts);
 
     cJSON *result = cJSON_CreateObject();
     cJSON_AddItemToObject(result, "capabilities", caps);
@@ -434,17 +419,6 @@ static cJSON *handle_completion(cJSON *id, cJSON *params) {
     return make_response(id, result);
 }
 
-static cJSON *handle_semantic_tokens(cJSON *id, cJSON *params) {
-    const char *uri = NULL;
-    cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
-    if (td) uri = json_str(td, "uri");
-    if (!uri) return make_response(id, cJSON_CreateNull());
-
-    Document *d = doc_find(uri);
-    if (!d) return make_response(id, cJSON_CreateNull());
-
-    return make_response(id, build_semantic_tokens_json(&d->parse));
-}
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Main dispatch
@@ -498,8 +472,6 @@ char *server_process(const char *json_text) {
     } else if (strcmp(m, "textDocument/completion") == 0) {
         resp = handle_completion(id_item, params);
 
-    } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
-        resp = handle_semantic_tokens(id_item, params);
 
     } else if (id_item) {
         /* Unknown request — return null result */
