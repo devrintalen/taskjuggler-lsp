@@ -225,7 +225,7 @@ static const Symbol *find_scope_local(const Symbol *syms, int n,
 
 static int validate_ref(const Symbol *syms, int nsym,
                         const char **scope, int scope_len,
-                        int bang_count, const char *id_text) {
+                        int bang_count, const char **segs, int nseg) {
     const Symbol *ctx;
     int nctx;
     if (bang_count == 0) {
@@ -237,15 +237,6 @@ static int validate_ref(const Symbol *syms, int nsym,
         ctx = find_scope_local(syms, nsym, scope, k - bang_count, &nctx);
         if (!ctx) { nctx = 0; ctx = NULL; }
     }
-
-    char buf[512];
-    strncpy(buf, id_text, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
-    const char *segs[64];
-    int nseg = 0;
-    char *tok = strtok(buf, ".");
-    while (tok && nseg < 64) { segs[nseg++] = tok; tok = strtok(NULL, "."); }
-
     return resolve_from(ctx, nctx, segs, nseg);
 }
 
@@ -268,17 +259,66 @@ static void validate_deps(const Token *tokens, int num_tokens,
     LspPos bang_first_start = {0};
     LspPos bang_last_end    = {0};
 
+    /* Current dep-path accumulator.
+     * dep_segs[] borrows pointers directly from the token array (no strdup).
+     * after_dot: we just consumed a TK_DOT and are waiting for the next segment.
+     * building_dep: at least one segment has been accumulated. */
+    int         building_dep = 0;
+    int         after_dot    = 0;
+    const char *dep_segs[64];
+    int         dep_nseg     = 0;
+    LspPos      dep_rstart   = {0};
+    LspPos      dep_rend     = {0};
+
     for (int ti = 0; ti < num_tokens; ti++) {
         const Token *t = &tokens[ti];
         if (t->kind == TK_EOF) break;
         if (t->kind == TK_LINE_COMMENT || t->kind == TK_BLOCK_COMMENT)
             continue;
 
+        /* Finalize a pending dep path when the current token cannot extend it:
+         * - not a TK_DOT while after_dot=0 (would extend the path)
+         * - not a TK_IDENT while after_dot=1 (would add the next segment) */
+        if (in_deps && building_dep) {
+            int extends = (!after_dot && t->kind == TK_DOT)
+                       || ( after_dot && t->kind == TK_IDENT);
+            if (!extends) {
+                const char *scope[128];
+                for (int i = 0; i < ts_n; i++) scope[i] = ts_ids[i];
+                if (!validate_ref(syms, nsym, scope, ts_n,
+                                  bang_count, dep_segs, dep_nseg)) {
+                    if (bang_count > 0 && bang_count > ts_n) {
+                        LspRange rng = { bang_first_start, bang_last_end };
+                        push_diagnostic(r, rng, DIAG_WARNING,
+                            "dependency reference escapes beyond project root");
+                    } else {
+                        char path[256] = "";
+                        for (int i = 0; i < dep_nseg; i++) {
+                            if (i > 0) strncat(path, ".", sizeof(path) - strlen(path) - 1);
+                            strncat(path, dep_segs[i], sizeof(path) - strlen(path) - 1);
+                        }
+                        char msg[320];
+                        snprintf(msg, sizeof(msg), "unresolved task: `%s`", path);
+                        LspRange rng = { dep_rstart, dep_rend };
+                        push_diagnostic(r, rng, DIAG_ERROR, msg);
+                    }
+                }
+                bang_count   = 0;
+                needs_comma  = 1;
+                building_dep = 0;
+                after_dot    = 0;
+                dep_nseg     = 0;
+            }
+        }
+
         switch (t->kind) {
         case TK_LBRACE:
-            in_deps     = 0;
-            needs_comma = 0;
-            bang_count  = 0;
+            in_deps      = 0;
+            needs_comma  = 0;
+            bang_count   = 0;
+            building_dep = 0;
+            after_dot    = 0;
+            dep_nseg     = 0;
             brace_depth++;
             if (sstate == SS_BEFORE_LBRACE && pending_id) {
                 if (ts_n < 128) {
@@ -294,9 +334,12 @@ static void validate_deps(const Token *tokens, int num_tokens,
             break;
 
         case TK_RBRACE:
-            in_deps     = 0;
-            needs_comma = 0;
-            bang_count  = 0;
+            in_deps      = 0;
+            needs_comma  = 0;
+            bang_count   = 0;
+            building_dep = 0;
+            after_dot    = 0;
+            dep_nseg     = 0;
             while (ts_n > 0 && ts_dep[ts_n - 1] >= (uint32_t)brace_depth)
                 free(ts_ids[--ts_n]);
             if (brace_depth > 0) brace_depth--;
@@ -308,14 +351,31 @@ static void validate_deps(const Token *tokens, int num_tokens,
         case TK_BANG:
             if (in_deps) {
                 if (needs_comma) {
-                    in_deps     = 0;
-                    needs_comma = 0;
-                    bang_count  = 0;
+                    in_deps      = 0;
+                    needs_comma  = 0;
+                    bang_count   = 0;
+                    building_dep = 0;
+                    after_dot    = 0;
+                    dep_nseg     = 0;
                 } else {
                     if (bang_count == 0) bang_first_start = t->start;
                     bang_count++;
                     bang_last_end = t->end;
                 }
+            }
+            break;
+
+        case TK_DOT:
+            /* Extend the current dep path: deliveries . start */
+            if (in_deps && building_dep && !after_dot) {
+                after_dot = 1;
+            } else if (in_deps) {
+                in_deps      = 0;
+                needs_comma  = 0;
+                bang_count   = 0;
+                building_dep = 0;
+                after_dot    = 0;
+                dep_nseg     = 0;
             }
             break;
 
@@ -329,47 +389,53 @@ static void validate_deps(const Token *tokens, int num_tokens,
         case TK_IDENT:
             if (in_deps) {
                 if (is_decl_keyword(t->text) || is_task_attr_keyword(t->text)) {
-                    in_deps     = 0;
-                    needs_comma = 0;
-                    bang_count  = 0;
+                    in_deps      = 0;
+                    needs_comma  = 0;
+                    bang_count   = 0;
+                    building_dep = 0;
+                    after_dot    = 0;
+                    dep_nseg     = 0;
                 } else if (strcmp(t->text, "depends") == 0
                         || strcmp(t->text, "precedes") == 0) {
-                    bang_count  = 0;
-                    needs_comma = 0;
+                    bang_count   = 0;
+                    needs_comma  = 0;
+                    building_dep = 0;
+                    after_dot    = 0;
+                    dep_nseg     = 0;
                     break;
                 } else if (needs_comma) {
-                    in_deps     = 0;
-                    needs_comma = 0;
-                    bang_count  = 0;
+                    in_deps      = 0;
+                    needs_comma  = 0;
+                    bang_count   = 0;
+                    building_dep = 0;
+                    after_dot    = 0;
+                    dep_nseg     = 0;
+                } else if (building_dep && after_dot) {
+                    /* Next segment of a dotted dep path */
+                    if (dep_nseg < 64) dep_segs[dep_nseg++] = t->text;
+                    dep_rend  = t->end;
+                    after_dot = 0;
+                    break;
                 } else {
-                    const char *scope[128];
-                    for (int i = 0; i < ts_n; i++) scope[i] = ts_ids[i];
-
-                    if (!validate_ref(syms, nsym, scope, ts_n,
-                                      bang_count, t->text)) {
-                        if (bang_count > 0 && bang_count > ts_n) {
-                            LspRange rng = { bang_first_start, bang_last_end };
-                            push_diagnostic(r, rng, DIAG_WARNING,
-                                "dependency reference escapes beyond project root");
-                        } else {
-                            char msg[256];
-                            snprintf(msg, sizeof(msg),
-                                     "unresolved task: `%s`", t->text);
-                            LspRange rng = { t->start, t->end };
-                            push_diagnostic(r, rng, DIAG_ERROR, msg);
-                        }
-                    }
-                    bang_count  = 0;
-                    needs_comma = 1;
+                    /* First segment of a new dep arg */
+                    dep_nseg         = 0;
+                    dep_segs[dep_nseg++] = t->text;
+                    dep_rstart       = t->start;
+                    dep_rend         = t->end;
+                    building_dep     = 1;
+                    after_dot        = 0;
                     break;
                 }
             }
 
             if (strcmp(t->text, "depends") == 0
                     || strcmp(t->text, "precedes") == 0) {
-                in_deps     = 1;
-                needs_comma = 0;
-                bang_count  = 0;
+                in_deps      = 1;
+                needs_comma  = 0;
+                bang_count   = 0;
+                building_dep = 0;
+                after_dot    = 0;
+                dep_nseg     = 0;
                 sstate = SS_SCAN;
             } else if (strcmp(t->text, "task") == 0) {
                 sstate = SS_EXPECT_ID;
@@ -385,8 +451,11 @@ static void validate_deps(const Token *tokens, int num_tokens,
         default:
             if (in_deps) {
                 if (needs_comma) {
-                    in_deps     = 0;
-                    needs_comma = 0;
+                    in_deps      = 0;
+                    needs_comma  = 0;
+                    building_dep = 0;
+                    after_dot    = 0;
+                    dep_nseg     = 0;
                 }
                 bang_count = 0;
             }

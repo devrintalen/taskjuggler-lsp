@@ -35,8 +35,11 @@ static const char *token_kind_name(int k) {
     case TK_BANG:           return "BANG";
     case TK_PLUS:           return "PLUS";
     case TK_MINUS:          return "MINUS";
+    case TK_DOT:            return "DOT";
     case TK_COLON:          return "COLON";
     case TK_COMMA:          return "COMMA";
+    case TK_PERCENT:        return "PERCENT";
+    case TK_DOLLAR:         return "DOLLAR";
     case TK_LINE_COMMENT:   return "LINE_COMMENT";
     case TK_BLOCK_COMMENT:  return "BLOCK_COMMENT";
     case TK_MULTI_LINE_STR: return "MULTI_LINE_STR";

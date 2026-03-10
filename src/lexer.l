@@ -182,8 +182,10 @@ static int keyword_token(const char *s) {
 
 [0-9]+           { emit(TK_INTEGER, yytext); return TK_INTEGER; }
 
-    /* Identifier / keyword: letters, digits, '_', '.', ':', high UTF-8 bytes */
-[a-zA-Z_\x80-\xFF][a-zA-Z0-9_.:\x80-\xFF]* {
+    /* Identifier / keyword: letters, digits, '_', ':', high UTF-8 bytes.
+     * '.' is NOT included; it is emitted as TK_DOT so that dotted dependency
+     * paths (e.g. deliveries.start) can be resolved component-wise by the LSP. */
+[a-zA-Z_\x80-\xFF][a-zA-Z0-9_:\x80-\xFF]* {
     int tok = keyword_token(yytext);
     emit(TK_IDENT, yytext); /* always TK_IDENT in token array */
     yylval.tok.kind = tok;  /* KW_* for symbol keywords        */
@@ -197,9 +199,11 @@ static int keyword_token(const char *s) {
 "!"     { emit(TK_BANG,     yytext); return TK_BANG;     }
 "+"     { emit(TK_PLUS,     yytext); return TK_PLUS;     }
 "-"     { emit(TK_MINUS,    yytext); return TK_MINUS;    }
+"."     { emit(TK_DOT,      yytext); return TK_DOT;      }
 ":"     { emit(TK_COLON,    yytext); return TK_COLON;    }
 ","     { emit(TK_COMMA,    yytext); return TK_COMMA;    }
 "%"     { emit(TK_PERCENT,  yytext); return TK_PERCENT;  }
+"$"     { emit(TK_DOLLAR,   yytext); return TK_DOLLAR;   }
 
 .       { char msg[48];
           snprintf(msg, sizeof(msg), "unexpected character: '%s'", yytext);

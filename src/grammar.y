@@ -36,6 +36,8 @@ typedef struct { Symbol sym; int has_sym; } ItemResult;
 }
 
 %{
+#include "parser.h"        /* Token, Symbol, ParseResult, LspRange, etc. */
+#include "grammar.tab.h"   /* TK_* / KW_* constants, YYSTYPE */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -119,7 +121,7 @@ static Symbol make_symbol(Token kw, Token id, Token name, BodyResult body) {
 %token <tok> TK_STR TK_INTEGER TK_FLOAT TK_DATE
 %token <tok> TK_LBRACE TK_RBRACE
 %token <tok> TK_LBRACKET TK_RBRACKET
-%token <tok> TK_BANG TK_PLUS TK_MINUS TK_COLON TK_COMMA TK_PERCENT
+%token <tok> TK_BANG TK_PLUS TK_MINUS TK_DOT TK_COLON TK_COMMA TK_PERCENT TK_DOLLAR
 %token <tok> TK_MULTI_LINE_STR
 %token <tok> TK_ERROR
 %token       TK_LINE_COMMENT TK_BLOCK_COMMENT  /* stored in token array only; never returned to parser */
@@ -252,9 +254,11 @@ arg_token
     | TK_BANG      { token_free(&$1); }
     | TK_PLUS      { token_free(&$1); }
     | TK_MINUS     { token_free(&$1); }
+    | TK_DOT       { token_free(&$1); }
     | TK_COLON     { token_free(&$1); }
     | TK_COMMA     { token_free(&$1); }
     | TK_PERCENT   { token_free(&$1); }
+    | TK_DOLLAR    { token_free(&$1); }
     | TK_LBRACKET  { token_free(&$1); }
     | TK_RBRACKET  { token_free(&$1); }
     | TK_MULTI_LINE_STR { token_free(&$1); }
