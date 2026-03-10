@@ -116,6 +116,11 @@ static Symbol make_symbol(Token kw, Token id, Token name, BodyResult body) {
  */
 
 %token <tok> KW_PROJECT KW_TASK KW_RESOURCE KW_ACCOUNT KW_SHIFT
+%token <tok> KW_ACCOUNTPREFIX KW_ACCOUNTREPORT KW_ACCOUNTROOT KW_ACTIVE
+%token <tok> KW_ADOPT KW_AGGREGATE KW_ALERT KW_ALERTLEVELS KW_ALLOCATE
+%token <tok> KW_ALTERNATIVE KW_AUTHOR KW_AUXDIR KW_BALANCE KW_BOOKING
+%token <tok> KW_CAPTION KW_CELLCOLOR KW_CELLTEXT KW_CENTER KW_CHARGE
+%token <tok> KW_CHARGESET KW_COLUMNS KW_COMPLETE KW_COPYRIGHT
 
 %token <tok> TK_IDENT
 %token <tok> TK_STR TK_INTEGER TK_FLOAT TK_DATE
@@ -263,6 +268,31 @@ arg_token
     | TK_RBRACKET  { token_free(&$1); }
     | TK_MULTI_LINE_STR { token_free(&$1); }
     | TK_ERROR     { token_free(&$1); }
+    /* All KW_* tokens that are not sym_kw must be listed here so the grammar
+     * can consume them in argument/attribute positions inside any block. */
+    | KW_ACCOUNTPREFIX { token_free(&$1); }
+    | KW_ACCOUNTREPORT { token_free(&$1); }
+    | KW_ACCOUNTROOT   { token_free(&$1); }
+    | KW_ACTIVE        { token_free(&$1); }
+    | KW_ADOPT         { token_free(&$1); }
+    | KW_AGGREGATE     { token_free(&$1); }
+    | KW_ALERT         { token_free(&$1); }
+    | KW_ALERTLEVELS   { token_free(&$1); }
+    | KW_ALLOCATE      { token_free(&$1); }
+    | KW_ALTERNATIVE   { token_free(&$1); }
+    | KW_AUTHOR        { token_free(&$1); }
+    | KW_AUXDIR        { token_free(&$1); }
+    | KW_BALANCE       { token_free(&$1); }
+    | KW_BOOKING       { token_free(&$1); }
+    | KW_CAPTION       { token_free(&$1); }
+    | KW_CELLCOLOR     { token_free(&$1); }
+    | KW_CELLTEXT      { token_free(&$1); }
+    | KW_CENTER        { token_free(&$1); }
+    | KW_CHARGE        { token_free(&$1); }
+    | KW_CHARGESET     { token_free(&$1); }
+    | KW_COLUMNS       { token_free(&$1); }
+    | KW_COMPLETE      { token_free(&$1); }
+    | KW_COPYRIGHT     { token_free(&$1); }
     ;
 
 /*

@@ -437,14 +437,65 @@ static void validate_deps(const Token *tokens, int num_tokens,
                 after_dot    = 0;
                 dep_nseg     = 0;
                 sstate = SS_SCAN;
-            } else if (strcmp(t->text, "task") == 0) {
-                sstate = SS_EXPECT_ID;
-                free(pending_id);
-                pending_id = NULL;
             } else if (sstate == SS_EXPECT_ID) {
                 free(pending_id);
                 pending_id = strdup(t->text);
                 sstate     = SS_BEFORE_LBRACE;
+            }
+            break;
+
+        /* KW_TASK: exit deps and begin scope tracking for the new task ID. */
+        case KW_TASK:
+            in_deps      = 0;
+            needs_comma  = 0;
+            bang_count   = 0;
+            building_dep = 0;
+            after_dot    = 0;
+            dep_nseg     = 0;
+            sstate = SS_EXPECT_ID;
+            free(pending_id);
+            pending_id = NULL;
+            break;
+
+        /* All other symbol-introducing and attribute keywords: just exit deps.
+         * These arrive as KW_* tokens so they never reach the TK_IDENT case. */
+        case KW_PROJECT:
+        case KW_RESOURCE:
+        case KW_ACCOUNT:
+        case KW_SHIFT:
+        case KW_ACCOUNTPREFIX:
+        case KW_ACCOUNTREPORT:
+        case KW_ACCOUNTROOT:
+        case KW_ACTIVE:
+        case KW_ADOPT:
+        case KW_AGGREGATE:
+        case KW_ALERT:
+        case KW_ALERTLEVELS:
+        case KW_ALLOCATE:
+        case KW_ALTERNATIVE:
+        case KW_AUTHOR:
+        case KW_AUXDIR:
+        case KW_BALANCE:
+        case KW_BOOKING:
+        case KW_CAPTION:
+        case KW_CELLCOLOR:
+        case KW_CELLTEXT:
+        case KW_CENTER:
+        case KW_CHARGE:
+        case KW_CHARGESET:
+        case KW_COLUMNS:
+        case KW_COMPLETE:
+        case KW_COPYRIGHT:
+            in_deps      = 0;
+            needs_comma  = 0;
+            bang_count   = 0;
+            building_dep = 0;
+            after_dot    = 0;
+            dep_nseg     = 0;
+            if (sstate == SS_EXPECT_ID) {
+                sstate = SS_SCAN;
+                free(pending_id);
+                pending_id = NULL;
             }
             break;
 

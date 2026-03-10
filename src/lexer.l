@@ -120,6 +120,29 @@ static int keyword_token(const char *s) {
     if (strcmp(s, "resource") == 0) return KW_RESOURCE;
     if (strcmp(s, "account")  == 0) return KW_ACCOUNT;
     if (strcmp(s, "shift")    == 0) return KW_SHIFT;
+    if (strcmp(s, "accountprefix") == 0) return KW_ACCOUNTPREFIX;
+    if (strcmp(s, "accountreport") == 0) return KW_ACCOUNTREPORT;
+    if (strcmp(s, "accountroot")   == 0) return KW_ACCOUNTROOT;
+    if (strcmp(s, "active")   == 0) return KW_ACTIVE;
+    if (strcmp(s, "adopt")    == 0) return KW_ADOPT;
+    if (strcmp(s, "aggregate") == 0) return KW_AGGREGATE;
+    if (strcmp(s, "alert")    == 0) return KW_ALERT;
+    if (strcmp(s, "alertlevels") == 0) return KW_ALERTLEVELS;
+    if (strcmp(s, "allocate") == 0) return KW_ALLOCATE;
+    if (strcmp(s, "alternative") == 0) return KW_ALTERNATIVE;
+    if (strcmp(s, "author")   == 0) return KW_AUTHOR;
+    if (strcmp(s, "auxdir")   == 0) return KW_AUXDIR;
+    if (strcmp(s, "balance")  == 0) return KW_BALANCE;
+    if (strcmp(s, "booking")  == 0) return KW_BOOKING;
+    if (strcmp(s, "caption")  == 0) return KW_CAPTION;
+    if (strcmp(s, "cellcolor") == 0) return KW_CELLCOLOR;
+    if (strcmp(s, "celltext") == 0) return KW_CELLTEXT;
+    if (strcmp(s, "center")   == 0) return KW_CENTER;
+    if (strcmp(s, "charge")   == 0) return KW_CHARGE;
+    if (strcmp(s, "chargeset") == 0) return KW_CHARGESET;
+    if (strcmp(s, "columns")  == 0) return KW_COLUMNS;
+    if (strcmp(s, "complete") == 0) return KW_COMPLETE;
+    if (strcmp(s, "copyright") == 0) return KW_COPYRIGHT;
     return TK_IDENT;
 }
 %}
