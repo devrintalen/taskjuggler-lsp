@@ -39,6 +39,25 @@ ParseResult *g_result      = NULL;
 Token       *g_tokens      = NULL;
 int          g_num_tokens  = 0;
 int          g_tok_cap     = 0;
+SemToken    *g_sem_tokens     = NULL;
+int          g_num_sem_tokens = 0;
+int          g_sem_tok_cap    = 0;
+
+/* Called from lexer.l for every semantically meaningful token. */
+void g_push_sem_token(int kind,
+                      uint32_t sl, uint32_t sc,
+                      uint32_t el, uint32_t ec) {
+    if (g_num_sem_tokens >= g_sem_tok_cap) {
+        g_sem_tok_cap = g_sem_tok_cap ? g_sem_tok_cap * 2 : 64;
+        g_sem_tokens  = realloc(g_sem_tokens,
+                                (size_t)g_sem_tok_cap * sizeof(SemToken));
+    }
+    g_sem_tokens[g_num_sem_tokens++] = (SemToken){
+        .token_kind = kind,
+        .start      = { sl, sc },
+        .end        = { el, ec },
+    };
+}
 
 /* Called from lexer.l for every scanned token. */
 void g_push_token(int kind, const char *text,
@@ -86,6 +105,7 @@ void parse_result_free(ParseResult *r) {
     for (int i = 0; i < r->num_tokens; i++)
         token_free(&r->tokens[i]);
     free(r->tokens);
+    free(r->sem_tokens);
     memset(r, 0, sizeof(*r));
 }
 
@@ -492,11 +512,14 @@ static void validate_deps(const Token *tokens, int num_tokens,
 ParseResult parse(const char *src) {
     /* Set up global state for lexer.l and grammar.y */
     ParseResult result = {0};
-    g_result     = &result;
-    g_tokens     = NULL;
-    g_num_tokens = 0;
-    g_tok_cap    = 0;
-    yycolumn     = 0;
+    g_result          = &result;
+    g_tokens          = NULL;
+    g_num_tokens      = 0;
+    g_tok_cap         = 0;
+    g_sem_tokens      = NULL;
+    g_num_sem_tokens  = 0;
+    g_sem_tok_cap     = 0;
+    yycolumn          = 0;
 
     /* Feed source to flex and run the bison parser */
     YY_BUFFER_STATE buf = yy_scan_string(src);
@@ -508,15 +531,20 @@ ParseResult parse(const char *src) {
     validate_deps(g_tokens, g_num_tokens,
                   result.symbols, result.num_symbols, &result);
 
-    /* Transfer token-array ownership to the ParseResult */
-    result.tokens     = g_tokens;
-    result.num_tokens = g_num_tokens;
+    /* Transfer array ownership to the ParseResult */
+    result.tokens         = g_tokens;
+    result.num_tokens     = g_num_tokens;
+    result.sem_tokens     = g_sem_tokens;
+    result.num_sem_tokens = g_num_sem_tokens;
 
     /* Clear globals */
-    g_result     = NULL;
-    g_tokens     = NULL;
-    g_num_tokens = 0;
-    g_tok_cap    = 0;
+    g_result          = NULL;
+    g_tokens          = NULL;
+    g_num_tokens      = 0;
+    g_tok_cap         = 0;
+    g_sem_tokens      = NULL;
+    g_num_sem_tokens  = 0;
+    g_sem_tok_cap     = 0;
 
     return result;
 }

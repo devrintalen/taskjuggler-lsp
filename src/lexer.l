@@ -43,6 +43,11 @@ int yycolumn = 0;
 /* Start position of the current token, saved before each rule executes. */
 static uint32_t tok_sl = 0, tok_sc = 0;
 
+/* Start position of a multi-fragment token (string / block-comment / scissors).
+ * Saved once when the opening delimiter is matched; tok_sl/tok_sc would be
+ * overwritten by every subsequent fragment before the closing rule fires. */
+static uint32_t mfrag_sl = 0, mfrag_sc = 0;
+
 #define YY_USER_ACTION                          \
     tok_sl   = (uint32_t)(yylineno - 1);        \
     tok_sc   = (uint32_t)yycolumn;              \
@@ -50,38 +55,30 @@ static uint32_t tok_sl = 0, tok_sc = 0;
 
 /* ── store_semantic_token() ──────────────────────────────────────────────── *
  *
- * Records position and type for the current token.  The full semantic-token
- * data structure and helper functions are not yet designed; the body is
- * stubbed out pending that work.
+ * Records the token kind and its start/end position for later use by the
+ * semantic-tokens handler.  Called for every token that carries semantic
+ * meaning (keywords, strings, comments, numbers, dates, durations).
+ * Punctuation and plain identifiers are not recorded.
  *
- * TODO create a semantic token struct
- *
- * Fields: start    (line and column)
- *         end      (line and column)
- *         type     (based on LSP SemanticTokenTypes)
- *         modifier (based on LSP SemanticTokenModifiers)
- *
- * These objects will be used by the SemanticToken code to return
- * text/Document/semanticTokens/* responses.
+ * The mapping from token_kind to LSP SemanticTokenTypes / modifiers is
+ * handled by the semantic-tokens response builder, not here.
  */
 
-/* TODO create a data structure to hold semantic token objects
- *
- * This data structure will need to be efficiently processed by the
- * SemanticToken code. Something that can be traversed linearly efficiently.
- * Possibly just a variable-length array.
- */
+extern void g_push_sem_token(int kind,
+                             uint32_t sl, uint32_t sc,
+                             uint32_t el, uint32_t ec);
 
 static void store_semantic_token(int token) {
-    /* TODO I'm not happy with these function and variable names, improve readability. */
-    /* TODO the el/ec and tok_sl/tok_sc calculations for .start and .end are probably broken. */
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    /* TODO semantic_token.type     = tj_token_to_semantic_type(token); */
-    /* TODO semantic_token.modifier = tj_token_to_semantic_modifier(token); */
-    /* TODO semantic_token.start    = (LspPos){ tok_sl, tok_sc }; */
-    /* TODO semantic_token.end      = (LspPos){ el, ec }; */
-    (void)token; (void)el; (void)ec;
+    g_push_sem_token(token, tok_sl, tok_sc, el, ec);
+}
+
+/* Variant for multi-fragment tokens: uses mfrag_sl/mfrag_sc as the start. */
+static void store_semantic_token_mfrag(int token) {
+    uint32_t el = (uint32_t)(yylineno - 1);
+    uint32_t ec = (uint32_t)yycolumn;
+    g_push_sem_token(token, mfrag_sl, mfrag_sc, el, ec);
 }
 
 %}
@@ -103,9 +100,9 @@ static void store_semantic_token(int token) {
 #[^\n]*         { store_semantic_token(TK_LINE_COMMENT); /* not returned to parser */ }
 \/\/[^\n]*      { store_semantic_token(TK_LINE_COMMENT); /* not returned to parser */ }
 
-"/*"            { BEGIN(BLOCK_COMMENT); }
+"/*"            { mfrag_sl = tok_sl; mfrag_sc = tok_sc; BEGIN(BLOCK_COMMENT); }
 <BLOCK_COMMENT>{
-    "*/"        { store_semantic_token(TK_BLOCK_COMMENT); BEGIN(INITIAL);
+    "*/"        { store_semantic_token_mfrag(TK_BLOCK_COMMENT); BEGIN(INITIAL);
                   /* not returned to parser */ }
     \n          { yycolumn = 0; }
     [^*\n]+     { /* skip */ }
@@ -114,9 +111,9 @@ static void store_semantic_token(int token) {
 }
 
     /* Scissors multi-line string: -8<- ... ->8- */
-"-8<-"          { BEGIN(SCISSORS); }
+"-8<-"          { mfrag_sl = tok_sl; mfrag_sc = tok_sc; BEGIN(SCISSORS); }
 <SCISSORS>{
-    "->8-"      { store_semantic_token(TK_MULTI_LINE_STR);
+    "->8-"      { store_semantic_token_mfrag(TK_MULTI_LINE_STR);
                   BEGIN(INITIAL); return TK_MULTI_LINE_STR; }
     \n          { yycolumn = 0; }
     [^-\n]+     { }
@@ -124,9 +121,9 @@ static void store_semantic_token(int token) {
     <<EOF>>     { BEGIN(INITIAL); return TK_ERROR; }
 }
 
-\"              { BEGIN(DQUOTE); }
+\"              { mfrag_sl = tok_sl; mfrag_sc = tok_sc; BEGIN(DQUOTE); }
 <DQUOTE>{
-    \"          { store_semantic_token(TK_STR); BEGIN(INITIAL); return TK_STR; }
+    \"          { store_semantic_token_mfrag(TK_STR); BEGIN(INITIAL); return TK_STR; }
     \n          { yycolumn = 0;
                   BEGIN(INITIAL); return TK_ERROR; }
     \\[^\n]     { }

@@ -79,6 +79,21 @@ typedef struct {
     char     *message; /* heap-allocated */
 } Diagnostic;
 
+/* ── SemToken ────────────────────────────────────────────────────────────── *
+ *
+ * One entry for every token that carries semantic meaning (keywords, strings,
+ * comments, numbers, dates, durations).  Punctuation and plain identifiers
+ * are not stored here.
+ *
+ * token_kind holds the raw TK_* / KW_* constant from grammar.tab.h.
+ * The mapping to LSP SemanticTokenTypes / SemanticTokenModifiers is done
+ * by the semantic-tokens handler when building the response.
+ */
+typedef struct {
+    int    token_kind;
+    LspPos start, end;
+} SemToken;
+
 /* ── ParseResult ─────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -90,6 +105,9 @@ typedef struct {
     int          sym_cap;
     Token        *tokens;
     int           num_tokens;
+    SemToken     *sem_tokens;
+    int           num_sem_tokens;
+    int           sem_tok_cap;
 } ParseResult;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
