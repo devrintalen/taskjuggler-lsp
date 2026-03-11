@@ -1,3 +1,5 @@
+VERSION = 0.0.1
+
 CC      = gcc
 CFLAGS  = -Wall -Wextra -std=c11 -O2 -D_DEFAULT_SOURCE
 LDFLAGS = -lcjson
