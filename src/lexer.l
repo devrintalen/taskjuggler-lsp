@@ -48,102 +48,38 @@ static uint32_t tok_sl = 0, tok_sc = 0;
     tok_sc   = (uint32_t)yycolumn;              \
     yycolumn += yyleng;
 
-/* ── Token-array interface (defined in parser.c) ────────────────────────── */
-
-extern void g_push_token(int kind, const char *text,
-                         uint32_t sl, uint32_t sc,
-                         uint32_t el, uint32_t ec);
-
 /* ── emit(): record token in array and populate yylval ──────────────────── */
 
-static void emit(int kind, const char *text) {
-    uint32_t el = (uint32_t)(yylineno - 1);
-    uint32_t ec = (uint32_t)yycolumn;
-    g_push_token(kind, text, tok_sl, tok_sc, el, ec);
-    yylval.tok.kind  = kind;
-    yylval.tok.start = (LspPos){ tok_sl, tok_sc };
-    yylval.tok.end   = (LspPos){ el, ec };
-    yylval.tok.text  = strdup(text);
-}
 
-/* ── String buffer for multi-character tokens ───────────────────────────── */
-
-/* 1 MB should be enough for any TJP source file section. */
-static char   sbuf[1 << 20];
-static int    sbuf_len = 0;
-static uint32_t sbuf_sl = 0, sbuf_sc = 0; /* start of buffered token */
-
-static void sbuf_reset(void) {
-    sbuf_len = 0;
-    sbuf_sl  = tok_sl;
-    sbuf_sc  = tok_sc;
-}
-
-static void sbuf_append(void) {
-    if (sbuf_len + yyleng < (int)sizeof(sbuf) - 1) {
-        memcpy(sbuf + sbuf_len, yytext, yyleng);
-        sbuf_len += yyleng;
-    }
-}
-
-static void sbuf_push_char(char c) {
-    if (sbuf_len + 1 < (int)sizeof(sbuf) - 1)
-        sbuf[sbuf_len++] = c;
-}
-
-/* Emit a token from the accumulated buffer. */
-static void sbuf_emit(int kind) {
-    sbuf[sbuf_len] = '\0';
-    uint32_t el = (uint32_t)(yylineno - 1);
-    uint32_t ec = (uint32_t)yycolumn;
-    g_push_token(kind, sbuf, sbuf_sl, sbuf_sc, el, ec);
-    yylval.tok.kind  = kind;
-    yylval.tok.start = (LspPos){ sbuf_sl, sbuf_sc };
-    yylval.tok.end   = (LspPos){ el, ec };
-    yylval.tok.text  = strdup(sbuf);
-}
-
-/* ── Keyword dispatch ────────────────────────────────────────────────────── *
+/* TODO create a semantic token struct
  *
- * Only the five symbol-introducing keywords are returned as distinct tokens.
- * All other TJP keywords (depends, allocate, macro, include, etc.) are
- * returned as plain TK_IDENT so the grammar can treat them uniformly.
+ * Fields: start    (line and column)
+ *         end      (line and column)
+ *         type     (based on LSP SemanticTokenTypes)
+ *         modifier (based on LSP SemanticTokenModifiers)
  *
- * TODO: Add distinct tokens for declaration keywords (KW_DEPENDS,
- * KW_ALLOCATE, KW_MACRO, etc.) once the grammar rules for those statements
- * are fleshed out.  This will allow precise statement-boundary detection.
+ * These objects will be used by the SemanticToken code to return
+ * text/Document/semanticTokens/* responses.
  */
-static int keyword_token(const char *s) {
-    if (strcmp(s, "project")  == 0) return KW_PROJECT;
-    if (strcmp(s, "task")     == 0) return KW_TASK;
-    if (strcmp(s, "resource") == 0) return KW_RESOURCE;
-    if (strcmp(s, "account")  == 0) return KW_ACCOUNT;
-    if (strcmp(s, "shift")    == 0) return KW_SHIFT;
-    if (strcmp(s, "accountprefix") == 0) return KW_ACCOUNTPREFIX;
-    if (strcmp(s, "accountreport") == 0) return KW_ACCOUNTREPORT;
-    if (strcmp(s, "accountroot")   == 0) return KW_ACCOUNTROOT;
-    if (strcmp(s, "active")   == 0) return KW_ACTIVE;
-    if (strcmp(s, "adopt")    == 0) return KW_ADOPT;
-    if (strcmp(s, "aggregate") == 0) return KW_AGGREGATE;
-    if (strcmp(s, "alert")    == 0) return KW_ALERT;
-    if (strcmp(s, "alertlevels") == 0) return KW_ALERTLEVELS;
-    if (strcmp(s, "allocate") == 0) return KW_ALLOCATE;
-    if (strcmp(s, "alternative") == 0) return KW_ALTERNATIVE;
-    if (strcmp(s, "author")   == 0) return KW_AUTHOR;
-    if (strcmp(s, "auxdir")   == 0) return KW_AUXDIR;
-    if (strcmp(s, "balance")  == 0) return KW_BALANCE;
-    if (strcmp(s, "booking")  == 0) return KW_BOOKING;
-    if (strcmp(s, "caption")  == 0) return KW_CAPTION;
-    if (strcmp(s, "cellcolor") == 0) return KW_CELLCOLOR;
-    if (strcmp(s, "celltext") == 0) return KW_CELLTEXT;
-    if (strcmp(s, "center")   == 0) return KW_CENTER;
-    if (strcmp(s, "charge")   == 0) return KW_CHARGE;
-    if (strcmp(s, "chargeset") == 0) return KW_CHARGESET;
-    if (strcmp(s, "columns")  == 0) return KW_COLUMNS;
-    if (strcmp(s, "complete") == 0) return KW_COMPLETE;
-    if (strcmp(s, "copyright") == 0) return KW_COPYRIGHT;
-    return TK_IDENT;
+
+/* TODO create a data structure to hold semantic token objects
+ *
+ * This data structure will need to be efficiently processed by the
+ * SemanticToken code. Something that can be traversed linearly efficiently.
+ * Possibly just a variable-length array.
+ */
+
+static void store_semantic_token(int token) {
+    // TODO I'm not happy with these function and variable names, improve readability.
+    // TODO the el/ec and tok_sl/tok_sc calculations for .start and .end are probably broken.
+    uint32_t el = (uint32_t)(yylineno - 1);
+    uint32_t ec = (uint32_t)yycolumn;
+    semantic_token.type     = tj_token_to_semantic_type(token);
+    semantic_token.modifier = tj_token_to_semantic_modifier(token);
+    semantic_token.start    = (LspPos){ tok_sl, tok_sc };
+    semantic_token.end      = (LspPos){ el, ec };
 }
+
 %}
 
 %option noyywrap
@@ -160,75 +96,330 @@ static int keyword_token(const char *s) {
 [ \t\r\f\v]+    { /* skip whitespace */ }
 \n              { yycolumn = 0; }
 
-#[^\n]*         { emit(TK_LINE_COMMENT, yytext); /* not returned to parser */ }
-\/\/[^\n]*      { emit(TK_LINE_COMMENT, yytext); /* not returned to parser */ }
+#[^\n]*         { store_semantic_token(TJ3_LINE_COMMENT); /* not returned to parser */ }
+\/\/[^\n]*      { store_semantic_token(TJ3_LINE_COMMENT); /* not returned to parser */ }
 
-"/*"            { sbuf_reset(); sbuf_append(); BEGIN(BLOCK_COMMENT); }
+"/*"            { BEGIN(BLOCK_COMMENT); }
 <BLOCK_COMMENT>{
-    "*/"        { sbuf_append(); sbuf_emit(TK_BLOCK_COMMENT); BEGIN(INITIAL); }
-    \n          { sbuf_append(); yycolumn = 0; }
-    [^*\n]+     { sbuf_append(); }
-    "*"         { sbuf_append(); }
-    <<EOF>>     { sbuf[sbuf_len] = '\0'; sbuf_emit(TK_ERROR);
-                  BEGIN(INITIAL); return TK_ERROR; }
+    "*/"        { store_semantic_token(TJ3_MULTI_LINE_COMMENT); BEGIN(INITIAL);
+                  /* not returned to parser */ }
+    \n          { yycolumn = 0; }
+    [^*\n]+     { /* skip whitespace */ }
+    "*"         { /* not returned to parser */ }
+    <<EOF>>     { BEGIN(INITIAL); return TJ3_ERROR; }
 }
 
     /* Scissors multi-line string: -8<- ... ->8- */
-"-8<-"          { sbuf_reset(); sbuf_append(); BEGIN(SCISSORS); }
+"-8<-"          { BEGIN(SCISSORS); }
 <SCISSORS>{
-    "->8-"      { sbuf_append(); sbuf_emit(TK_MULTI_LINE_STR);
-                  BEGIN(INITIAL); return TK_MULTI_LINE_STR; }
-    \n          { sbuf_append(); yycolumn = 0; }
-    [^-\n]+     { sbuf_append(); }
-    "-"         { sbuf_append(); }
-    <<EOF>>     { sbuf[sbuf_len] = '\0'; sbuf_emit(TK_ERROR);
-                  BEGIN(INITIAL); return TK_ERROR; }
+    "->8-"      { store_semantic_token(TJ3_MULTI_LINE_STR);
+                  BEGIN(INITIAL); return TJ3_MULTI_LINE_STR; }
+    \n          { yycolumn = 0; }
+    [^-\n]+     { }
+    "-"         { }
+    <<EOF>>     { BEGIN(INITIAL); return TJ3_ERROR; }
 }
 
-\"              { sbuf_reset(); BEGIN(DQUOTE); }
+\"              { BEGIN(DQUOTE); }
 <DQUOTE>{
-    \"          { sbuf_emit(TK_STR); BEGIN(INITIAL); return TK_STR; }
-    \n          { sbuf_emit(TK_ERROR); yycolumn = 0;
-                  BEGIN(INITIAL); return TK_ERROR; }
-    \\[^\n]     { sbuf_push_char(yytext[1]); /* store escaped char only */ }
-    [^\"\\\n]+  { sbuf_append(); }
-    <<EOF>>     { sbuf_emit(TK_ERROR); BEGIN(INITIAL); return TK_ERROR; }
+    \"          { store_semantic_token(TJ3_STR); BEGIN(INITIAL); return TJ3_STR; }
+    \n          { yycolumn = 0;
+                  BEGIN(INITIAL); return TJ3_ERROR; }
+    \\[^\n]     { }
+    [^\"\\\n]+  { }
+    <<EOF>>     { BEGIN(INITIAL); return TJ3_ERROR; }
 }
 
     /* Date YYYY-MM-DD[-hh:mm[:ss]][-{+|-}HHMM]: must precede INT so longest match wins.
      * Time, seconds, and timezone suffix are each independently optional per the TJP spec.
      * Timezone is always a leading '-' separator followed by an explicit '+' or '-' sign. */
-[0-9]{4}-[0-9]{2}-[0-9]{2}(-[0-9]{2}:[0-9]{2}(:[0-9]{2})?)?(-[+-][0-9]{4})?  { emit(TK_DATE, yytext); return TK_DATE; }
+[0-9]{4}-[0-9]{2}-[0-9]{2}(-[0-9]{2}:[0-9]{2}(:[0-9]{2})?)?(-[+-][0-9]{4})?  { store_semantic_token(TJ3_DATE); return TJ3_DATE; }
 
-[0-9]+"."[0-9]+  { emit(TK_FLOAT, yytext); return TK_FLOAT; }
+[0-9]+"."[0-9]+  { emit(TJ3_FLOAT, yytext); return TJ3_FLOAT; }
 
-[0-9]+           { emit(TK_INTEGER, yytext); return TK_INTEGER; }
+[0-9]+           { emit(TJ3_INTEGER, yytext); return TJ3_INTEGER; }
 
     /* Identifier / keyword: letters, digits, '_', ':', high UTF-8 bytes.
-     * '.' is NOT included; it is emitted as TK_DOT so that dotted dependency
+     * '.' is NOT included; it is emitted as TJ3_DOT so that dotted dependency
      * paths (e.g. deliveries.start) can be resolved component-wise by the LSP. */
 [a-zA-Z_\x80-\xFF][a-zA-Z0-9_:\x80-\xFF]* {
     int tok = keyword_token(yytext);
-    emit(TK_IDENT, yytext); /* always TK_IDENT in token array */
+    emit(TJ3_IDENT, yytext); /* always TJ3_IDENT in token array */
     yylval.tok.kind = tok;  /* KW_* for symbol keywords        */
     return tok;
 }
 
-"{"     { emit(TK_LBRACE,   yytext); return TK_LBRACE;   }
-"}"     { emit(TK_RBRACE,   yytext); return TK_RBRACE;   }
-"["     { emit(TK_LBRACKET, yytext); return TK_LBRACKET; }
-"]"     { emit(TK_RBRACKET, yytext); return TK_RBRACKET; }
-"!"     { emit(TK_BANG,     yytext); return TK_BANG;     }
-"+"     { emit(TK_PLUS,     yytext); return TK_PLUS;     }
-"-"     { emit(TK_MINUS,    yytext); return TK_MINUS;    }
-"."     { emit(TK_DOT,      yytext); return TK_DOT;      }
-":"     { emit(TK_COLON,    yytext); return TK_COLON;    }
-","     { emit(TK_COMMA,    yytext); return TK_COMMA;    }
-"%"     { emit(TK_PERCENT,  yytext); return TK_PERCENT;  }
-"$"     { emit(TK_DOLLAR,   yytext); return TK_DOLLAR;   }
+    /* Keywords */
+"account"    { store_semantic_token(TJ3_ACCOUNT); return TJ3_ACCOUNT }
+
+/*  Full list of TJ3 keywords (reported by tj3man)
+account
+accountprefix
+accountreport
+accountroot
+active
+adopt
+aggregate
+alert
+alertlevels
+allocate
+alternative
+author
+auxdir
+balance
+booking
+caption
+cellcolor
+celltext
+center
+charge
+chargeset
+columnid
+columns
+complete
+copyright
+credits
+currency
+currencyformat
+dailymax
+dailymin
+dailyworkinghours
+date
+definitions
+depends
+details
+disabled
+duration
+efficiency
+effort
+effortdone
+effortleft
+email
+enabled
+end
+endcredit
+epilog
+export
+extend
+fail
+flags
+fontcolor
+footer
+formats
+functions
+gapduration
+gaplength
+center
+halign
+left
+right  <-- checked until here
+hasalert
+header
+headline
+height
+hideaccount
+hidejournalentry
+hidereport
+hideresource
+hidetask
+icalreport
+include.macro
+include.project
+include.properties
+inherit.extend
+interval1
+interval2
+interval3
+interval4
+isactive
+ischildof
+isdependencyof
+isdutyof
+isfeatureof
+isleaf
+ismilestone
+isongoing
+isresource
+isresponsibilityof
+istask
+isvalid
+journalattributes
+journalentry
+journalmode
+leaveallowance
+leaves
+left
+length
+limits
+limits.allocate
+limits.resource
+limits.task
+listitem.column
+listtype.column
+loadunit
+logicalexpression
+logicalflagexpression
+macro
+managers
+mandatory
+markdate
+maxend
+maximum
+maxstart
+milestone
+minend
+minimum
+minstart
+monthlymax
+monthlymin
+navigator
+newtask
+nikureport
+note.task
+novevents
+now
+number.extend
+numberformat
+onend
+onstart
+opennodes
+outputdir
+overtime.booking
+period.column
+period.limit
+period.report
+period.task
+persistent
+precedes
+priority
+priority.timesheet
+project
+projectid
+projectid.task
+projectids
+projection
+prolog
+properties
+purge
+rate
+rate.resource
+rawhtmlhead
+reference.extend
+remaining
+replace
+reportprefix
+resource
+resourceattributes
+resourceprefix
+resourcereport
+resourceroot
+resources.limit
+responsible
+richtext.extend
+right
+rollupaccount
+rollupresource
+rolluptask
+scale.column
+scenario
+scenario.ical
+scenarios
+scenarios.export
+scenariospecific.extend
+scheduled
+scheduling
+schedulingmode
+select
+selfcontained
+shift
+shift.allocate
+shift.resource
+shift.task
+shift.timesheet
+shifts.allocate
+shifts.resource
+shifts.task
+shorttimeformat
+sloppy.booking
+sloppy.projection
+sortaccounts
+sortjournalentries
+sortresources
+sorttasks
+start
+start.column
+start.limit
+start.report
+startcredit
+status.statussheet
+status.timesheet
+statussheet
+statussheetreport
+strict.projection
+summary
+supplement
+supplement.resource
+supplement.task
+tagfile
+task
+task.statussheet
+task.timesheet
+taskattributes
+taskprefix
+taskreport
+taskroot
+taskroot.export
+text.extend
+textreport
+timeformat
+timeformat1
+timeformat2
+timeoff.nikureport
+timesheet
+timesheetreport
+timezone
+timezone.export
+timezone.report
+timezone.shift
+timingresolution
+title
+title.column
+tooltip.column
+tracereport
+trackingscenario
+treelevel
+vacation
+vacation.resource
+vacation.shift
+warn
+weeklymax
+weeklymin
+weekstartsmonday
+weekstartssunday
+width
+width.column
+work
+workinghours.project
+workinghours.resource
+workinghours.shift
+yearlyworkingdays
+*/
+
+"{"     { emit(TJ3_LBRACE,   yytext); return TJ3_LBRACE;   }
+"}"     { emit(TJ3_RBRACE,   yytext); return TJ3_RBRACE;   }
+"["     { emit(TJ3_LBRACKET, yytext); return TJ3_LBRACKET; }
+"]"     { emit(TJ3_RBRACKET, yytext); return TJ3_RBRACKET; }
+"!"     { emit(TJ3_BANG,     yytext); return TJ3_BANG;     }
+"+"     { emit(TJ3_PLUS,     yytext); return TJ3_PLUS;     }
+"-"     { emit(TJ3_MINUS,    yytext); return TJ3_MINUS;    }
+"."     { emit(TJ3_DOT,      yytext); return TJ3_DOT;      }
+":"     { emit(TJ3_COLON,    yytext); return TJ3_COLON;    }
+","     { emit(TJ3_COMMA,    yytext); return TJ3_COMMA;    }
+"%"     { emit(TJ3_PERCENT,  yytext); return TJ3_PERCENT;  }
+"$"     { emit(TJ3_DOLLAR,   yytext); return TJ3_DOLLAR;   }
 
 .       { char msg[48];
           snprintf(msg, sizeof(msg), "unexpected character: '%s'", yytext);
-          emit(TK_ERROR, msg); return TK_ERROR; }
+          emit(TJ3_ERROR, msg); return TJ3_ERROR; }
 
 %%
