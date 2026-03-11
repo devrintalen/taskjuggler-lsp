@@ -134,10 +134,13 @@ static void store_semantic_token(int token) {
     <<EOF>>     { BEGIN(INITIAL); return TK_ERROR; }
 }
 
-    /* Date YYYY-MM-DD[-hh:mm[:ss]][-{+|-}HHMM]: must precede INT so longest match wins.
+    /* Date: YYYY-MM-DD[-hh:mm[:ss]][-{+|-}HHMM]: must precede INT so longest match wins.
      * Time, seconds, and timezone suffix are each independently optional per the TJP spec.
      * Timezone is always a leading '-' separator followed by an explicit '+' or '-' sign. */
 [0-9]{4}-[0-9]{2}-[0-9]{2}(-[0-9]{2}:[0-9]{2}(:[0-9]{2})?)?(-[+-][0-9]{4})?  { store_semantic_token(TK_DATE); return TK_DATE; }
+
+    /* Duration: (+|-) <duration> (min | h | d | w | m | y) */
+[+-][0-9]+(min|h|d|w|m|y) { store_semantic_token(TK_DURATION); return TK_DURATION; }
 
 [0-9]+"."[0-9]+  { return TK_FLOAT; }
 

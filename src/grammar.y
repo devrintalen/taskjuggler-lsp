@@ -168,7 +168,7 @@ static Symbol make_symbol(Token kw, Token id, Token name, BodyResult body) {
 %token <tok> KW_WIDTH KW_WORK KW_WORKINGHOURS KW_YEARLYWORKINGDAYS
 
 %token <tok> TK_IDENT
-%token <tok> TK_STR TK_INTEGER TK_FLOAT TK_DATE
+%token <tok> TK_STR TK_INTEGER TK_FLOAT TK_DATE TK_DURATION
 %token <tok> TK_LBRACE TK_RBRACE
 %token <tok> TK_LBRACKET TK_RBRACKET
 %token <tok> TK_BANG TK_PLUS TK_MINUS TK_DOT TK_COLON TK_COMMA TK_PERCENT TK_DOLLAR
