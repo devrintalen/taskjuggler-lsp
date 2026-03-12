@@ -48,53 +48,50 @@ const int num_semantic_token_modifiers =
 static int classify(int kind, int *out_type, int *out_modifiers) {
     *out_modifiers = 0;
 
+    switch (kind) {
     /* Punctuation tokens recorded in tok_spans only for cursor-position
      * queries; they carry no semantic highlighting meaning. */
-    switch (kind) {
-    case TK_LBRACE: case TK_RBRACE:
-    case TK_BANG:   case TK_DOT:   case TK_COMMA:
-        return 0;
-    }
-
+    case TK_LBRACE:
+    case TK_RBRACE:
+    case TK_BANG:
+    case TK_DOT:
+    case TK_COMMA:
+         return 0;
     /* Comments. */
-    if (kind == TK_LINE_COMMENT || kind == TK_BLOCK_COMMENT) {
+    case TK_LINE_COMMENT:
+    case TK_BLOCK_COMMENT:
         *out_type = SEMTOK_TYPE_COMMENT;
         return 1;
-    }
-
     /* String literals (single- and multi-line). */
-    if (kind == TK_STR || kind == TK_MULTI_LINE_STR) {
+    case TK_STR:
+    case TK_MULTI_LINE_STR:
         *out_type = SEMTOK_TYPE_STRING;
         return 1;
-    }
-
     /* Date literals: structured literal values, styled as strings. */
-    if (kind == TK_DATE) {
+    case TK_DATE:
         *out_type = SEMTOK_TYPE_STRING;
         return 1;
-    }
-
     /* Duration literals: numeric/quantitative values. */
-    if (kind == TK_DURATION) {
+    case TK_DURATION:
         *out_type = SEMTOK_TYPE_NUMBER;
         return 1;
-    }
-
     /* User-defined identifiers. */
-    if (kind == TK_IDENT) {
+    case TK_IDENT:
         *out_type = SEMTOK_TYPE_VARIABLE;
         return 1;
-    }
-
     /* Structural declaration keywords: introduce a named entity.
      * The declaration modifier allows editors to style them distinctly
      * from plain property keywords. */
-    if (kind == KW_PROJECT || kind == KW_TASK    ||
-        kind == KW_RESOURCE || kind == KW_ACCOUNT ||
-        kind == KW_SHIFT) {
+    case KW_PROJECT:
+    case KW_TASK:
+    case KW_RESOURCE:
+    case KW_ACCOUNT:
+    case KW_SHIFT:
         *out_type      = SEMTOK_TYPE_KEYWORD;
         *out_modifiers = SEMTOK_MOD_DECLARATION;
         return 1;
+    default:
+        break;
     }
 
     /* All remaining KW_* property/attribute keywords. */
