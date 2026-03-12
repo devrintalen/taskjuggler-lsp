@@ -7,3 +7,4 @@
 /src/grammar.tab.c
 /src/grammar.tab.h
 /lexer-test
+/grammar-test
