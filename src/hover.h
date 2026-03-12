@@ -21,9 +21,9 @@
 #include "parser.h"
 #include "grammar.tab.h"
 
-/* Return a copy of the SemToken that spans `pos`, or a token with kind TK_EOF
+/* Return a copy of the TokenSpan that spans `pos`, or a token with kind TK_EOF
  * if none.  Caller must free result.text (if non-NULL). */
-SemToken sem_token_at(const SemToken *tokens, int num_tokens, LspPos pos);
+TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
 
 /* Return Markdown documentation for a TJP keyword, or NULL if unknown. */
 const char *keyword_docs(const char *kw);
@@ -42,4 +42,4 @@ typedef struct {
     LspRange range;
 } ActiveKeyword;
 
-ActiveKeyword active_keyword_at(const SemToken *tokens, int num_tokens, LspPos cursor);
+ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos cursor);

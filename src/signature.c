@@ -26,13 +26,13 @@
 /* Stack entry: (keyword, brace_depth, arg_count) */
 typedef struct { char *kw; uint32_t depth; uint32_t argc; } StackEntry;
 
-ActiveContext active_context(const SemToken *tokens, int num_tokens, LspPos cursor) {
+ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     uint32_t brace_depth = 0;
     StackEntry stack[128];
     int stack_n = 0;
 
     for (int i = 0; i < num_tokens; i++) {
-        const SemToken *tok = &tokens[i];
+        const TokenSpan *tok = &tokens[i];
         if (tok->token_kind == TK_EOF) break;
 
         /* Stop once token starts past cursor */

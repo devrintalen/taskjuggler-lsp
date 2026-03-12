@@ -54,9 +54,9 @@ static const char *kind_name(int k) {
     }
 }
 
-/* ── print_symbol ────────────────────────────────────────────────────────── */
+/* ── print_doc_symbol ────────────────────────────────────────────────────────── */
 
-static void print_symbol(const Symbol *s, int depth) {
+static void print_doc_symbol(const DocSymbol *s, int depth) {
     /* Indentation: 2 spaces per level */
     for (int i = 0; i < depth * 2; i++) putchar(' ');
 
@@ -70,7 +70,7 @@ static void print_symbol(const Symbol *s, int depth) {
            s->range.end.line,   s->range.end.character);
 
     for (int i = 0; i < s->num_children; i++)
-        print_symbol(&s->children[i], depth + 1);
+        print_doc_symbol(&s->children[i], depth + 1);
 }
 
 /* ── File reading ────────────────────────────────────────────────────────── */
@@ -124,12 +124,12 @@ int main(int argc, char **argv) {
     ParseResult r = parse(src);
     free(src);
 
-    /* ── Symbol tree ── */
-    if (r.num_symbols == 0) {
+    /* ── DocSymbol tree ── */
+    if (r.num_doc_symbols == 0) {
         puts("(no symbols)");
     } else {
-        for (int i = 0; i < r.num_symbols; i++)
-            print_symbol(&r.symbols[i], 0);
+        for (int i = 0; i < r.num_doc_symbols; i++)
+            print_doc_symbol(&r.doc_symbols[i], 0);
     }
 
     /* ── Diagnostics ── */
@@ -151,7 +151,7 @@ int main(int argc, char **argv) {
     /* ── Summary ── */
     putchar('\n');
     printf("%d symbol%s, %d diagnostic%s (%d error%s)\n",
-           r.num_symbols,    r.num_symbols    == 1 ? "" : "s",
+           r.num_doc_symbols,    r.num_doc_symbols    == 1 ? "" : "s",
            r.num_diagnostics, r.num_diagnostics == 1 ? "" : "s",
            num_errors,        num_errors        == 1 ? "" : "s");
 

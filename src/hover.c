@@ -31,28 +31,28 @@ static int pos_in(LspPos p, LspPos start, LspPos end) {
     return after && before;
 }
 
-SemToken sem_token_at(const SemToken *tokens, int num_tokens, LspPos pos) {
+TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
     for (int i = 0; i < num_tokens; i++) {
-        const SemToken *t = &tokens[i];
+        const TokenSpan *t = &tokens[i];
         if (t->token_kind == TK_EOF) break;
 
         /* Stop once we've passed the requested position */
         if (t->start.line > pos.line
          || (t->start.line == pos.line && t->start.character > pos.character))
-            return (SemToken){ TK_EOF, pos, pos, strdup("") };
+            return (TokenSpan){ TK_EOF, pos, pos, strdup("") };
 
         if (pos_in(pos, t->start, t->end)) {
-            SemToken copy = *t;
+            TokenSpan copy = *t;
             copy.text = strdup(t->text ? t->text : "");
             return copy;
         }
     }
-    return (SemToken){ TK_EOF, pos, pos, strdup("") };
+    return (TokenSpan){ TK_EOF, pos, pos, strdup("") };
 }
 
 /* ── active_keyword_at ───────────────────────────────────────────────────── */
 
-ActiveKeyword active_keyword_at(const SemToken *tokens, int num_tokens, LspPos cursor) {
+ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     typedef struct { char *text; LspRange range; uint32_t depth; } KwEntry;
 
     uint32_t brace_depth = 0;
@@ -60,7 +60,7 @@ ActiveKeyword active_keyword_at(const SemToken *tokens, int num_tokens, LspPos c
     int      stack_n = 0;
 
     for (int i = 0; i < num_tokens; i++) {
-        const SemToken *tok = &tokens[i];
+        const TokenSpan *tok = &tokens[i];
         if (tok->token_kind == TK_EOF) break;
 
         /* Stop once a token starts past the cursor */

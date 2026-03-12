@@ -35,22 +35,22 @@ extern int             yycolumn; /* column tracker defined in lexer.l */
 
 /* ── Shared globals (used by lexer.l and grammar.y via extern) ───────────── */
 
-ParseResult *g_result         = NULL;
-SemToken    *g_sem_tokens     = NULL;
-int          g_num_sem_tokens = 0;
-int          g_sem_tok_cap    = 0;
+ParseResult *g_result        = NULL;
+TokenSpan   *g_tok_spans     = NULL;
+int          g_num_tok_spans = 0;
+int          g_tok_span_cap  = 0;
 
 /* Called from lexer.l for every token that callers may need to inspect. */
-void g_push_sem_token(int kind,
-                      uint32_t sl, uint32_t sc,
-                      uint32_t el, uint32_t ec,
-                      const char *text) {
-    if (g_num_sem_tokens >= g_sem_tok_cap) {
-        g_sem_tok_cap = g_sem_tok_cap ? g_sem_tok_cap * 2 : 64;
-        g_sem_tokens  = realloc(g_sem_tokens,
-                                (size_t)g_sem_tok_cap * sizeof(SemToken));
+void g_push_tok_span(int kind,
+                     uint32_t sl, uint32_t sc,
+                     uint32_t el, uint32_t ec,
+                     const char *text) {
+    if (g_num_tok_spans >= g_tok_span_cap) {
+        g_tok_span_cap = g_tok_span_cap ? g_tok_span_cap * 2 : 64;
+        g_tok_spans    = realloc(g_tok_spans,
+                                 (size_t)g_tok_span_cap * sizeof(TokenSpan));
     }
-    g_sem_tokens[g_num_sem_tokens++] = (SemToken){
+    g_tok_spans[g_num_tok_spans++] = (TokenSpan){
         .token_kind = kind,
         .start      = { sl, sc },
         .end        = { el, ec },
@@ -65,13 +65,13 @@ void token_free(Token *t) {
     t->text = NULL;
 }
 
-/* ── Symbol helpers ──────────────────────────────────────────────────────── */
+/* ── DocSymbol helpers ───────────────────────────────────────────────────── */
 
-void symbol_free(Symbol *s) {
+void doc_symbol_free(DocSymbol *s) {
     free(s->name);
     free(s->detail);
     for (int i = 0; i < s->num_children; i++)
-        symbol_free(&s->children[i]);
+        doc_symbol_free(&s->children[i]);
     free(s->children);
 }
 
@@ -81,13 +81,13 @@ void parse_result_free(ParseResult *r) {
     for (int i = 0; i < r->num_diagnostics; i++)
         free(r->diagnostics[i].message);
     free(r->diagnostics);
-    for (int i = 0; i < r->num_symbols; i++)
-        symbol_free(&r->symbols[i]);
-    free(r->symbols);
+    for (int i = 0; i < r->num_doc_symbols; i++)
+        doc_symbol_free(&r->doc_symbols[i]);
+    free(r->doc_symbols);
 
-    for (int i = 0; i < r->num_sem_tokens; i++)
-        free(r->sem_tokens[i].text);
-    free(r->sem_tokens);
+    for (int i = 0; i < r->num_tok_spans; i++)
+        free(r->tok_spans[i].text);
+    free(r->tok_spans);
     memset(r, 0, sizeof(*r));
 }
 
@@ -103,13 +103,13 @@ void push_diagnostic(ParseResult *r, LspRange range, int severity,
         (Diagnostic){ range, severity, strdup(msg) };
 }
 
-void push_symbol(ParseResult *r, Symbol s) {
-    if (r->num_symbols >= r->sym_cap) {
-        int nc = r->sym_cap ? r->sym_cap * 2 : 4;
-        r->symbols = realloc(r->symbols, (size_t)nc * sizeof(Symbol));
-        r->sym_cap = nc;
+void push_doc_symbol(ParseResult *r, DocSymbol s) {
+    if (r->num_doc_symbols >= r->doc_sym_cap) {
+        int nc = r->doc_sym_cap ? r->doc_sym_cap * 2 : 4;
+        r->doc_symbols = realloc(r->doc_symbols, (size_t)nc * sizeof(DocSymbol));
+        r->doc_sym_cap = nc;
     }
-    r->symbols[r->num_symbols++] = s;
+    r->doc_symbols[r->num_doc_symbols++] = s;
 }
 
 /* ── Keyword classification ──────────────────────────────────────────────── */
@@ -193,7 +193,7 @@ static void free_dep_refs(void) {
     g_dep_ref_cap  = 0;
 }
 
-static int resolve_from(const Symbol *syms, int n, const char **segs,
+static int resolve_from(const DocSymbol *syms, int n, const char **segs,
                         int nseg) {
     if (nseg == 0) return 1;
     for (int i = 0; i < n; i++) {
@@ -205,9 +205,9 @@ static int resolve_from(const Symbol *syms, int n, const char **segs,
     return 0;
 }
 
-static const Symbol *find_scope_local(const Symbol *syms, int n,
-                                      const char **path, int plen,
-                                      int *out_n) {
+static const DocSymbol *find_scope_local(const DocSymbol *syms, int n,
+                                         const char **path, int plen,
+                                         int *out_n) {
     if (plen == 0) { *out_n = n; return syms; }
     for (int i = 0; i < n; i++) {
         if (syms[i].kind == SK_FUNCTION
@@ -219,10 +219,10 @@ static const Symbol *find_scope_local(const Symbol *syms, int n,
     return NULL;
 }
 
-static int validate_ref(const Symbol *syms, int nsym,
+static int validate_ref(const DocSymbol *syms, int nsym,
                         const char **scope, int scope_len,
                         int bang_count, const char **segs, int nseg) {
-    const Symbol *ctx;
+    const DocSymbol *ctx;
     int nctx;
     if (bang_count == 0) {
         ctx  = syms;
@@ -236,7 +236,7 @@ static int validate_ref(const Symbol *syms, int nsym,
     return resolve_from(ctx, nctx, segs, nseg);
 }
 
-static void validate_dep_refs(const Symbol *syms, int nsym, ParseResult *r) {
+static void validate_dep_refs(const DocSymbol *syms, int nsym, ParseResult *r) {
     for (int i = 0; i < g_num_dep_refs; i++) {
         const DepRef *dr = &g_dep_refs[i];
         if (!validate_ref(syms, nsym,
@@ -265,14 +265,14 @@ static void validate_dep_refs(const Symbol *syms, int nsym, ParseResult *r) {
 ParseResult parse(const char *src) {
     /* Set up global state for lexer.l and grammar.y */
     ParseResult result = {0};
-    g_result         = &result;
-    g_sem_tokens     = NULL;
-    g_num_sem_tokens = 0;
-    g_sem_tok_cap    = 0;
-    g_dep_refs       = NULL;
-    g_num_dep_refs   = 0;
-    g_dep_ref_cap    = 0;
-    yycolumn         = 0;
+    g_result        = &result;
+    g_tok_spans     = NULL;
+    g_num_tok_spans = 0;
+    g_tok_span_cap  = 0;
+    g_dep_refs      = NULL;
+    g_num_dep_refs  = 0;
+    g_dep_ref_cap   = 0;
+    yycolumn        = 0;
 
     /* Feed source to flex and run the bison parser */
     YY_BUFFER_STATE buf = yy_scan_string(src);
@@ -280,18 +280,18 @@ ParseResult parse(const char *src) {
     yy_delete_buffer(buf);
 
     /* Post-processing: validate dep refs against the now-complete symbol tree */
-    validate_dep_refs(result.symbols, result.num_symbols, &result);
+    validate_dep_refs(result.doc_symbols, result.num_doc_symbols, &result);
     free_dep_refs();
 
-    /* Transfer sem_token array ownership to the ParseResult */
-    result.sem_tokens     = g_sem_tokens;
-    result.num_sem_tokens = g_num_sem_tokens;
+    /* Transfer tok_spans array ownership to the ParseResult */
+    result.tok_spans     = g_tok_spans;
+    result.num_tok_spans = g_num_tok_spans;
 
     /* Clear globals */
-    g_result         = NULL;
-    g_sem_tokens     = NULL;
-    g_num_sem_tokens = 0;
-    g_sem_tok_cap    = 0;
+    g_result        = NULL;
+    g_tok_spans     = NULL;
+    g_num_tok_spans = 0;
+    g_tok_span_cap  = 0;
 
     return result;
 }

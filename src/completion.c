@@ -49,14 +49,14 @@ static int is_block_opener_kind(int k) {
 }
 
 /* Returns a NULL-terminated array of strings (heap-allocated copies). */
-static char **block_stack(const SemToken *tokens, int num_tokens,
+static char **block_stack(const TokenSpan *tokens, int num_tokens,
                            LspPos cursor, int *out_n) {
     char **stack = NULL;
     int    n = 0, cap = 0;
     char  *pending = NULL;
 
     for (int i = 0; i < num_tokens; i++) {
-        const SemToken *tok = &tokens[i];
+        const TokenSpan *tok = &tokens[i];
         if (tok->token_kind == TK_EOF || pos_before(cursor, tok->start)) break;
 
         switch (tok->token_kind) {
@@ -226,9 +226,9 @@ static const KwEntry *kws_for_stack(char **stack, int n) {
 
 /* Returns heap-allocated text of the first non-comment token on cursor's line,
  * or NULL if no such ident exists. */
-static char *line_first_word(const SemToken *tokens, int num_tokens, LspPos cursor) {
+static char *line_first_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     for (int i = 0; i < num_tokens; i++) {
-        const SemToken *t = &tokens[i];
+        const TokenSpan *t = &tokens[i];
         if (t->token_kind == TK_EOF) break;
         if (t->token_kind == TK_LINE_COMMENT || t->token_kind == TK_BLOCK_COMMENT) continue;
         if (t->start.line < cursor.line) continue;
@@ -241,9 +241,9 @@ static char *line_first_word(const SemToken *tokens, int num_tokens, LspPos curs
 }
 
 /* Returns 1 if there are no non-whitespace tokens before cursor on its line. */
-static int at_statement_start(const SemToken *tokens, int num_tokens, LspPos cursor) {
+static int at_statement_start(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     for (int i = 0; i < num_tokens; i++) {
-        const SemToken *t = &tokens[i];
+        const TokenSpan *t = &tokens[i];
         if (t->token_kind == TK_EOF) break;
         if (t->token_kind == TK_LINE_COMMENT || t->token_kind == TK_BLOCK_COMMENT) continue;
         if (t->start.line > cursor.line) break;
@@ -255,8 +255,8 @@ static int at_statement_start(const SemToken *tokens, int num_tokens, LspPos cur
 
 /* ── partial_word ────────────────────────────────────────────────────────── */
 
-static char *partial_word(const SemToken *tokens, int num_tokens, LspPos cursor) {
-    SemToken t = sem_token_at(tokens, num_tokens, cursor);
+static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
+    TokenSpan t = tok_span_at(tokens, num_tokens, cursor);
     if (t.token_kind == TK_IDENT) {
         char *txt = t.text; /* take ownership */
         t.text = NULL;
@@ -288,7 +288,7 @@ static void idlist_free(IdList *il) {
     free(il->items);
 }
 
-static void collect_ids(const Symbol *syms, int n, int kind,
+static void collect_ids(const DocSymbol *syms, int n, int kind,
                          const char *prefix, IdList *out) {
     for (int i = 0; i < n; i++) {
         if (syms[i].kind == kind && syms[i].detail && syms[i].detail[0]) {
@@ -320,7 +320,7 @@ static void ss_push(ScopeStack *ss, const char *id, uint32_t depth) {
     ss->n++;
 }
 
-static char **current_task_scope(const SemToken *tokens, int num_tokens,
+static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
                                   LspPos cursor, int *out_n) {
     typedef enum { SS_SCAN, SS_EXPECT_ID, SS_BEFORE_LBRACE } SState;
 
@@ -330,7 +330,7 @@ static char **current_task_scope(const SemToken *tokens, int num_tokens,
     ScopeStack ts = {0};
 
     for (int i = 0; i < num_tokens; i++) {
-        const SemToken *tok = &tokens[i];
+        const TokenSpan *tok = &tokens[i];
         if (tok->token_kind == TK_EOF || pos_before(cursor, tok->start)) break;
 
         switch (tok->token_kind) {
@@ -396,7 +396,7 @@ static char **current_task_scope(const SemToken *tokens, int num_tokens,
     return result;
 }
 
-static int count_leading_bangs(const SemToken *tokens, int num_tokens, LspPos cursor) {
+static int count_leading_bangs(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     /* Find index past the last non-comment token before (or at) cursor */
     int last = -1;
     for (int i = 0; i < num_tokens; i++) {
@@ -420,7 +420,7 @@ static int count_leading_bangs(const SemToken *tokens, int num_tokens, LspPos cu
     return count;
 }
 
-static const Symbol *find_scope_children(const Symbol *syms, int n,
+static const DocSymbol *find_scope_children(const DocSymbol *syms, int n,
                                           const char **path, int plen,
                                           int *out_n) {
     if (plen == 0) { *out_n = n; return syms; }
@@ -472,8 +472,8 @@ static int completion_kind_for(int sym_kind) {
 
 /* ── completions_json ────────────────────────────────────────────────────── */
 
-cJSON *completions_json(const SemToken *tokens, int num_tokens, LspPos cursor,
-                         const Symbol *symbols, int num_symbols) {
+cJSON *completions_json(const TokenSpan *tokens, int num_tokens, LspPos cursor,
+                         const DocSymbol *symbols, int num_symbols) {
     int    stack_n = 0;
     char **stack   = block_stack(tokens, num_tokens, cursor, &stack_n);
     char  *partial = partial_word(tokens, num_tokens, cursor);
@@ -524,13 +524,13 @@ cJSON *completions_json(const SemToken *tokens, int num_tokens, LspPos cursor,
                 if (scope_n == 0) {
                     collect_ids(symbols, num_symbols, id_kind, "", &ids);
                 } else if (bang_count == 0) {
-                    const Symbol *ch;
+                    const DocSymbol *ch;
                     int           ch_n;
                     ch = find_scope_children(symbols, num_symbols,
                                              (const char **)scope, scope_n, &ch_n);
                     if (ch) collect_ids(ch, ch_n, id_kind, "", &ids);
                 } else if (bang_count <= scope_n) {
-                    const Symbol *ch;
+                    const DocSymbol *ch;
                     int           ch_n;
                     ch = find_scope_children(symbols, num_symbols,
                                              (const char **)scope, scope_n - bang_count,

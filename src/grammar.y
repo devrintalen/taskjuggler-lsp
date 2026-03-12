@@ -25,13 +25,13 @@
 #include "parser.h"
 
 /* Dynamic array of Symbols, used for body children. */
-typedef struct { Symbol *arr; int n, cap; } SymArr;
+typedef struct { DocSymbol *arr; int n, cap; } SymArr;
 
 /* Return type for opt_body and body_items rules. */
 typedef struct { SymArr syms; LspPos end; } BodyResult;
 
-/* Return type for item rule: either a Symbol or nothing. */
-typedef struct { Symbol sym; int has_sym; } ItemResult;
+/* Return type for item rule: either a DocSymbol or nothing. */
+typedef struct { DocSymbol sym; int has_sym; } ItemResult;
 
 /* Return type for dep_path and task_ref rules. */
 typedef struct {
@@ -43,7 +43,7 @@ typedef struct {
 }
 
 %{
-#include "parser.h"        /* Token, Symbol, ParseResult, LspRange, etc. */
+#include "parser.h"        /* Token, DocSymbol, ParseResult, LspRange, etc. */
 #include "grammar.tab.h"   /* TK_* / KW_* constants, YYSTYPE */
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,7 +57,7 @@ void yyerror(const char *msg);
 
 /* ── Helpers (declared/defined in parser.c) ─────────────────────────────── */
 
-extern void push_symbol    (ParseResult *r, Symbol s);
+extern void push_doc_symbol    (ParseResult *r, DocSymbol s);
 extern void push_diagnostic(ParseResult *r, LspRange range, int severity,
                              const char *msg);
 extern int  symbol_kind_for(const char *kw);
@@ -82,20 +82,20 @@ static void dep_scope_pop(void) {
         free(g_dep_scope[--g_dep_scope_n]);
 }
 
-/* ── Symbol array helper ─────────────────────────────────────────────────── */
+/* ── DocSymbol array helper ─────────────────────────────────────────────────── */
 
-static void symarr_push(SymArr *a, Symbol s) {
+static void symarr_push(SymArr *a, DocSymbol s) {
     if (a->n >= a->cap) {
         a->cap = a->cap ? a->cap * 2 : 4;
-        a->arr = realloc(a->arr, (size_t)a->cap * sizeof(Symbol));
+        a->arr = realloc(a->arr, (size_t)a->cap * sizeof(DocSymbol));
     }
     a->arr[a->n++] = s;
 }
 
-/* ── Build a Symbol from the components of a symbol_decl rule ───────────── */
+/* ── Build a DocSymbol from the components of a symbol_decl rule ───────────── */
 
-static Symbol make_symbol(Token kw, Token id, Token name, BodyResult body) {
-    Symbol s = {0};
+static DocSymbol make_doc_symbol(Token kw, Token id, Token name, BodyResult body) {
+    DocSymbol s = {0};
     s.kind = symbol_kind_for(kw.text);
 
     if (id.text) {
@@ -126,7 +126,7 @@ static Symbol make_symbol(Token kw, Token id, Token name, BodyResult body) {
 
 %union {
     Token      tok;   /* single token (kind / start / end / text) */
-    Symbol     sym;   /* fully built symbol */
+    DocSymbol     sym;   /* fully built symbol */
     BodyResult body;  /* body: children + closing-brace position */
     ItemResult item;  /* item: optional symbol */
     TaskRef    tref;  /* dep path + bang count */
@@ -224,7 +224,7 @@ items
     | items item
         {
             if ($2.has_sym)
-                push_symbol(g_result, $2.sym);
+                push_doc_symbol(g_result, $2.sym);
         }
     ;
 
@@ -248,7 +248,7 @@ items
  *
  * ────────────────────────────────────────────────────────────────────────── */
 item
-    /* ── Symbol-introducing declarations ── */
+    /* ── DocSymbol-introducing declarations ── */
     : symbol_decl
         { $$.sym = $1; $$.has_sym = 1; }
     | report_decl
@@ -341,42 +341,42 @@ item
      */
     | KW_DAILYMAX dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) symbol_free(&$3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) doc_symbol_free(&$3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: dailymin <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_DAILYMIN dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) symbol_free(&$3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) doc_symbol_free(&$3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: weeklymax <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_WEEKLYMAX dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) symbol_free(&$3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) doc_symbol_free(&$3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: weeklymin <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_WEEKLYMIN dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) symbol_free(&$3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) doc_symbol_free(&$3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: monthlymax <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_MONTHLYMAX dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) symbol_free(&$3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) doc_symbol_free(&$3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: monthlymin <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_MONTHLYMIN dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) symbol_free(&$3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) doc_symbol_free(&$3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: maximum <value> (min | h | d | w | m | y) [{ <attributes> }]  */
     | KW_MAXIMUM dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) symbol_free(&$3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) doc_symbol_free(&$3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: minimum <value> (min | h | d | w | m | y) [{ <attributes> }]  */
     | KW_MINIMUM dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) symbol_free(&$3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) doc_symbol_free(&$3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
 
     /* ── Numeric attributes ── */
@@ -669,7 +669,7 @@ item
      * Body attributes: overtime.booking, sloppy.booking                     */
     | KW_BOOKING TK_IDENT booking_interval_list opt_body
         { token_free(&$1); token_free(&$2);
-          for (int i = 0; i < $4.syms.n; i++) symbol_free(&$4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) doc_symbol_free(&$4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: shift <shift> [<interval2>] [, <shift> [<interval2>] ...]
      * (attribute form inside resource/task; differs from the shift declaration) */
@@ -682,12 +682,12 @@ item
     /* Syntax: limits [{ <attributes> }]                                     */
     | KW_LIMITS opt_body
         { token_free(&$1);
-          for (int i = 0; i < $2.syms.n; i++) symbol_free(&$2.syms.arr[i]);
+          for (int i = 0; i < $2.syms.n; i++) doc_symbol_free(&$2.syms.arr[i]);
           free($2.syms.arr); $$.has_sym = 0; }
     /* Syntax: projection [{ <attributes> }]                                  */
     | KW_PROJECTION opt_body
         { token_free(&$1);
-          for (int i = 0; i < $2.syms.n; i++) symbol_free(&$2.syms.arr[i]);
+          for (int i = 0; i < $2.syms.n; i++) doc_symbol_free(&$2.syms.arr[i]);
           free($2.syms.arr); $$.has_sym = 0; }
 
     /* ── Account/charge attributes ── */
@@ -810,13 +810,13 @@ item
      * (inside timesheet task or statussheet)                                */
     | KW_STATUS TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) symbol_free(&$4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) doc_symbol_free(&$4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: newtask <task> <STRING> { <attributes> }
      * (inside timesheet)                                                    */
     | KW_NEWTASK TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) symbol_free(&$4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) doc_symbol_free(&$4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
 
     /* ── Format specifiers ── */
@@ -842,27 +842,27 @@ item
      * (inside 'extend (task|resource) { }' body)                            */
     | KW_DATE TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) symbol_free(&$4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) doc_symbol_free(&$4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: number <id> <name> [{ <attributes> }]                          */
     | KW_NUMBER TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) symbol_free(&$4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) doc_symbol_free(&$4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: reference <id> <name> [{ <attributes> }]                       */
     | KW_REFERENCE TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) symbol_free(&$4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) doc_symbol_free(&$4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: richtext <id> <name> [{ <attributes> }]                        */
     | KW_RICHTEXT TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) symbol_free(&$4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) doc_symbol_free(&$4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: text <id> <name> [{ <attributes> }]                            */
     | KW_TEXT TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) symbol_free(&$4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) doc_symbol_free(&$4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
 
     /* ── Tokens used only in logical expressions ─────────────────────────── *
@@ -900,7 +900,7 @@ item
     | TK_IDENT opt_args opt_body
         {
             for (int i = 0; i < $3.syms.n; i++)
-                symbol_free(&$3.syms.arr[i]);
+                doc_symbol_free(&$3.syms.arr[i]);
             free($3.syms.arr);
             token_free(&$1);
             $$.has_sym = 0;
@@ -924,7 +924,7 @@ item
 symbol_decl
     : KW_PROJECT opt_id opt_name opt_version interval2 opt_body
         {
-            $$ = make_symbol($1, $2, $3, $6);
+            $$ = make_doc_symbol($1, $2, $3, $6);
             token_free(&$1);
             if ($4.text) token_free(&$4); /* discard version string */
             /* TODO: store interval $5 as the project time range */
@@ -935,7 +935,7 @@ symbol_decl
       opt_body
         {
             if ($1.kind == KW_TASK) dep_scope_pop();
-            $$ = make_symbol($1, $2, $3, $5);
+            $$ = make_doc_symbol($1, $2, $3, $5);
             token_free(&$1);
         }
     ;
@@ -968,20 +968,20 @@ sym_kw
 report_decl
     : report_kw opt_id opt_name opt_body
         {
-            $$ = make_symbol($1, $2, $3, $4);
+            $$ = make_doc_symbol($1, $2, $3, $4);
             token_free(&$1);
         }
     | KW_ICALREPORT string_val opt_name opt_body
         {
             Token no_id = {0};
-            $$ = make_symbol($1, no_id, $2, $4);
+            $$ = make_doc_symbol($1, no_id, $2, $4);
             token_free(&$1);
             if ($3.text) token_free(&$3); /* second string (unused as display name) */
         }
     | KW_NIKUREPORT string_val opt_name opt_body
         {
             Token no_id = {0};
-            $$ = make_symbol($1, no_id, $2, $4);
+            $$ = make_doc_symbol($1, no_id, $2, $4);
             token_free(&$1);
             if ($3.text) token_free(&$3);
         }
@@ -1005,7 +1005,7 @@ navigator_decl
     : KW_NAVIGATOR TK_IDENT opt_body
         {
             Token no_name = {0};
-            $$ = make_symbol($1, $2, no_name, $3);
+            $$ = make_doc_symbol($1, $2, no_name, $3);
             token_free(&$1);
         }
     ;
@@ -1017,7 +1017,7 @@ navigator_decl
 scenario_decl
     : KW_SCENARIO TK_IDENT opt_name opt_body
         {
-            $$ = make_symbol($1, $2, $3, $4);
+            $$ = make_doc_symbol($1, $2, $3, $4);
             token_free(&$1);
         }
     ;
@@ -1030,7 +1030,7 @@ timesheet_decl
     : KW_TIMESHEET TK_IDENT interval3 opt_body
         {
             Token no_name = {0};
-            $$ = make_symbol($1, $2, no_name, $4);
+            $$ = make_doc_symbol($1, $2, no_name, $4);
             token_free(&$1);
         }
     ;
@@ -1042,7 +1042,7 @@ statussheet_decl
     : KW_STATUSSHEET TK_IDENT interval3 opt_body
         {
             Token no_name = {0};
-            $$ = make_symbol($1, $2, no_name, $4);
+            $$ = make_doc_symbol($1, $2, no_name, $4);
             token_free(&$1);
         }
     ;
@@ -1053,7 +1053,7 @@ statussheet_decl
 tagfile_decl
     : KW_TAGFILE opt_id opt_name opt_body
         {
-            $$ = make_symbol($1, $2, $3, $4);
+            $$ = make_doc_symbol($1, $2, $3, $4);
             token_free(&$1);
         }
     ;
@@ -1061,15 +1061,15 @@ tagfile_decl
 /* ── journalentry_decl ──────────────────────────────────────────────────── *
  * Syntax: journalentry <date> <headline> [{ <attributes> }]
  * Body attributes: alert, author, details, flags.journalentry, summary
- * Note: journalentry is treated as a Symbol-producing declaration so that
+ * Note: journalentry is treated as a DocSymbol-producing declaration so that
  *       it appears in the document outline.
- * TODO: decide whether journalentry should be a Symbol or just an attribute. */
+ * TODO: decide whether journalentry should be a DocSymbol or just an attribute. */
 journalentry_decl
     : KW_JOURNALENTRY TK_DATE string_val opt_body
         {
             Token no_id = {0};
             /* Use the date as the detail and the headline as the name */
-            $$ = make_symbol($1, no_id, $3, $4);
+            $$ = make_doc_symbol($1, no_id, $3, $4);
             token_free(&$1);
             token_free(&$2); /* date token */
         }
@@ -1083,7 +1083,7 @@ extend_stmt
     : KW_EXTEND extend_target opt_body
         {
             token_free(&$1); token_free(&$2);
-            for (int i = 0; i < $3.syms.n; i++) symbol_free(&$3.syms.arr[i]);
+            for (int i = 0; i < $3.syms.n; i++) doc_symbol_free(&$3.syms.arr[i]);
             free($3.syms.arr);
         }
     ;
@@ -1103,7 +1103,7 @@ supplement_stmt
     : KW_SUPPLEMENT supplement_target dotted_id opt_body
         {
             token_free(&$1); token_free(&$2);
-            for (int i = 0; i < $4.syms.n; i++) symbol_free(&$4.syms.arr[i]);
+            for (int i = 0; i < $4.syms.n; i++) doc_symbol_free(&$4.syms.arr[i]);
             free($4.syms.arr);
         }
     ;
@@ -1134,7 +1134,7 @@ include_stmt
     : KW_INCLUDE string_val opt_body
         {
             token_free(&$1); token_free(&$2);
-            for (int i = 0; i < $3.syms.n; i++) symbol_free(&$3.syms.arr[i]);
+            for (int i = 0; i < $3.syms.n; i++) doc_symbol_free(&$3.syms.arr[i]);
             free($3.syms.arr);
         }
     ;
@@ -1289,7 +1289,7 @@ dep_ref
                          (const char **)g_dep_scope, g_dep_scope_n,
                          $1.start, $1.end);
             free($1.path);
-            for (int i = 0; i < $2.syms.n; i++) symbol_free(&$2.syms.arr[i]);
+            for (int i = 0; i < $2.syms.n; i++) doc_symbol_free(&$2.syms.arr[i]);
             free($2.syms.arr);
         }
     ;
@@ -1309,7 +1309,7 @@ alloc_ref
     : TK_IDENT opt_body
         {
             token_free(&$1);
-            for (int i = 0; i < $2.syms.n; i++) symbol_free(&$2.syms.arr[i]);
+            for (int i = 0; i < $2.syms.n; i++) doc_symbol_free(&$2.syms.arr[i]);
             free($2.syms.arr);
         }
     ;
@@ -1409,7 +1409,7 @@ column_id
 column_entry
     : column_id opt_body
         {
-            for (int i = 0; i < $2.syms.n; i++) symbol_free(&$2.syms.arr[i]);
+            for (int i = 0; i < $2.syms.n; i++) doc_symbol_free(&$2.syms.arr[i]);
             free($2.syms.arr);
         }
     ;

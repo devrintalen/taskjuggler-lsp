@@ -143,7 +143,7 @@ static cJSON *make_response(cJSON *id, cJSON *result) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   Symbol → DocumentSymbol JSON
+   DocSymbol → DocumentSymbol JSON
    ═══════════════════════════════════════════════════════════════════════════ */
 
 static cJSON *range_json(LspRange r) {
@@ -159,7 +159,7 @@ static cJSON *range_json(LspRange r) {
     return s;
 }
 
-static cJSON *symbol_to_json(const Symbol *sym) {
+static cJSON *doc_symbol_to_json(const DocSymbol *sym) {
     cJSON *obj = cJSON_CreateObject();
     cJSON_AddStringToObject(obj, "name",   sym->name   ? sym->name   : "");
     cJSON_AddStringToObject(obj, "detail", sym->detail ? sym->detail : "");
@@ -169,7 +169,7 @@ static cJSON *symbol_to_json(const Symbol *sym) {
     if (sym->num_children > 0) {
         cJSON *ch = cJSON_CreateArray();
         for (int i = 0; i < sym->num_children; i++)
-            cJSON_AddItemToArray(ch, symbol_to_json(&sym->children[i]));
+            cJSON_AddItemToArray(ch, doc_symbol_to_json(&sym->children[i]));
         cJSON_AddItemToObject(obj, "children", ch);
     }
     return obj;
@@ -317,8 +317,8 @@ static cJSON *handle_document_symbol(cJSON *id, cJSON *params) {
     if (!d) return make_response(id, cJSON_CreateNull());
 
     cJSON *arr = cJSON_CreateArray();
-    for (int i = 0; i < d->parse.num_symbols; i++)
-        cJSON_AddItemToArray(arr, symbol_to_json(&d->parse.symbols[i]));
+    for (int i = 0; i < d->parse.num_doc_symbols; i++)
+        cJSON_AddItemToArray(arr, doc_symbol_to_json(&d->parse.doc_symbols[i]));
     return make_response(id, arr);
 }
 
@@ -344,7 +344,7 @@ static cJSON *handle_hover(cJSON *id, cJSON *params) {
 
     LspPos pos = json_to_pos(pos_obj);
 
-    ActiveKeyword ak = active_keyword_at(d->parse.sem_tokens, d->parse.num_sem_tokens, pos);
+    ActiveKeyword ak = active_keyword_at(d->parse.tok_spans, d->parse.num_tok_spans, pos);
     if (!ak.keyword) return make_response(id, cJSON_CreateNull());
 
     const char *doc_text = keyword_docs(ak.keyword);
@@ -383,7 +383,7 @@ static cJSON *handle_signature_help(cJSON *id, cJSON *params) {
     if (!d) return make_response(id, cJSON_CreateNull());
 
     LspPos pos = json_to_pos(pos_obj);
-    ActiveContext ac = active_context(d->parse.sem_tokens, d->parse.num_sem_tokens, pos);
+    ActiveContext ac = active_context(d->parse.tok_spans, d->parse.num_tok_spans, pos);
     if (!ac.keyword) return make_response(id, cJSON_CreateNull());
 
     cJSON *sig = build_signature_help_json(ac.keyword, ac.arg_count);
@@ -413,8 +413,8 @@ static cJSON *handle_completion(cJSON *id, cJSON *params) {
     if (!d) return make_response(id, cJSON_CreateNull());
 
     LspPos pos    = json_to_pos(pos_obj);
-    cJSON *result = completions_json(d->parse.sem_tokens, d->parse.num_sem_tokens, pos,
-                                     d->parse.symbols, d->parse.num_symbols);
+    cJSON *result = completions_json(d->parse.tok_spans, d->parse.num_tok_spans, pos,
+                                     d->parse.doc_symbols, d->parse.num_doc_symbols);
     return make_response(id, result);
 }
 

@@ -71,7 +71,7 @@ static uint32_t mfrag_sl = 0, mfrag_sc = 0;
  * are NOT returned to the parser (comments).
  */
 
-extern void g_push_sem_token(int kind,
+extern void g_push_tok_span(int kind,
                              uint32_t sl, uint32_t sc,
                              uint32_t el, uint32_t ec,
                              const char *text);
@@ -80,20 +80,20 @@ extern void g_push_sem_token(int kind,
 static void store_semantic_token(int token) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    g_push_sem_token(token, tok_sl, tok_sc, el, ec, yytext);
+    g_push_tok_span(token, tok_sl, tok_sc, el, ec, yytext);
 }
 
 static void store_semantic_token_mfrag(int token) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    g_push_sem_token(token, mfrag_sl, mfrag_sc, el, ec, yytext);
+    g_push_tok_span(token, mfrag_sl, mfrag_sc, el, ec, yytext);
 }
 
 /* emit_kw: keyword / date / duration — recorded in sem-tokens AND returned. */
 static int emit_kw(int code) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    g_push_sem_token(code, tok_sl, tok_sc, el, ec, yytext);
+    g_push_tok_span(code, tok_sl, tok_sc, el, ec, yytext);
     yylval.tok = (Token){ code, {tok_sl, tok_sc}, {el, ec}, strdup(yytext) };
     return code;
 }
@@ -109,7 +109,7 @@ static int emit_plain(int code) {
     case TK_IDENT:
     case TK_LBRACE: case TK_RBRACE:
     case TK_BANG:   case TK_DOT:   case TK_COMMA:
-        g_push_sem_token(code, tok_sl, tok_sc, el, ec, yytext);
+        g_push_tok_span(code, tok_sl, tok_sc, el, ec, yytext);
         break;
     default:
         break;
@@ -122,7 +122,7 @@ static int emit_plain(int code) {
 static int emit_kw_mfrag(int code) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    g_push_sem_token(code, mfrag_sl, mfrag_sc, el, ec, yytext);
+    g_push_tok_span(code, mfrag_sl, mfrag_sc, el, ec, yytext);
     yylval.tok = (Token){ code, {mfrag_sl, mfrag_sc}, {el, ec}, strdup(yytext) };
     return code;
 }

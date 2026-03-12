@@ -44,7 +44,7 @@ typedef struct {
 
 void token_free(Token *t);
 
-/* ── Symbol kinds (LSP SymbolKind values) ────────────────────────────────── */
+/* ── DocSymbol kinds (LSP SymbolKind values) ─────────────────────────────── */
 
 #define SK_MODULE   2
 #define SK_FUNCTION 12
@@ -52,18 +52,22 @@ void token_free(Token *t);
 #define SK_OBJECT   19
 #define SK_EVENT    24
 
-/* ── Symbol ──────────────────────────────────────────────────────────────── */
-
-typedef struct Symbol Symbol;
-struct Symbol {
-    char    *name;           /* display name, heap-allocated */
-    char    *detail;         /* TJP identifier, heap-allocated */
-    int      kind;           /* SK_* constant */
-    LspRange range;
-    LspRange selection_range;
-    Symbol  *children;       /* dynamic array */
-    int      num_children;
-    int      children_cap;
+/* ── DocSymbol ───────────────────────────────────────────────────────────── *
+ *
+ * A named declaration (project, task, resource, account, shift) in the
+ * document's symbol tree.  Mirrors LSP DocumentSymbol.  Used for
+ * textDocument/documentSymbol, completion identifiers, and dep validation.
+ */
+typedef struct DocSymbol DocSymbol;
+struct DocSymbol {
+    char      *name;           /* display name, heap-allocated */
+    char      *detail;         /* TJP identifier, heap-allocated */
+    int        kind;           /* SK_* constant */
+    LspRange   range;
+    LspRange   selection_range;
+    DocSymbol *children;       /* dynamic array */
+    int        num_children;
+    int        children_cap;
 };
 
 /* ── Diagnostic severity ─────────────────────────────────────────────────── */
@@ -79,10 +83,12 @@ typedef struct {
     char     *message; /* heap-allocated */
 } Diagnostic;
 
-/* ── SemToken ────────────────────────────────────────────────────────────── *
+/* ── TokenSpan ───────────────────────────────────────────────────────────── *
  *
- * Unified token record used for all post-parse processing (hover, completion,
- * signature help, dependency validation, semantic highlighting).
+ * A lexical token with its source location.  Used as a flat, ordered sequence
+ * for all cursor-position queries: hover, completion, signature help, and
+ * semantic highlighting.  (Distinct from LSP "semantic tokens", which is a
+ * separate highlighting protocol.)
  *
  * Populated by the lexer for every token that callers may need to inspect:
  *   - All KW_* keyword tokens (including TK_DATE, TK_DURATION, TK_STR, …)
@@ -98,27 +104,27 @@ typedef struct {
     int    token_kind;
     LspPos start, end;
     char  *text;   /* heap-allocated; may be NULL */
-} SemToken;
+} TokenSpan;
 
 /* ── ParseResult ─────────────────────────────────────────────────────────── */
 
 typedef struct {
-    Diagnostic  *diagnostics;
-    int          num_diagnostics;
-    int          diag_cap;
-    Symbol      *symbols;
-    int          num_symbols;
-    int          sym_cap;
-    SemToken    *sem_tokens;
-    int          num_sem_tokens;
-    int          sem_tok_cap;
+    Diagnostic *diagnostics;
+    int         num_diagnostics;
+    int         diag_cap;
+    DocSymbol  *doc_symbols;
+    int         num_doc_symbols;
+    int         doc_sym_cap;
+    TokenSpan  *tok_spans;
+    int         num_tok_spans;
+    int         tok_span_cap;
 } ParseResult;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
 ParseResult parse(const char *src);
 void        parse_result_free(ParseResult *r);
-void        symbol_free(Symbol *s);
+void        doc_symbol_free(DocSymbol *s);
 
 /* Compare two positions. Returns -1, 0, or 1. */
 static inline int pos_cmp(LspPos a, LspPos b) {
