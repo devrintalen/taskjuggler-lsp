@@ -21,6 +21,7 @@
 #include "hover.h"
 #include "signature.h"
 #include "completion.h"
+#include "semantic_tokens.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -212,11 +213,29 @@ static cJSON *handle_initialize(cJSON *id, cJSON *params) {
     cJSON_AddNumberToObject(tds, "change", 1); /* TextDocumentSyncKind.Full */
     cJSON *open_close = cJSON_CreateBool(1);
     cJSON_AddItemToObject(tds, "openClose", open_close);
-    cJSON_AddItemToObject(caps, "textDocumentSync",       tds);
-    cJSON_AddBoolToObject(caps, "documentSymbolProvider", 1);
-    cJSON_AddBoolToObject(caps, "hoverProvider",          1);
-    cJSON_AddItemToObject(caps, "signatureHelpProvider",  sig_opts);
-    cJSON_AddItemToObject(caps, "completionProvider",     comp_opts);
+    /* Semantic tokens */
+    cJSON *sem_types = cJSON_CreateArray();
+    for (int i = 0; i < num_semantic_token_types; i++)
+        cJSON_AddItemToArray(sem_types,
+                             cJSON_CreateString(semantic_token_type_names[i]));
+    cJSON *sem_mods = cJSON_CreateArray();
+    for (int i = 0; i < num_semantic_token_modifiers; i++)
+        cJSON_AddItemToArray(sem_mods,
+                             cJSON_CreateString(semantic_token_modifier_names[i]));
+    cJSON *sem_legend = cJSON_CreateObject();
+    cJSON_AddItemToObject(sem_legend, "tokenTypes",     sem_types);
+    cJSON_AddItemToObject(sem_legend, "tokenModifiers", sem_mods);
+    cJSON *sem_opts = cJSON_CreateObject();
+    cJSON_AddItemToObject(sem_opts, "legend", sem_legend);
+    cJSON_AddBoolToObject(sem_opts,  "full",  1);
+    /* TODO: add "range": true when textDocument/semanticTokens/range is implemented */
+
+    cJSON_AddItemToObject(caps, "textDocumentSync",          tds);
+    cJSON_AddBoolToObject(caps, "documentSymbolProvider",    1);
+    cJSON_AddBoolToObject(caps, "hoverProvider",             1);
+    cJSON_AddItemToObject(caps, "signatureHelpProvider",     sig_opts);
+    cJSON_AddItemToObject(caps, "completionProvider",        comp_opts);
+    cJSON_AddItemToObject(caps, "semanticTokensProvider",    sem_opts);
 
     cJSON *result = cJSON_CreateObject();
     cJSON_AddItemToObject(result, "capabilities", caps);
@@ -392,6 +411,20 @@ static cJSON *handle_signature_help(cJSON *id, cJSON *params) {
     return make_response(id, sig);
 }
 
+static cJSON *handle_semantic_tokens_full(cJSON *id, cJSON *params) {
+    const char *uri = NULL;
+    cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+    if (td) uri = json_str(td, "uri");
+    if (!uri) return make_response(id, cJSON_CreateNull());
+
+    Document *d = doc_find(uri);
+    if (!d) return make_response(id, cJSON_CreateNull());
+
+    cJSON *result = build_semantic_tokens_json(d->parse.tok_spans,
+                                               d->parse.num_tok_spans);
+    return make_response(id, result);
+}
+
 static cJSON *handle_completion(cJSON *id, cJSON *params) {
     const char *uri = NULL;
     cJSON *tdp = cJSON_GetObjectItemCaseSensitive(params, "textDocumentPosition");
@@ -471,6 +504,17 @@ char *server_process(const char *json_text) {
     } else if (strcmp(m, "textDocument/completion") == 0) {
         resp = handle_completion(id_item, params);
 
+    } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
+        resp = handle_semantic_tokens_full(id_item, params);
+
+    /* TODO: textDocument/semanticTokens/full/delta — requires storing a
+     * resultId per document and computing a token diff against the previously
+     * returned set.  Advertise "full": { "delta": true } in capabilities once
+     * implemented. */
+
+    /* TODO: textDocument/semanticTokens/range — requires filtering tok_spans
+     * to the requested range before encoding.  Advertise "range": true in
+     * capabilities once implemented. */
 
     } else if (id_item) {
         /* Unknown request — return null result */

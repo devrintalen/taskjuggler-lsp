@@ -11,7 +11,7 @@ GEN_HDR  = src/grammar.tab.h
 
 SRC = src/main.c src/server.c src/parser.c \
       $(GEN_LEX) $(GEN_GRAM) \
-      src/hover.c src/signature.c src/completion.c
+      src/hover.c src/signature.c src/completion.c src/semantic_tokens.c
 
 OBJ = $(SRC:.c=.o)
 BIN = taskjuggler-lsp
