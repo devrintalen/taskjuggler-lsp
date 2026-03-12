@@ -63,3 +63,23 @@ This program is free software; you can redistribute it and/or modify it under th
 [TaskJuggler](https://taskjuggler.org/) is copyright Chris Schlaeger and others, licensed under GPLv2. This project is a separate tool that supports the TaskJuggler file format; it is not a derivative work of the TaskJuggler source code.
 
 The file `test/tutorial.tjp` is an example project from the TaskJuggler tutorial, copyright Chris Schlaeger, included here as a test fixture under the terms of the GPLv2.
+
+## LSP Feature Status
+
+| Feature | Method | Status | Notes |
+|---|---|---|---|
+| Lifecycle | `initialize` / `shutdown` / `exit` | Implemented | Negotiates capabilities on init |
+| Document Sync | `textDocument/didOpen`, `didChange`, `didClose` | Implemented | Full-document sync; caches up to 64 open files |
+| Diagnostics | `textDocument/publishDiagnostics` | Implemented | Reports unresolved `depends`/`precedes` targets as errors; out-of-scope relative refs as warnings |
+| Hover | `textDocument/hover` | Implemented | Markdown docs for 40+ TaskJuggler keywords |
+| Completion | `textDocument/completion` | Implemented | Context-aware keyword and identifier suggestions; supports hierarchical and relative (`!`) references |
+| Signature Help | `textDocument/signatureHelp` | Implemented | Parameter descriptions for 35+ keywords |
+| Document Symbols | `textDocument/documentSymbol` | Implemented | Hierarchical symbol tree for projects, tasks, resources, accounts, shifts |
+| Go to Definition | `textDocument/definition` | Not implemented | |
+| Find References | `textDocument/references` | Not implemented | |
+| Rename | `textDocument/rename` | Not implemented | |
+| Code Actions | `textDocument/codeAction` | Not implemented | |
+| Formatting | `textDocument/formatting` | Not implemented | |
+| Folding Ranges | `textDocument/foldingRange` | Not implemented | |
+| Workspace Symbols | `workspace/symbol` | Not implemented | |
+

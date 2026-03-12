@@ -48,6 +48,20 @@ static uint32_t tok_sl = 0, tok_sc = 0;
  * overwritten by every subsequent fragment before the closing rule fires. */
 static uint32_t mfrag_sl = 0, mfrag_sc = 0;
 
+/* Accumulation buffer for DQUOTE and SCISSORS token bodies. */
+static char  str_buf[4096];
+static int   str_len = 0;
+
+#define STR_RESET()         (str_len = 0)
+#define STR_APPEND(s, n)    do { \
+    int _n = (int)(n); \
+    if (str_len + _n < (int)sizeof(str_buf) - 1) { \
+        memcpy(str_buf + str_len, (s), (size_t)_n); \
+        str_len += _n; \
+    } \
+} while (0)
+#define STR_FINISH()        (str_buf[str_len] = '\0')
+
 #define YY_USER_ACTION                          \
     tok_sl   = (uint32_t)(yylineno - 1);        \
     tok_sc   = (uint32_t)yycolumn;              \
@@ -83,11 +97,6 @@ static void store_semantic_token(int token) {
     g_push_tok_span(token, tok_sl, tok_sc, el, ec, yytext);
 }
 
-static void store_semantic_token_mfrag(int token) {
-    uint32_t el = (uint32_t)(yylineno - 1);
-    uint32_t ec = (uint32_t)yycolumn;
-    g_push_tok_span(token, mfrag_sl, mfrag_sc, el, ec, yytext);
-}
 
 /* emit_kw: keyword / date / duration — recorded in sem-tokens AND returned. */
 static int emit_kw(int code) {
@@ -118,12 +127,22 @@ static int emit_plain(int code) {
     return code;
 }
 
-/* emit_kw_mfrag: multi-fragment tokens (strings, scissors). */
+/* emit_kw_mfrag: multi-fragment tokens (strings, scissors). Uses yytext. */
 static int emit_kw_mfrag(int code) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
     g_push_tok_span(code, mfrag_sl, mfrag_sc, el, ec, yytext);
     yylval.tok = (Token){ code, {mfrag_sl, mfrag_sc}, {el, ec}, strdup(yytext) };
+    return code;
+}
+
+/* emit_kw_mfrag_text: like emit_kw_mfrag but uses an explicit text string
+ * (needed for tokens whose body is accumulated across multiple lex rules). */
+static int emit_kw_mfrag_text(int code, const char *text) {
+    uint32_t el = (uint32_t)(yylineno - 1);
+    uint32_t ec = (uint32_t)yycolumn;
+    g_push_tok_span(code, mfrag_sl, mfrag_sc, el, ec, text);
+    yylval.tok = (Token){ code, {mfrag_sl, mfrag_sc}, {el, ec}, strdup(text) };
     return code;
 }
 
@@ -146,33 +165,41 @@ static int emit_kw_mfrag(int code) {
 #[^\n]*         { store_semantic_token(TK_LINE_COMMENT); /* not returned to parser */ }
 \/\/[^\n]*      { store_semantic_token(TK_LINE_COMMENT); /* not returned to parser */ }
 
-"/*"            { mfrag_sl = tok_sl; mfrag_sc = tok_sc; BEGIN(BLOCK_COMMENT); }
+"/*"            { mfrag_sl = tok_sl; mfrag_sc = tok_sc;
+                  STR_RESET(); STR_APPEND("/*", 2); BEGIN(BLOCK_COMMENT); }
 <BLOCK_COMMENT>{
-    "*/"        { store_semantic_token_mfrag(TK_BLOCK_COMMENT); BEGIN(INITIAL);
-                  /* not returned to parser */ }
-    \n          { yycolumn = 0; }
-    [^*\n]+     { /* skip */ }
-    "*"         { /* not returned to parser */ }
+    "*/"        { STR_APPEND("*/", 2); STR_FINISH();
+                  uint32_t el = (uint32_t)(yylineno - 1);
+                  uint32_t ec = (uint32_t)yycolumn;
+                  g_push_tok_span(TK_BLOCK_COMMENT, mfrag_sl, mfrag_sc, el, ec, str_buf);
+                  BEGIN(INITIAL); /* not returned to parser */ }
+    \n          { STR_APPEND(yytext, yyleng); yycolumn = 0; }
+    [^*\n]+     { STR_APPEND(yytext, yyleng); }
+    "*"         { STR_APPEND(yytext, yyleng); }
     <<EOF>>     { BEGIN(INITIAL); return emit_plain(TK_ERROR); }
 }
 
     /* Scissors multi-line string: -8<- ... ->8- */
-"-8<-"          { mfrag_sl = tok_sl; mfrag_sc = tok_sc; BEGIN(SCISSORS); }
+"-8<-"          { mfrag_sl = tok_sl; mfrag_sc = tok_sc;
+                  STR_RESET(); STR_APPEND("-8<-", 4); BEGIN(SCISSORS); }
 <SCISSORS>{
-    "->8-"      { BEGIN(INITIAL); return emit_kw_mfrag(TK_MULTI_LINE_STR); }
-    \n          { yycolumn = 0; }
-    [^-\n]+     { }
-    "-"         { }
+    "->8-"      { STR_APPEND("->8-", 4); STR_FINISH();
+                  BEGIN(INITIAL); return emit_kw_mfrag_text(TK_MULTI_LINE_STR, str_buf); }
+    \n          { STR_APPEND(yytext, yyleng); yycolumn = 0; }
+    [^-\n]+     { STR_APPEND(yytext, yyleng); }
+    "-"         { STR_APPEND(yytext, yyleng); }
     <<EOF>>     { BEGIN(INITIAL); return emit_plain(TK_ERROR); }
 }
 
-\"              { mfrag_sl = tok_sl; mfrag_sc = tok_sc; BEGIN(DQUOTE); }
+\"              { mfrag_sl = tok_sl; mfrag_sc = tok_sc;
+                  STR_RESET(); STR_APPEND("\"", 1); BEGIN(DQUOTE); }
 <DQUOTE>{
-    \"          { BEGIN(INITIAL); return emit_kw_mfrag(TK_STR); }
+    \"          { STR_APPEND("\"", 1); STR_FINISH();
+                  BEGIN(INITIAL); return emit_kw_mfrag_text(TK_STR, str_buf); }
     \n          { yycolumn = 0;
                   BEGIN(INITIAL); return emit_plain(TK_ERROR); }
-    \\[^\n]     { }
-    [^\"\\\n]+  { }
+    \\[^\n]     { STR_APPEND(yytext, yyleng); }
+    [^\"\\\n]+  { STR_APPEND(yytext, yyleng); }
     <<EOF>>     { BEGIN(INITIAL); return emit_plain(TK_ERROR); }
 }
 
