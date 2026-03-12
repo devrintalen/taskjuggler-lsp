@@ -873,15 +873,8 @@ item
             token_free(&$1);
             $$.has_sym = 0;
         }
-    | TK_RBRACE
-        {
-            LspRange rng = { $1.start, $1.end };
-            push_diagnostic(g_result, rng, DIAG_ERROR, "unmatched `}`");
-            token_free(&$1);
-            $$.has_sym = 0;
-        }
     | error
-        { yyerrok; $$.has_sym = 0; }
+        { $$.has_sym = 0; }
     ;
 
 /* ══════════════════════════════════════════════════════════════════════════ *
