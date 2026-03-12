@@ -73,39 +73,56 @@ static uint32_t mfrag_sl = 0, mfrag_sc = 0;
 
 extern void g_push_sem_token(int kind,
                              uint32_t sl, uint32_t sc,
-                             uint32_t el, uint32_t ec);
+                             uint32_t el, uint32_t ec,
+                             const char *text);
 
+/* store_semantic_token: used for comments (not returned to parser). */
 static void store_semantic_token(int token) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    g_push_sem_token(token, tok_sl, tok_sc, el, ec);
+    g_push_sem_token(token, tok_sl, tok_sc, el, ec, yytext);
 }
 
 static void store_semantic_token_mfrag(int token) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    g_push_sem_token(token, mfrag_sl, mfrag_sc, el, ec);
+    g_push_sem_token(token, mfrag_sl, mfrag_sc, el, ec, yytext);
 }
 
+/* emit_kw: keyword / date / duration — recorded in sem-tokens AND returned. */
 static int emit_kw(int code) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    g_push_sem_token(code, tok_sl, tok_sc, el, ec);
+    g_push_sem_token(code, tok_sl, tok_sc, el, ec, yytext);
     yylval.tok = (Token){ code, {tok_sl, tok_sc}, {el, ec}, strdup(yytext) };
     return code;
 }
 
+/* emit_plain: identifier / number / punctuation.
+ * Tokens needed by hover/completion/signature/dep-validation are also
+ * recorded in sem-tokens so that downstream passes can work without a
+ * separate full token array. */
 static int emit_plain(int code) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
+    switch (code) {
+    case TK_IDENT:
+    case TK_LBRACE: case TK_RBRACE:
+    case TK_BANG:   case TK_DOT:   case TK_COMMA:
+        g_push_sem_token(code, tok_sl, tok_sc, el, ec, yytext);
+        break;
+    default:
+        break;
+    }
     yylval.tok = (Token){ code, {tok_sl, tok_sc}, {el, ec}, strdup(yytext) };
     return code;
 }
 
+/* emit_kw_mfrag: multi-fragment tokens (strings, scissors). */
 static int emit_kw_mfrag(int code) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    g_push_sem_token(code, mfrag_sl, mfrag_sc, el, ec);
+    g_push_sem_token(code, mfrag_sl, mfrag_sc, el, ec, yytext);
     yylval.tok = (Token){ code, {mfrag_sl, mfrag_sc}, {el, ec}, strdup(yytext) };
     return code;
 }

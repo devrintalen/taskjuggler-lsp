@@ -344,7 +344,7 @@ static cJSON *handle_hover(cJSON *id, cJSON *params) {
 
     LspPos pos = json_to_pos(pos_obj);
 
-    ActiveKeyword ak = active_keyword_at(d->parse.tokens, d->parse.num_tokens, pos);
+    ActiveKeyword ak = active_keyword_at(d->parse.sem_tokens, d->parse.num_sem_tokens, pos);
     if (!ak.keyword) return make_response(id, cJSON_CreateNull());
 
     const char *doc_text = keyword_docs(ak.keyword);
@@ -383,7 +383,7 @@ static cJSON *handle_signature_help(cJSON *id, cJSON *params) {
     if (!d) return make_response(id, cJSON_CreateNull());
 
     LspPos pos = json_to_pos(pos_obj);
-    ActiveContext ac = active_context(d->parse.tokens, d->parse.num_tokens, pos);
+    ActiveContext ac = active_context(d->parse.sem_tokens, d->parse.num_sem_tokens, pos);
     if (!ac.keyword) return make_response(id, cJSON_CreateNull());
 
     cJSON *sig = build_signature_help_json(ac.keyword, ac.arg_count);
@@ -413,7 +413,7 @@ static cJSON *handle_completion(cJSON *id, cJSON *params) {
     if (!d) return make_response(id, cJSON_CreateNull());
 
     LspPos pos    = json_to_pos(pos_obj);
-    cJSON *result = completions_json(d->parse.tokens, d->parse.num_tokens, pos,
+    cJSON *result = completions_json(d->parse.sem_tokens, d->parse.num_sem_tokens, pos,
                                      d->parse.symbols, d->parse.num_symbols);
     return make_response(id, result);
 }

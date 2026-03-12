@@ -81,17 +81,23 @@ typedef struct {
 
 /* ── SemToken ────────────────────────────────────────────────────────────── *
  *
- * One entry for every token that carries semantic meaning (keywords, strings,
- * comments, numbers, dates, durations).  Punctuation and plain identifiers
- * are not stored here.
+ * Unified token record used for all post-parse processing (hover, completion,
+ * signature help, dependency validation, semantic highlighting).
+ *
+ * Populated by the lexer for every token that callers may need to inspect:
+ *   - All KW_* keyword tokens (including TK_DATE, TK_DURATION, TK_STR, …)
+ *   - TK_IDENT, TK_LBRACE, TK_RBRACE, TK_BANG, TK_DOT, TK_COMMA
+ *   - TK_LINE_COMMENT, TK_BLOCK_COMMENT
  *
  * token_kind holds the raw TK_* / KW_* constant from grammar.tab.h.
- * The mapping to LSP SemanticTokenTypes / SemanticTokenModifiers is done
- * by the semantic-tokens handler when building the response.
+ * text is heap-allocated (strdup of yytext); NULL only for tokens where
+ * the text is never needed (e.g. comments).  Caller must not modify it;
+ * parse_result_free() frees it.
  */
 typedef struct {
     int    token_kind;
     LspPos start, end;
+    char  *text;   /* heap-allocated; may be NULL */
 } SemToken;
 
 /* ── ParseResult ─────────────────────────────────────────────────────────── */
@@ -103,11 +109,9 @@ typedef struct {
     Symbol      *symbols;
     int          num_symbols;
     int          sym_cap;
-    Token        *tokens;
-    int           num_tokens;
-    SemToken     *sem_tokens;
-    int           num_sem_tokens;
-    int           sem_tok_cap;
+    SemToken    *sem_tokens;
+    int          num_sem_tokens;
+    int          sem_tok_cap;
 } ParseResult;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */

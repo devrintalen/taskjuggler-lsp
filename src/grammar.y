@@ -32,6 +32,14 @@ typedef struct { SymArr syms; LspPos end; } BodyResult;
 
 /* Return type for item rule: either a Symbol or nothing. */
 typedef struct { Symbol sym; int has_sym; } ItemResult;
+
+/* Return type for dep_path and task_ref rules. */
+typedef struct {
+    int    bang_count; /* number of leading ! tokens */
+    char  *path;       /* dotted path, heap-allocated, e.g. "deliveries.start" */
+    LspPos start;
+    LspPos end;
+} TaskRef;
 }
 
 %{
@@ -53,6 +61,26 @@ extern void push_symbol    (ParseResult *r, Symbol s);
 extern void push_diagnostic(ParseResult *r, LspRange range, int severity,
                              const char *msg);
 extern int  symbol_kind_for(const char *kw);
+extern void push_dep_ref   (ParseResult *r, int bang_count, const char *path,
+                             const char **scope, int scope_n,
+                             LspPos start, LspPos end);
+
+/* ── Dep-validation scope stack ──────────────────────────────────────────── *
+ * Tracks the current task path so that dep refs can capture a scope snapshot
+ * at parse time.  Populated via mid-rule actions on sym_kw opt_id opt_name
+ * when the keyword is KW_TASK.                                              */
+static char  *g_dep_scope[128];
+static int    g_dep_scope_n = 0;
+
+static void dep_scope_push(const char *id) {
+    if (g_dep_scope_n < 128 && id && id[0])
+        g_dep_scope[g_dep_scope_n++] = strdup(id);
+}
+
+static void dep_scope_pop(void) {
+    if (g_dep_scope_n > 0)
+        free(g_dep_scope[--g_dep_scope_n]);
+}
 
 /* ── Symbol array helper ─────────────────────────────────────────────────── */
 
@@ -101,6 +129,8 @@ static Symbol make_symbol(Token kw, Token id, Token name, BodyResult body) {
     Symbol     sym;   /* fully built symbol */
     BodyResult body;  /* body: children + closing-brace position */
     ItemResult item;  /* item: optional symbol */
+    TaskRef    tref;  /* dep path + bang count */
+    int        ival;  /* integer (bang count) */
 }
 
 /* ── Token declarations ──────────────────────────────────────────────────── */
@@ -174,6 +204,8 @@ static Symbol make_symbol(Token kw, Token id, Token name, BodyResult body) {
 %type <tok>  sym_kw report_kw opt_id opt_name opt_version
 %type <tok>  num_val dur_unit string_val extend_target supplement_target
 %type <body> opt_body body_items
+%type <tref> dep_path task_ref
+%type <ival> bang_seq
 
 %type <item> item
 
@@ -184,7 +216,7 @@ static Symbol make_symbol(Token kw, Token id, Token name, BodyResult body) {
 /* ── Top-level file ──────────────────────────────────────────────────────── */
 
 file
-    : items
+    : { g_dep_scope_n = 0; } items
     ;
 
 items
@@ -897,9 +929,13 @@ symbol_decl
             if ($4.text) token_free(&$4); /* discard version string */
             /* TODO: store interval $5 as the project time range */
         }
-    | sym_kw opt_id opt_name opt_body
+    | sym_kw opt_id opt_name
+      { /* Push task ID onto dep scope before parsing the body. */
+        if ($1.kind == KW_TASK) dep_scope_push($2.text); }
+      opt_body
         {
-            $$ = make_symbol($1, $2, $3, $4);
+            if ($1.kind == KW_TASK) dep_scope_pop();
+            $$ = make_symbol($1, $2, $3, $5);
             token_free(&$1);
         }
     ;
@@ -1211,18 +1247,36 @@ id_list
     ;
 
 /* ── bang_seq: zero or more leading ! tokens ────────────────────────────── *
- * Used in relative task references (depends/precedes).                      */
+ * Returns the count of bangs seen (int ival).                               */
 bang_seq
     : /* empty */
+        { $$ = 0; }
     | bang_seq TK_BANG
-        { token_free(&$2); }
+        { token_free(&$2); $$ = $1 + 1; }
     ;
 
-/* ── task_ref: [!...]identifier[.identifier...]  ────────────────────────── *
- * Syntax: ([!...] <ID> [. <ID> ...])  or  (<ABSOLUTE_ID>)
- * Covers: absolute IDs, relative IDs (with bangs), dotted paths            */
+/* ── dep_path: dotted identifier path for dep references ────────────────── *
+ * Distinct from dotted_id so taskprefix/taskroot are unaffected.           */
+dep_path
+    : TK_IDENT
+        { $$.bang_count = 0; $$.path = strdup($1.text);
+          $$.start = $1.start; $$.end = $1.end;
+          token_free(&$1); }
+    | dep_path TK_DOT TK_IDENT
+        { char buf[512];
+          snprintf(buf, sizeof(buf), "%s.%s", $1.path, $3.text);
+          free($1.path);
+          $$.bang_count = 0;
+          $$.path  = strdup(buf);
+          $$.start = $1.start;
+          $$.end   = $3.end;
+          token_free(&$2); token_free(&$3); }
+    ;
+
+/* ── task_ref: [!...]dep_path  ──────────────────────────────────────────── */
 task_ref
-    : bang_seq dotted_id
+    : bang_seq dep_path
+        { $$ = $2; $$.bang_count = $1; }
     ;
 
 /* ── dep_ref: task reference with optional body ─────────────────────────── *
@@ -1231,6 +1285,10 @@ task_ref
 dep_ref
     : task_ref opt_body
         {
+            push_dep_ref(g_result, $1.bang_count, $1.path,
+                         (const char **)g_dep_scope, g_dep_scope_n,
+                         $1.start, $1.end);
+            free($1.path);
             for (int i = 0; i < $2.syms.n; i++) symbol_free(&$2.syms.arr[i]);
             free($2.syms.arr);
         }

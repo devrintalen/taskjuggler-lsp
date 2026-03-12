@@ -21,44 +21,26 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Keyword classification ──────────────────────────────────────────────── */
-
-static int is_any_known_keyword(const char *s) {
-    static const char *kws[] = {
-        "project","task","resource","account","shift","macro","include","flags",
-        "supplement","scenario","effort","duration","length","milestone","depends",
-        "precedes","allocate","start","end","maxstart","maxend","minstart","minend",
-        "priority","complete","note","responsible","booking","scheduled","rate",
-        "efficiency","vacation","leaves","now","currency","timeformat","timezone",
-        "workinghours","timingresolution","extend","journalentry","balance","limits",
-        "overtime","statusnote","dailyworkinghours","weeklyworkinghours","outputdir",
-        "purge", NULL
-    };
-    for (int i = 0; kws[i]; i++)
-        if (strcmp(s, kws[i]) == 0) return 1;
-    return 0;
-}
-
 /* ── active_context ──────────────────────────────────────────────────────── */
 
 /* Stack entry: (keyword, brace_depth, arg_count) */
 typedef struct { char *kw; uint32_t depth; uint32_t argc; } StackEntry;
 
-ActiveContext active_context(const Token *tokens, int num_tokens, LspPos cursor) {
+ActiveContext active_context(const SemToken *tokens, int num_tokens, LspPos cursor) {
     uint32_t brace_depth = 0;
     StackEntry stack[128];
     int stack_n = 0;
 
     for (int i = 0; i < num_tokens; i++) {
-        const Token *tok = &tokens[i];
-        if (tok->kind == TK_EOF) break;
+        const SemToken *tok = &tokens[i];
+        if (tok->token_kind == TK_EOF) break;
 
         /* Stop once token starts past cursor */
         if (tok->start.line > cursor.line
          || (tok->start.line == cursor.line && tok->start.character > cursor.character))
             break;
 
-        switch (tok->kind) {
+        switch (tok->token_kind) {
         case TK_LINE_COMMENT:
         case TK_BLOCK_COMMENT:
             break;
@@ -73,33 +55,34 @@ ActiveContext active_context(const Token *tokens, int num_tokens, LspPos cursor)
                 free(stack[--stack_n].kw);
             break;
 
-        case TK_IDENT:
-            if (is_any_known_keyword(tok->text)) {
-                while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth)
-                    free(stack[--stack_n].kw);
+        default:
+            /* Keywords arrive as KW_* tokens with text set.
+             * Check signature help by text to stay independent of token codes. */
+            if (tok->text) {
                 cJSON *tmp = build_signature_help_json(tok->text, 0);
                 if (tmp) {
                     cJSON_Delete(tmp);
+                    while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth)
+                        free(stack[--stack_n].kw);
                     if (stack_n < 128)
                         stack[stack_n++] = (StackEntry){ strdup(tok->text), brace_depth, 0 };
+                    break;
                 }
             }
-            break;
-
-        default: {
             /* Count as completed argument only if token fully before cursor */
-            int fully_before = (tok->end.line < cursor.line)
-                || (tok->end.line == cursor.line && tok->end.character <= cursor.character);
-            if (fully_before) {
-                for (int j = stack_n - 1; j >= 0; j--) {
-                    if (stack[j].depth == brace_depth) {
-                        stack[j].argc++;
-                        break;
+            {
+                int fully_before = (tok->end.line < cursor.line)
+                    || (tok->end.line == cursor.line && tok->end.character <= cursor.character);
+                if (fully_before) {
+                    for (int j = stack_n - 1; j >= 0; j--) {
+                        if (stack[j].depth == brace_depth) {
+                            stack[j].argc++;
+                            break;
+                        }
                     }
                 }
             }
             break;
-        }
         }
     }
 

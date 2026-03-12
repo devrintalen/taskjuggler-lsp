@@ -33,7 +33,7 @@ typedef struct {
  * keyword together with the number of completed argument tokens.
  * Caller must free result.keyword (if non-NULL).
  */
-ActiveContext active_context(const Token *tokens, int num_tokens, LspPos cursor);
+ActiveContext active_context(const SemToken *tokens, int num_tokens, LspPos cursor);
 
 /*
  * Build a LSP SignatureHelp JSON object for `kw` with `active_param`
