@@ -1,0 +1,49 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/sample.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "project acso \"Accounting Software\" 2002-01-16 +4m {\n}\ntask t1 \"Design\" {\n  eff\n}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "textDocument/completion",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/sample.tjp"
+      },
+      "position": {
+        "line": 3,
+        "character": 5
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "shutdown",
+    "params": {}
+  }
+]
