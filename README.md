@@ -11,10 +11,11 @@ This is an independent implementation that provides editor tooling for TaskJuggl
 | Feature | Status |
 |---|---|
 | Diagnostics | Implemented |
-| Hover documentation | Implemented |
-| Completion | Implemented |
-| Signature help | Implemented |
+| Semantic Tokens | Implemented |
 | Document symbols | Implemented |
+| Signature help | Implemented |
+| Hover documentation | WIP |
+| Completion | WIP |
 | Go to definition | Not implemented |
 | Find references | Not implemented |
 

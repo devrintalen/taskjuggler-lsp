@@ -32,6 +32,7 @@ typedef void *YY_BUFFER_STATE;
 extern YY_BUFFER_STATE yy_scan_string(const char *str);
 extern void            yy_delete_buffer(YY_BUFFER_STATE buf);
 extern int             yycolumn; /* column tracker defined in lexer.l */
+extern int             yylineno; /* line counter managed by flex %option yylineno */
 
 /* ── Shared globals (used by lexer.l and grammar.y via extern) ───────────── */
 
@@ -273,6 +274,7 @@ ParseResult parse(const char *src) {
     g_num_dep_refs  = 0;
     g_dep_ref_cap   = 0;
     yycolumn        = 0;
+    yylineno        = 1;
 
     /* Feed source to flex and run the bison parser */
     YY_BUFFER_STATE buf = yy_scan_string(src);
