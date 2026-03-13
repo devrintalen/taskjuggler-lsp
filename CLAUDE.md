@@ -31,3 +31,8 @@ Use K&R C style for code.
 Use spaces instead of tabs, and use four spaces per indent.
 
 Prefer full words rather than abbreviations for naming. For example, "token_end_line" rather than "tok_el".
+
+## TaskJuggler Reference
+
+Use the command "tj3man" to get definitive syntax and usage information for TaskJuggler. The command "tj3man <keyword>" will return detailed information on keywords and concepts. "tj3man" without any arguments will return a full list of available pages.
+

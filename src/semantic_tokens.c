@@ -163,9 +163,11 @@ static void emit_token(cJSON *data,
         const char *nl = strchr(p, '\n');
         uint32_t seg_len = nl ? (uint32_t)(nl - p) : (uint32_t)strlen(p);
 
-        push_entry(data, delta_line, delta_start, seg_len, token_type, modifiers);
-        *prev_line = current_line;
-        *prev_char = current_char;
+        if (seg_len > 0) {
+            push_entry(data, delta_line, delta_start, seg_len, token_type, modifiers);
+            *prev_line = current_line;
+            *prev_char = current_char;
+        }
 
         if (nl) p = nl + 1;
         current_line++;
