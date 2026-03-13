@@ -112,6 +112,10 @@ In Emacs, which I use with `lsp-mode`, this looks like this:
 
 This initialization code depends on `taskjuggler.el`, which is an Emacs major mode for TaskJuggler that I am still working on and have not made public yet.
 
+## Limitations
+
+Only single-file projects are fully supported. References across files are probably broken.
+
 ## License
 
 Copyright (C) 2026 Devrin Talen
