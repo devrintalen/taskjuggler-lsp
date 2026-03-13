@@ -116,7 +116,33 @@ ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos 
     return (ActiveKeyword){ NULL, {{0,0},{0,0}} };
 }
 
-/* ── keyword_docs ────────────────────────────────────────────────────────── */
+/* ── keyword_docs ────────────────────────────────────────────────────────── *
+ *
+ * Returns a Markdown documentation string for a keyword, or NULL if the
+ * keyword has no hover entry.
+ *
+ * Coverage: 39 of ~200 TaskJuggler keywords are currently documented.
+ *
+ * Covered (39):
+ *   Declarations:  project, task, resource, account, shift, macro, include,
+ *                  flags, supplement
+ *   Task attrs:    effort, duration, length, milestone, depends, precedes,
+ *                  allocate, start, end, maxstart, minstart, maxend, minend,
+ *                  priority, complete, note, responsible, booking, scheduled
+ *   Resource attrs: rate, efficiency, vacation, leaves
+ *   Project attrs: now, currency, timeformat, timezone, workinghours,
+ *                  timingresolution, scenario
+ *
+ * Not yet covered (examples):
+ *   Declarations:  taskprefix, resourceprefix, extend
+ *   Task attrs:    limits, charge, chargeset, journalentry, statusnote,
+ *                  projectid, overtime, forward, backward, scheduling
+ *   Resource attrs: workerperday, managers, fail, warn, purge
+ *   Report types:  taskreport, resourcereport, textreport, tracereport,
+ *                  export, accountreport (and all report sub-attributes)
+ *   Misc:          alertlevel, columns, caption, center, formats, headline,
+ *                  hidetask, hideresource, rolluptask, rollupresource, sortby
+ */
 
 const char *keyword_docs(const char *kw) {
     if (!kw) return NULL;

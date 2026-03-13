@@ -157,7 +157,31 @@ cJSON *build_signature_help_json(const char *kw, uint32_t active_param) {
         return make_sig_json(&d, active_param); \
     } while(0)
 
-/* SIG: keyword with one or more parameters */
+/* SIG: keyword with one or more parameters.
+ *
+ * Coverage: 39 of ~200 TaskJuggler keywords have signature help entries.
+ *
+ * Covered (39):
+ *   Declarations:  project, task, resource, account, shift, macro, include,
+ *                  flags, supplement, scenario
+ *   Task attrs:    effort, duration, length, milestone, scheduled, depends,
+ *                  precedes, allocate, start, end, maxstart, minstart,
+ *                  maxend, minend, priority, complete, note, responsible,
+ *                  booking
+ *   Resource attrs: rate, efficiency, vacation, leaves
+ *   Project attrs: now, currency, timeformat, timezone, workinghours,
+ *                  timingresolution
+ *
+ * Not yet covered (examples):
+ *   Declarations:  taskprefix, resourceprefix, extend
+ *   Task attrs:    limits, charge, chargeset, journalentry, statusnote,
+ *                  projectid, overtime, forward, backward, scheduling
+ *   Resource attrs: workerperday, managers, fail, warn, purge
+ *   Report types:  taskreport, resourcereport, textreport, tracereport,
+ *                  export, accountreport (and all report sub-attributes)
+ *   Misc:          alertlevel, columns, caption, center, formats, headline,
+ *                  hidetask, hideresource, rolluptask, rollupresource, sortby
+ */
 #define SIG(lbl, doc, ...) \
     do { \
         static const char *params[] = { __VA_ARGS__, NULL }; \
