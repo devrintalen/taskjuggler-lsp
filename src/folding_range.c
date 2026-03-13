@@ -38,6 +38,9 @@ cJSON *build_folding_ranges_json(const TokenSpan *spans, int num_spans) {
     uint32_t brace_stack[MAX_BRACE_DEPTH];
     int brace_depth = 0;
 
+    uint32_t bracket_stack[MAX_BRACE_DEPTH];
+    int bracket_depth = 0;
+
     for (int i = 0; i < num_spans; i++) {
         const TokenSpan *s = &spans[i];
 
@@ -50,6 +53,20 @@ cJSON *build_folding_ranges_json(const TokenSpan *spans, int num_spans) {
         case TK_RBRACE:
             if (brace_depth > 0) {
                 uint32_t start_line = brace_stack[--brace_depth];
+                uint32_t end_line   = s->start.line;
+                if (end_line > start_line)
+                    push_range(arr, start_line, end_line, "region");
+            }
+            break;
+
+        case TK_LBRACKET:
+            if (bracket_depth < MAX_BRACE_DEPTH)
+                bracket_stack[bracket_depth++] = s->start.line;
+            break;
+
+        case TK_RBRACKET:
+            if (bracket_depth > 0) {
+                uint32_t start_line = bracket_stack[--bracket_depth];
                 uint32_t end_line   = s->start.line;
                 if (end_line > start_line)
                     push_range(arr, start_line, end_line, "region");

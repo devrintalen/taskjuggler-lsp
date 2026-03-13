@@ -22,7 +22,7 @@
         "uri": "file:///test/sample.tjp",
         "languageId": "taskjuggler",
         "version": 1,
-        "text": "/* project header\n   comment */\nproject prj \"My Project\" 2024-01-01 +1m {\n  task t1 \"Task One\" {\n    task t2 \"Task Two\" {\n    }\n  }\n  resource r1 \"Developer\" {\n  }\n}\n"
+        "text": "/* project header\n   comment */\nmacro HEADER [\n  project prj \"My Project\" 2024-01-01 +1m\n]\nproject prj \"My Project\" 2024-01-01 +1m {\n  task t1 \"Task One\" {\n    task t2 \"Task Two\" {\n    }\n  }\n  resource r1 \"Developer\" {\n  }\n}\n"
       }
     }
   },

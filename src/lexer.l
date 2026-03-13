@@ -116,8 +116,9 @@ static int emit_plain(int code) {
     uint32_t ec = (uint32_t)yycolumn;
     switch (code) {
     case TK_IDENT:
-    case TK_LBRACE: case TK_RBRACE:
-    case TK_BANG:   case TK_DOT:   case TK_COMMA:
+    case TK_LBRACE:    case TK_RBRACE:
+    case TK_LBRACKET:  case TK_RBRACKET:
+    case TK_BANG:      case TK_DOT:   case TK_COMMA:
         g_push_tok_span(code, tok_sl, tok_sc, el, ec, yytext);
         break;
     default:

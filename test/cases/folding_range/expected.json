@@ -65,13 +65,8 @@
         "kind": "comment"
       },
       {
-        "startLine": 4,
-        "endLine": 5,
-        "kind": "region"
-      },
-      {
-        "startLine": 3,
-        "endLine": 6,
+        "startLine": 2,
+        "endLine": 4,
         "kind": "region"
       },
       {
@@ -80,8 +75,18 @@
         "kind": "region"
       },
       {
-        "startLine": 2,
+        "startLine": 6,
         "endLine": 9,
+        "kind": "region"
+      },
+      {
+        "startLine": 10,
+        "endLine": 11,
+        "kind": "region"
+      },
+      {
+        "startLine": 5,
+        "endLine": 12,
         "kind": "region"
       }
     ]
