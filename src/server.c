@@ -401,8 +401,8 @@ static cJSON *handle_completion(cJSON *id, cJSON *params) {
     if (!d) return make_response(id, cJSON_CreateNull());
 
     LspPos pos    = json_to_pos(pos_obj);
-    cJSON *result = completions_json(d->parse.tok_spans, d->parse.num_tok_spans, pos,
-                                     d->parse.doc_symbols, d->parse.num_doc_symbols);
+    cJSON *result = build_completions_json(d->parse.tok_spans, d->parse.num_tok_spans, pos,
+                                           d->parse.doc_symbols, d->parse.num_doc_symbols);
     return make_response(id, result);
 }
 

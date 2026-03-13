@@ -249,20 +249,6 @@ static int resolve_from(const DocSymbol *syms, int n, const char **segs,
     return 0;
 }
 
-static const DocSymbol *find_scope_local(const DocSymbol *syms, int n,
-                                         const char **path, int plen,
-                                         int *out_n) {
-    if (plen == 0) { *out_n = n; return syms; }
-    for (int i = 0; i < n; i++) {
-        if (syms[i].kind == SK_FUNCTION
-                && strcmp(syms[i].detail, path[0]) == 0)
-            return find_scope_local(syms[i].children, syms[i].num_children,
-                                    path + 1, plen - 1, out_n);
-    }
-    *out_n = 0;
-    return NULL;
-}
-
 static int validate_ref(const DocSymbol *syms, int nsym,
                         const char **scope, int scope_len,
                         int bang_count, const char **segs, int nseg) {
@@ -274,7 +260,7 @@ static int validate_ref(const DocSymbol *syms, int nsym,
     } else {
         int k = scope_len;
         if (bang_count > k) return 0;
-        ctx = find_scope_local(syms, nsym, scope, k - bang_count, &nctx);
+        ctx = doc_symbol_find_path(syms, nsym, scope, k - bang_count, &nctx);
         if (!ctx) { nctx = 0; ctx = NULL; }
     }
     return resolve_from(ctx, nctx, segs, nseg);

@@ -26,5 +26,5 @@
  * Return a JSON CompletionList object (or cJSON_CreateNull() if no items)
  * for the given cursor position.  Caller owns the returned cJSON object.
  */
-cJSON *completions_json(const TokenSpan *tokens, int num_tokens, LspPos cursor,
-                        const DocSymbol *symbols, int num_symbols);
+cJSON *build_completions_json(const TokenSpan *tokens, int num_tokens, LspPos cursor,
+                              const DocSymbol *symbols, int num_symbols);

@@ -102,6 +102,21 @@ void push_doc_symbol(ParseResult *r, DocSymbol s) {
     r->doc_symbols[r->num_doc_symbols++] = s;
 }
 
+/* ── DocSymbol tree navigation ───────────────────────────────────────────── */
+
+const DocSymbol *doc_symbol_find_path(const DocSymbol *syms, int n,
+                                      const char **path, int plen,
+                                      int *out_n) {
+    if (plen == 0) { *out_n = n; return syms; }
+    for (int i = 0; i < n; i++) {
+        if (syms[i].kind == SK_FUNCTION && strcmp(syms[i].detail, path[0]) == 0)
+            return doc_symbol_find_path(syms[i].children, syms[i].num_children,
+                                        path + 1, plen - 1, out_n);
+    }
+    *out_n = 0;
+    return NULL;
+}
+
 /* ── Keyword classification ──────────────────────────────────────────────── */
 
 int symbol_kind_for(const char *kw) {

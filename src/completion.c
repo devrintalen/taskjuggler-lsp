@@ -32,12 +32,6 @@
 #define CIK_KEYWORD   14
 #define CIK_REFERENCE 18
 
-/* ── Position helper ─────────────────────────────────────────────────────── */
-
-static int pos_before(LspPos a, LspPos b) {
-    return (a.line < b.line) || (a.line == b.line && a.character < b.character);
-}
-
 /* ── block_stack ─────────────────────────────────────────────────────────── */
 
 static int is_block_opener_kind(int k) {
@@ -57,7 +51,7 @@ static char **block_stack(const TokenSpan *tokens, int num_tokens,
 
     for (int i = 0; i < num_tokens; i++) {
         const TokenSpan *tok = &tokens[i];
-        if (tok->token_kind == TK_EOF || pos_before(cursor, tok->start)) break;
+        if (tok->token_kind == TK_EOF || pos_cmp(cursor, tok->start) < 0) break;
 
         switch (tok->token_kind) {
         case TK_LINE_COMMENT:
@@ -331,7 +325,7 @@ static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
 
     for (int i = 0; i < num_tokens; i++) {
         const TokenSpan *tok = &tokens[i];
-        if (tok->token_kind == TK_EOF || pos_before(cursor, tok->start)) break;
+        if (tok->token_kind == TK_EOF || pos_cmp(cursor, tok->start) < 0) break;
 
         switch (tok->token_kind) {
         case TK_LINE_COMMENT:
@@ -401,7 +395,7 @@ static int count_leading_bangs(const TokenSpan *tokens, int num_tokens, LspPos c
     int last = -1;
     for (int i = 0; i < num_tokens; i++) {
         if (tokens[i].token_kind == TK_EOF) break;
-        if (pos_before(cursor, tokens[i].start)) break;
+        if (pos_cmp(cursor, tokens[i].start) < 0) break;
         if (tokens[i].token_kind != TK_LINE_COMMENT && tokens[i].token_kind != TK_BLOCK_COMMENT)
             last = i;
     }
@@ -418,20 +412,6 @@ static int count_leading_bangs(const TokenSpan *tokens, int num_tokens, LspPos c
         count++;
     }
     return count;
-}
-
-static const DocSymbol *find_scope_children(const DocSymbol *syms, int n,
-                                          const char **path, int plen,
-                                          int *out_n) {
-    if (plen == 0) { *out_n = n; return syms; }
-    for (int i = 0; i < n; i++) {
-        if (syms[i].kind == SK_FUNCTION && strcmp(syms[i].detail, path[0]) == 0) {
-            return find_scope_children(syms[i].children, syms[i].num_children,
-                                       path + 1, plen - 1, out_n);
-        }
-    }
-    *out_n = 0;
-    return NULL;
 }
 
 /* ── Helper: check if needle is a case-insensitive substring of haystack ── */
@@ -470,9 +450,9 @@ static int completion_kind_for(int sym_kind) {
     return CIK_REFERENCE;
 }
 
-/* ── completions_json ────────────────────────────────────────────────────── */
+/* ── build_completions_json ──────────────────────────────────────────────── */
 
-cJSON *completions_json(const TokenSpan *tokens, int num_tokens, LspPos cursor,
+cJSON *build_completions_json(const TokenSpan *tokens, int num_tokens, LspPos cursor,
                          const DocSymbol *symbols, int num_symbols) {
     int    stack_n = 0;
     char **stack   = block_stack(tokens, num_tokens, cursor, &stack_n);
@@ -526,13 +506,13 @@ cJSON *completions_json(const TokenSpan *tokens, int num_tokens, LspPos cursor,
                 } else if (bang_count == 0) {
                     const DocSymbol *ch;
                     int           ch_n;
-                    ch = find_scope_children(symbols, num_symbols,
+                    ch = doc_symbol_find_path(symbols, num_symbols,
                                              (const char **)scope, scope_n, &ch_n);
                     if (ch) collect_ids(ch, ch_n, id_kind, "", &ids);
                 } else if (bang_count <= scope_n) {
                     const DocSymbol *ch;
                     int           ch_n;
-                    ch = find_scope_children(symbols, num_symbols,
+                    ch = doc_symbol_find_path(symbols, num_symbols,
                                              (const char **)scope, scope_n - bang_count,
                                              &ch_n);
                     if (ch) collect_ids(ch, ch_n, id_kind, "", &ids);

@@ -28,6 +28,9 @@ typedef struct {
     uint32_t arg_count;
 } ActiveContext;
 
+/* Return 1 if `kw` has a known signature-help entry, 0 otherwise. */
+int has_signature_help(const char *kw);
+
 /*
  * Scan tokens up to `cursor` and return the innermost active statement
  * keyword together with the number of completed argument tokens.

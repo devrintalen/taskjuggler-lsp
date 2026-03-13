@@ -126,6 +126,16 @@ ParseResult parse(const char *src);
 void        parse_result_free(ParseResult *r);
 void        doc_symbol_free(DocSymbol *s);
 
+/*
+ * Navigate the DocSymbol tree by following `path` (an array of `plen`
+ * identifier strings).  Returns the children array of the matching node and
+ * sets *out_n to its length, or NULL / *out_n=0 if the path is not found.
+ * Only SK_FUNCTION nodes are traversed (i.e. tasks).
+ */
+const DocSymbol *doc_symbol_find_path(const DocSymbol *syms, int n,
+                                      const char **path, int plen,
+                                      int *out_n);
+
 /* Compare two positions. Returns -1, 0, or 1. */
 static inline int pos_cmp(LspPos a, LspPos b) {
     if (a.line != b.line) return (a.line < b.line) ? -1 : 1;

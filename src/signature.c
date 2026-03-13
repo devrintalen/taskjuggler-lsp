@@ -21,6 +21,36 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ── has_signature_help ──────────────────────────────────────────────────── */
+
+/* Sorted list of all keywords that have a signature-help entry.
+ * Must be kept in sync with build_signature_help_json(). */
+static const char * const sig_keywords[] = {
+    "account", "allocate", "booking", "complete", "currency",
+    "depends", "duration", "efficiency", "effort", "end",
+    "flags", "include", "leaves", "length", "macro",
+    "maxend", "maxstart", "milestone", "minend", "minstart",
+    "note", "now", "precedes", "priority", "project",
+    "rate", "resource", "responsible", "scenario", "scheduled",
+    "shift", "start", "supplement", "task", "timeformat",
+    "timingresolution", "timezone", "vacation", "workinghours",
+};
+static const int num_sig_keywords =
+    (int)(sizeof(sig_keywords) / sizeof(sig_keywords[0]));
+
+int has_signature_help(const char *kw) {
+    if (!kw) return 0;
+    int lo = 0, hi = num_sig_keywords - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        int cmp = strcmp(kw, sig_keywords[mid]);
+        if (cmp == 0) return 1;
+        if (cmp < 0) hi = mid - 1;
+        else         lo = mid + 1;
+    }
+    return 0;
+}
+
 /* ── active_context ──────────────────────────────────────────────────────── */
 
 /* Stack entry: (keyword, brace_depth, arg_count) */
@@ -58,16 +88,12 @@ ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cur
         default:
             /* Keywords arrive as KW_* tokens with text set.
              * Check signature help by text to stay independent of token codes. */
-            if (tok->text) {
-                cJSON *tmp = build_signature_help_json(tok->text, 0);
-                if (tmp) {
-                    cJSON_Delete(tmp);
-                    while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth)
-                        free(stack[--stack_n].kw);
-                    if (stack_n < 128)
-                        stack[stack_n++] = (StackEntry){ strdup(tok->text), brace_depth, 0 };
-                    break;
-                }
+            if (tok->text && has_signature_help(tok->text)) {
+                while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth)
+                    free(stack[--stack_n].kw);
+                if (stack_n < 128)
+                    stack[stack_n++] = (StackEntry){ strdup(tok->text), brace_depth, 0 };
+                break;
             }
             /* Count as completed argument only if token fully before cursor */
             {
