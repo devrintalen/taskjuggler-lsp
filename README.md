@@ -1,7 +1,5 @@
 # taskjuggler-lsp
 
-> **Personal project — not ready for general use.** This is an early-stage personal project under active development. Expect rough edges, missing features, and breaking changes. It is not packaged or supported for external consumption.
-
 A [Language Server Protocol](https://microsoft.github.io/language-server-protocol/) (LSP) server for [TaskJuggler v3](https://taskjuggler.org/), written in C.
 
 This is an independent implementation that provides editor tooling for TaskJuggler's `.tjp`/`.tji` file format. It is not a modified version of TaskJuggler and does not include any TaskJuggler source code.
