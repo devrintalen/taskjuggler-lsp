@@ -20,6 +20,7 @@
 #include "parser.h"
 #include "diagnostics.h"
 #include "definition.h"
+#include "references.h"
 #include "document_symbol.h"
 #include "folding_range.h"
 #include "hover.h"
@@ -160,6 +161,7 @@ static cJSON *handle_initialize(cJSON *id, cJSON *params) {
     cJSON_AddBoolToObject(caps, "foldingRangeProvider",      1);
     cJSON_AddBoolToObject(caps, "hoverProvider",             1);
     cJSON_AddBoolToObject(caps, "definitionProvider",        1);
+    cJSON_AddBoolToObject(caps, "referencesProvider",        1);
     cJSON_AddItemToObject(caps, "signatureHelpProvider",     sig_opts);
     cJSON_AddItemToObject(caps, "completionProvider",        comp_opts);
     cJSON_AddItemToObject(caps, "semanticTokensProvider",    sem_opts);
@@ -365,6 +367,28 @@ static cJSON *handle_semantic_tokens_full(cJSON *id, cJSON *params) {
     return make_response(id, result);
 }
 
+static cJSON *handle_references(cJSON *id, cJSON *params) {
+    const char *uri = NULL;
+    cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+    if (td) uri = json_str(td, "uri");
+
+    cJSON *pos_obj = cJSON_GetObjectItemCaseSensitive(params, "position");
+
+    if (!uri || !pos_obj) return make_response(id, cJSON_CreateNull());
+
+    Document *d = doc_find(uri);
+    if (!d) return make_response(id, cJSON_CreateNull());
+
+    LspPos pos    = json_to_pos(pos_obj);
+    cJSON *result = build_references_json(d->parse.def_links,
+                                          d->parse.num_def_links,
+                                          d->parse.doc_symbols,
+                                          d->parse.num_doc_symbols,
+                                          pos, uri);
+    if (!result) return make_response(id, cJSON_CreateNull());
+    return make_response(id, result);
+}
+
 static cJSON *handle_definition(cJSON *id, cJSON *params) {
     const char *uri = NULL;
     cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
@@ -463,6 +487,9 @@ char *server_process(const char *json_text) {
 
     } else if (strcmp(m, "textDocument/signatureHelp") == 0) {
         resp = handle_signature_help(id_item, params);
+
+    } else if (strcmp(m, "textDocument/references") == 0) {
+        resp = handle_references(id_item, params);
 
     } else if (strcmp(m, "textDocument/definition") == 0) {
         resp = handle_definition(id_item, params);

@@ -12,6 +12,7 @@
         "foldingRangeProvider": true,
         "hoverProvider": true,
         "definitionProvider": true,
+        "referencesProvider": true,
         "signatureHelpProvider": {
           "triggerCharacters": [
             " "

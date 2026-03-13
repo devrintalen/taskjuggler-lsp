@@ -1,0 +1,279 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "capabilities": {
+        "textDocumentSync": {
+          "change": 1,
+          "openClose": true
+        },
+        "documentSymbolProvider": true,
+        "foldingRangeProvider": true,
+        "hoverProvider": true,
+        "definitionProvider": true,
+        "referencesProvider": true,
+        "signatureHelpProvider": {
+          "triggerCharacters": [
+            " "
+          ]
+        },
+        "completionProvider": {
+          "triggerCharacters": [
+            ",",
+            " ",
+            "!"
+          ],
+          "resolveProvider": false
+        },
+        "semanticTokensProvider": {
+          "legend": {
+            "tokenTypes": [
+              "keyword",
+              "comment",
+              "string",
+              "number",
+              "variable"
+            ],
+            "tokenModifiers": [
+              "declaration"
+            ]
+          },
+          "full": true
+        }
+      },
+      "serverInfo": {
+        "name": [
+          "taskjuggler-lsp"
+        ]
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/tutorial.tjp",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": [
+      {
+        "uri": "file:///test/tutorial.tjp",
+        "range": {
+          "start": {
+            "line": 182,
+            "character": 26
+          },
+          "end": {
+            "line": 182,
+            "character": 33
+          }
+        }
+      },
+      {
+        "uri": "file:///test/tutorial.tjp",
+        "range": {
+          "start": {
+            "line": 275,
+            "character": 16
+          },
+          "end": {
+            "line": 275,
+            "character": 32
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": [
+      {
+        "uri": "file:///test/tutorial.tjp",
+        "range": {
+          "start": {
+            "line": 234,
+            "character": 15
+          },
+          "end": {
+            "line": 234,
+            "character": 20
+          }
+        }
+      },
+      {
+        "uri": "file:///test/tutorial.tjp",
+        "range": {
+          "start": {
+            "line": 281,
+            "character": 16
+          },
+          "end": {
+            "line": 281,
+            "character": 26
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "result": [
+      {
+        "uri": "file:///test/tutorial.tjp",
+        "range": {
+          "start": {
+            "line": 144,
+            "character": 13
+          },
+          "end": {
+            "line": 144,
+            "character": 29
+          }
+        }
+      },
+      {
+        "uri": "file:///test/tutorial.tjp",
+        "range": {
+          "start": {
+            "line": 241,
+            "character": 13
+          },
+          "end": {
+            "line": 241,
+            "character": 29
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 5,
+    "result": [
+      {
+        "uri": "file:///test/tutorial.tjp",
+        "range": {
+          "start": {
+            "line": 182,
+            "character": 15
+          },
+          "end": {
+            "line": 182,
+            "character": 23
+          }
+        }
+      },
+      {
+        "uri": "file:///test/tutorial.tjp",
+        "range": {
+          "start": {
+            "line": 200,
+            "character": 15
+          },
+          "end": {
+            "line": 200,
+            "character": 23
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 6,
+    "result": [
+      {
+        "uri": "file:///test/tutorial.tjp",
+        "range": {
+          "start": {
+            "line": 156,
+            "character": 13
+          },
+          "end": {
+            "line": 156,
+            "character": 17
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 7,
+    "result": [
+      {
+        "uri": "file:///test/tutorial.tjp",
+        "range": {
+          "start": {
+            "line": 216,
+            "character": 16
+          },
+          "end": {
+            "line": 216,
+            "character": 24
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 8,
+    "result": [
+      {
+        "uri": "file:///test/tutorial.tjp",
+        "range": {
+          "start": {
+            "line": 293,
+            "character": 16
+          },
+          "end": {
+            "line": 293,
+            "character": 25
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 9,
+    "result": [
+      {
+        "uri": "file:///test/tutorial.tjp",
+        "range": {
+          "start": {
+            "line": 293,
+            "character": 29
+          },
+          "end": {
+            "line": 293,
+            "character": 35
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 10,
+    "result": []
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 11,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 12,
+    "result": null
+  }
+]
