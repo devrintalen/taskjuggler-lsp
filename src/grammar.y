@@ -891,6 +891,14 @@ item
     | KW_INHERIT opt_args     { $$.has_sym = 0; }
     | KW_SCENARIOSPECIFIC opt_args { $$.has_sym = 0; }
 
+    /* ── Macro invocation: ${macroname [args...]} ───────────────────────── *
+     * Macro invocations use ${...} which tokenises as TK_DOLLAR TK_LBRACE
+     * TK_IDENT opt_args TK_RBRACE.  Without this rule, TK_DOLLAR would
+     * cause an error, and the TK_RBRACE from the invocation would
+     * prematurely close the enclosing task/resource body.                  */
+    | TK_DOLLAR TK_LBRACE opt_args TK_RBRACE
+        { token_free(&$1); token_free(&$2); token_free(&$4); $$.has_sym = 0; }
+
     /* ── Fallback: unrecognised TK_IDENT statement ──
      *
      * Handles unknown identifiers and scenario-specific syntax like
