@@ -210,7 +210,7 @@ static int emit_kw_mfrag_text(int code, const char *text) {
 [0-9]{4}-[0-9]{2}-[0-9]{2}(-[0-9]{2}:[0-9]{2}(:[0-9]{2})?)?(-[+-][0-9]{4})?  { return emit_kw(TK_DATE); }
 
     /* Duration: (+|-) <duration> (min | h | d | w | m | y) */
-[+-][0-9]+(min|h|d|w|m|y) { return emit_kw(TK_DURATION); }
+[+-]?[0-9]+(min|h|d|w|m|y) { return emit_kw(TK_DURATION); }
 
 [0-9]+"."[0-9]+  { return emit_plain(TK_FLOAT); }
 

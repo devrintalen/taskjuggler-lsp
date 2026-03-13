@@ -1169,12 +1169,13 @@ dur_unit
 /* ── dur_val: duration value = number + unit ────────────────────────────── *
  * Syntax: <value> (min | h | d | w | m | y)
  * Token sequence: TK_INTEGER TK_IDENT  or  TK_FLOAT TK_IDENT
- * Note: The lexer also produces TK_DURATION for signed compact durations
- * like +4m or -2h.  Those appear only in interval syntax (as part of a
- * project date range), not in effort/duration/etc. statements.             */
+ * The lexer also produces TK_DURATION for compact durations like 4d, +4m,
+ * or -2h.  Both signed and unsigned compact forms are accepted here.       */
 dur_val
     : num_val dur_unit
         { token_free(&$1); token_free(&$2); }
+    | TK_DURATION
+        { token_free(&$1); }
     ;
 
 /* ── string_val: a quoted or multi-line string ──────────────────────────── */
@@ -1209,7 +1210,7 @@ opt_version
 
 /* ── interval2: required interval ──────────────────────────────────────── *
  * Syntax: <date> (- <date> | + <duration> (min | h | d | w | m | y))
- * TK_DURATION captures the compact form +Nunit (e.g. +4m) as a single token.
+ * TK_DURATION captures compact forms like 4d, +4m, -2h as a single token.
  * The separate-token form (+ N unit) is also accepted.                     */
 interval2
     : TK_DATE TK_MINUS TK_DATE
@@ -1221,7 +1222,7 @@ interval2
     ;
 
 /* ── interval3: optional interval ──────────────────────────────────────── *
- * Syntax: <date> [(- <date> | + <duration> unit)]
+ * Syntax: <date> [(- <date> | + <duration> unit | <duration>)]
  * Used in: vacation, leaves, statussheet, timesheet                        */
 interval3
     : TK_DATE
