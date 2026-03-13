@@ -1,0 +1,110 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "capabilities": {
+        "textDocumentSync": {
+          "change": 1,
+          "openClose": true
+        },
+        "documentSymbolProvider": true,
+        "hoverProvider": true,
+        "signatureHelpProvider": {
+          "triggerCharacters": [
+            " "
+          ]
+        },
+        "completionProvider": {
+          "triggerCharacters": [
+            ",",
+            " ",
+            "!"
+          ],
+          "resolveProvider": false
+        },
+        "semanticTokensProvider": {
+          "legend": {
+            "tokenTypes": [
+              "keyword",
+              "comment",
+              "string",
+              "number",
+              "variable"
+            ],
+            "tokenModifiers": [
+              "declaration"
+            ]
+          },
+          "full": true
+        }
+      },
+      "serverInfo": {
+        "name": [
+          "taskjuggler-lsp"
+        ]
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/sample.tjp",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": {
+      "data": [
+        0,
+        0,
+        7,
+        0,
+        1,
+        0,
+        8,
+        4,
+        4,
+        0,
+        0,
+        5,
+        21,
+        2,
+        0,
+        0,
+        22,
+        10,
+        2,
+        0,
+        0,
+        11,
+        3,
+        3,
+        0,
+        1,
+        2,
+        4,
+        0,
+        1,
+        0,
+        5,
+        2,
+        4,
+        0,
+        0,
+        3,
+        8,
+        2,
+        0
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": null
+  }
+]
