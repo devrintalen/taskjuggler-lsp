@@ -1183,10 +1183,15 @@ string_val
     | TK_MULTI_LINE_STR { $$ = $1; }
     ;
 
-/* ── opt_id: optional identifier (the TJP property ID) ─────────────────── */
+/* ── opt_id: optional identifier (the TJP property ID) ─────────────────── *
+ * TJP allows any identifier—including reserved words—as a task/resource ID.
+ * Keywords that are commonly used as IDs must be listed here explicitly so
+ * that the lexer's keyword token does not prevent them from being recognised
+ * as an identifier in declaration position.                                 */
 opt_id
     : /* empty */  { $$ = (Token){0}; }
     | TK_IDENT     { $$ = $1; }
+    | KW_START     { $$ = $1; }
     ;
 
 /* ── opt_name: optional display-name string ─────────────────────────────── */
