@@ -17,8 +17,8 @@ This is an independent implementation that provides editor tooling for TaskJuggl
 | Completion        | `textDocument/completion`                       | Implemented     | Context-aware keyword and identifier suggestions; supports hierarchical and relative (`!`) references |
 | Signature Help    | `textDocument/signatureHelp`                    | Implemented     | Parameter descriptions for 35+ keywords                                                               |
 | Document Symbols  | `textDocument/documentSymbol`                   | Implemented     | Hierarchical symbol tree for projects, tasks, resources, accounts, shifts                             |
-| Go to Definition  | `textDocument/definition`                       | Not implemented |                                                                                                       |
-| Find References   | `textDocument/references`                       | Not implemented |                                                                                                       |
+| Go to Definition  | `textDocument/definition`                       | Implemented     | Jumps to task declaration from `depends`/`precedes` reference paths                                  |
+| Find References   | `textDocument/references`                       | Implemented     | Finds all `depends`/`precedes` paths that reference a task; trigger from the task's declaration identifier |
 | Rename            | `textDocument/rename`                           | Not implemented |                                                                                                       |
 | Code Actions      | `textDocument/codeAction`                       | Not implemented |                                                                                                       |
 | Formatting        | `textDocument/formatting`                       | Not implemented |                                                                                                       |
