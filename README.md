@@ -22,7 +22,7 @@ This is an independent implementation that provides editor tooling for TaskJuggl
 | Rename            | `textDocument/rename`                           | Not implemented |                                                                                                       |
 | Code Actions      | `textDocument/codeAction`                       | Not implemented |                                                                                                       |
 | Formatting        | `textDocument/formatting`                       | Not implemented |                                                                                                       |
-| Folding Ranges    | `textDocument/foldingRange`                     | Not implemented |                                                                                                       |
+| Folding Ranges    | `textDocument/foldingRange`                     | Implemented     | Folds brace-delimited blocks (`{}`), macro bodies (`[]`), and multi-line block comments               |
 | Workspace Symbols | `workspace/symbol`                              | Not implemented |                                                                                                       |
 
 ## Dependencies
