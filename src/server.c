@@ -19,6 +19,7 @@
 #include "server.h"
 #include "parser.h"
 #include "diagnostics.h"
+#include "document_symbol.h"
 #include "hover.h"
 #include "signature.h"
 #include "completion.h"
@@ -96,39 +97,6 @@ static cJSON *make_response(cJSON *id, cJSON *result) {
     else    cJSON_AddNullToObject(resp, "id");
     cJSON_AddItemToObject(resp, "result", result);
     return resp;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   DocSymbol → DocumentSymbol JSON
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-static cJSON *range_json(LspRange r) {
-    cJSON *s = cJSON_CreateObject();
-    cJSON *st = cJSON_CreateObject();
-    cJSON_AddNumberToObject(st, "line",      r.start.line);
-    cJSON_AddNumberToObject(st, "character", r.start.character);
-    cJSON *en = cJSON_CreateObject();
-    cJSON_AddNumberToObject(en, "line",      r.end.line);
-    cJSON_AddNumberToObject(en, "character", r.end.character);
-    cJSON_AddItemToObject(s, "start", st);
-    cJSON_AddItemToObject(s, "end",   en);
-    return s;
-}
-
-static cJSON *doc_symbol_to_json(const DocSymbol *sym) {
-    cJSON *obj = cJSON_CreateObject();
-    cJSON_AddStringToObject(obj, "name",   sym->name   ? sym->name   : "");
-    cJSON_AddStringToObject(obj, "detail", sym->detail ? sym->detail : "");
-    cJSON_AddNumberToObject(obj, "kind",   sym->kind);
-    cJSON_AddItemToObject(obj, "range",          range_json(sym->range));
-    cJSON_AddItemToObject(obj, "selectionRange", range_json(sym->selection_range));
-    if (sym->num_children > 0) {
-        cJSON *ch = cJSON_CreateArray();
-        for (int i = 0; i < sym->num_children; i++)
-            cJSON_AddItemToArray(ch, doc_symbol_to_json(&sym->children[i]));
-        cJSON_AddItemToObject(obj, "children", ch);
-    }
-    return obj;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -290,9 +258,8 @@ static cJSON *handle_document_symbol(cJSON *id, cJSON *params) {
     Document *d = doc_find(uri);
     if (!d) return make_response(id, cJSON_CreateNull());
 
-    cJSON *arr = cJSON_CreateArray();
-    for (int i = 0; i < d->parse.num_doc_symbols; i++)
-        cJSON_AddItemToArray(arr, doc_symbol_to_json(&d->parse.doc_symbols[i]));
+    cJSON *arr = build_document_symbols_json(d->parse.doc_symbols,
+                                             d->parse.num_doc_symbols);
     return make_response(id, arr);
 }
 
