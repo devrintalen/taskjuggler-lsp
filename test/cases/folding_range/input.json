@@ -1,0 +1,45 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/sample.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "/* project header\n   comment */\nproject prj \"My Project\" 2024-01-01 +1m {\n  task t1 \"Task One\" {\n    task t2 \"Task Two\" {\n    }\n  }\n  resource r1 \"Developer\" {\n  }\n}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "textDocument/foldingRange",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/sample.tjp"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "shutdown",
+    "params": {}
+  }
+]

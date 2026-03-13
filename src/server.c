@@ -20,6 +20,7 @@
 #include "parser.h"
 #include "diagnostics.h"
 #include "document_symbol.h"
+#include "folding_range.h"
 #include "hover.h"
 #include "signature.h"
 #include "completion.h"
@@ -155,6 +156,7 @@ static cJSON *handle_initialize(cJSON *id, cJSON *params) {
 
     cJSON_AddItemToObject(caps, "textDocumentSync",          tds);
     cJSON_AddBoolToObject(caps, "documentSymbolProvider",    1);
+    cJSON_AddBoolToObject(caps, "foldingRangeProvider",      1);
     cJSON_AddBoolToObject(caps, "hoverProvider",             1);
     cJSON_AddItemToObject(caps, "signatureHelpProvider",     sig_opts);
     cJSON_AddItemToObject(caps, "completionProvider",        comp_opts);
@@ -260,6 +262,20 @@ static cJSON *handle_document_symbol(cJSON *id, cJSON *params) {
 
     cJSON *arr = build_document_symbols_json(d->parse.doc_symbols,
                                              d->parse.num_doc_symbols);
+    return make_response(id, arr);
+}
+
+static cJSON *handle_folding_range(cJSON *id, cJSON *params) {
+    const char *uri = NULL;
+    cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+    if (td) uri = json_str(td, "uri");
+    if (!uri) return make_response(id, cJSON_CreateNull());
+
+    Document *d = doc_find(uri);
+    if (!d) return make_response(id, cJSON_CreateNull());
+
+    cJSON *arr = build_folding_ranges_json(d->parse.tok_spans,
+                                           d->parse.num_tok_spans);
     return make_response(id, arr);
 }
 
@@ -416,6 +432,9 @@ char *server_process(const char *json_text) {
 
     } else if (strcmp(m, "textDocument/documentSymbol") == 0) {
         resp = handle_document_symbol(id_item, params);
+
+    } else if (strcmp(m, "textDocument/foldingRange") == 0) {
+        resp = handle_folding_range(id_item, params);
 
     } else if (strcmp(m, "textDocument/hover") == 0) {
         resp = handle_hover(id_item, params);
