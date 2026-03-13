@@ -201,7 +201,7 @@ static DocSymbol make_doc_symbol(Token kw, Token id, Token name, BodyResult body
 
 %type <sym>  symbol_decl report_decl navigator_decl scenario_decl
 %type <sym>  timesheet_decl statussheet_decl tagfile_decl journalentry_decl
-%type <tok>  sym_kw report_kw opt_id opt_name opt_version
+%type <tok>  sym_kw report_kw opt_id opt_name opt_version dep_path_seg
 %type <tok>  num_val dur_unit string_val extend_target supplement_target
 %type <body> opt_body body_items
 %type <tref> dep_path task_ref
@@ -1269,14 +1269,24 @@ bang_seq
         { token_free(&$2); $$ = $1 + 1; }
     ;
 
+/* ── dep_path_seg: one segment of a dotted task path ────────────────────── *
+ * TaskJuggler allows any identifier—including reserved words—as a task ID.
+ * Keywords that are commonly used as task IDs must be listed here so that
+ * the lexer's keyword token does not prevent them from being recognised as
+ * a path segment in dependency references.                                  */
+dep_path_seg
+    : TK_IDENT  { $$ = $1; }
+    | KW_START  { $$ = $1; }
+    ;
+
 /* ── dep_path: dotted identifier path for dep references ────────────────── *
  * Distinct from dotted_id so taskprefix/taskroot are unaffected.           */
 dep_path
-    : TK_IDENT
+    : dep_path_seg
         { $$.bang_count = 0; $$.path = strdup($1.text);
           $$.start = $1.start; $$.end = $1.end;
           token_free(&$1); }
-    | dep_path TK_DOT TK_IDENT
+    | dep_path TK_DOT dep_path_seg
         { char buf[512];
           snprintf(buf, sizeof(buf), "%s.%s", $1.path, $3.text);
           free($1.path);

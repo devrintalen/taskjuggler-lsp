@@ -1,0 +1,203 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "/*\n * This file contains an example project. It is part of the\n * TaskJuggler project management tool. It uses a made up software\n * development project to demonstrate some of the basic features of\n * TaskJuggler. Please see the TaskJuggler manual for a more detailed\n * description of the various syntax elements.\n *\n * Copyright (C) 2001 - 2015 Chris Schlaeger <cs@taskjuggler.org>\n *\n * This program is free software; you can redistribute it and/or modify\n * it under the terms of the GNU General Public License as published by\n * the Free Software Foundation; version 2 of the License.\n *\n * Included in this repository as a test fixture under the terms of the GPLv2.\n */\nproject acso \"Accounting Software\"  2002-01-16 +4m {\n  # Set the default time zone for the project. If not specified, UTC\n  # is used.\n  timezone \"Europe/Paris\"\n  # Hide the clock time. Only show the date.\n  timeformat \"%Y-%m-%d\"\n  # Use US format for numbers\n  numberformat \"-\" \"\" \",\" \".\" 1\n  # Use US financial format for currency values. Don't show cents.\n  currencyformat \"(\" \")\" \",\" \".\" 0\n  # Pick a day during the project that will be reported as 'today' in\n  # the project reports. If not specified, the current day will be\n  # used, but this will likely be outside of the project range, so it\n  # can't be seen in the reports.\n  now 2002-03-05-13:00\n  # The currency for all money values is the US Dollar.\n  currency \"USD\"\n\n  # We want to compare the baseline scenario to one with a slightly\n  # delayed start.\n  scenario plan \"Plan\" {\n    scenario delayed \"Delayed\"\n  }\n  extend resource {\n    text Phone \"Phone\"\n  }\n}\n\n# This is not a real copyright for this file. It's just used as an example.\ncopyright \"\u00a9 2002 Crappy Software, Inc.\"\n\n# The daily default rate of all resources. This can be overridden for each\n# resource. We specify this, so that we can do a good calculation of\n# the costs of the project.\nrate 390.0\n\n# Register Good Friday as a global holiday for all resources.\nleaves holiday \"Good Friday\" 2002-03-29\nflags team\n\n# This is one way to form teams\nmacro allocate_developers [\n  allocate dev1\n  allocate dev2\n  allocate dev3\n]\n\n# In order to do a simple profit and loss analysis of the project we\n# specify accounts. One for the development costs, one for the\n# documentation costs, and one account to credit the customer payments\n# to.\naccount cost \"Project Cost\" {\n  account dev \"Development\"\n  account doc \"Documentation\"\n}\naccount rev \"Payments\"\n# The Profit&Loss analysis should be rev - cost accounts.\nbalance cost rev\n\nresource boss \"Paul Henry Bullock\" {\n  email \"phb@crappysoftware.com\"\n  Phone \"x100\"\n  rate 480\n}\nresource dev \"Developers\" {\n  managers boss\n  resource dev1 \"Paul Smith\" {\n    email \"paul@crappysoftware.com\"\n    Phone \"x362\"\n    rate 350.0\n  }\n  resource dev2 \"S\u00e9bastien Bono\" {\n    email \"SBono@crappysoftware.com\"\n    Phone \"x234\"\n  }\n  resource dev3 \"Klaus M\u00fcller\" {\n    email \"Klaus.Mueller@crappysoftware.com\"\n    Phone \"x490\"\n    leaves annual 2002-02-01 - 2002-02-05\n  }\n  flags team\n}\nresource misc \"The Others\" {\n  managers boss\n  resource test \"Peter Murphy\" {\n    email \"murphy@crappysoftware.com\"\n    Phone \"x666\"\n    limits { dailymax 6.4h }\n    rate 310.0\n  }\n  resource doc \"Dim Sung\" {\n    email \"sung@crappysoftware.com\"\n    Phone \"x482\"\n    rate 300.0\n    leaves annual 2002-03-11 - 2002-03-16\n  }\n\n  flags team\n}\n\n# Now we specify the work packages. The whole project is described as\n# a task that contains subtasks. These subtasks are then broken down\n# into smaller tasks and so on. The innermost tasks describe the real\n# work and have resources allocated to them. Many attributes of tasks\n# are inherited from the enclosing task. This saves you a lot of typing.\ntask AcSo \"Accounting Software\" {\n\n  # All work-related costs will be booked to this account unless the\n  # subtasks specify something different.\n  chargeset dev\n  # For the duration of the project we have running cost that are not\n  # included in the labor cost.\n  charge 170 perday\n  responsible boss\n\n  task spec \"Specification\" {\n    # The effort to finish this task is 20 man-days.\n    effort 20d \n    # Now we use the macro declared above to allocate the resources\n    # for this task. Because they can work in parallel, they may finish this\n    # task earlier than in 20 working-days.\n    ${allocate_developers}\n    # Each task without subtasks must have a start or an end\n    # criterion and a duration. For this task we use a reference to a\n    # milestone defined further below as the start criterion. So this task\n    # can not start before the specified milestone has been reached.\n    # References to other tasks may be relative. Each exclamation mark (!)\n    # means 'in the scope of the enclosing task'. To descent into a task, the\n    # fullstop (.) together with the id of the tasks have to be specified.\n    depends !deliveries.start\n  }\n\n  task software \"Software Development\" {\n\n    # The software is the most critical task of the project. So we set\n    # the priority of this task (and all its subtasks) to 1000, the top\n    # priority. The higher the priority, the more likely the task will\n    # get the requested resources.\n    priority 1000\n\n    # All subtasks depend on the specification task.\n    depends !spec\n\n    responsible dev1\n    task database \"Database coupling\" {\n      effort 20d\n      allocate dev1, dev2\n      journalentry 2002-02-03 \"Problems with the SQL Libary\" {\n        author dev1\n        alert yellow\n        summary -8<-\n          We ran into some compatibility problems with the SQL\n          Library.\n        ->8-\n        details -8<-\n          We have already contacted the vendor and are now waiting for\n          their advise.\n        ->8-\n      }\n    }\n\n    task gui \"Graphical User Interface\" {\n      effort 35d\n      # This task has taken 5 man-days more than originally planned.\n      # We record this as well, so that we can generate reports that\n      # compare the delayed schedule of the project to the original plan.\n      delayed:effort 40d\n      depends !database, !backend\n      allocate dev2, dev3\n      # Resource dev2 should only work 6 hours per day on this task.\n      limits {\n        dailymax 6h {\n          resources dev2\n        }\n      }\n    }\n\n    task backend \"Back-End Functions\" {\n      effort 30d\n      # This task is behind schedule, because it should have been\n      # finished already. To document this, we specify that the task\n      # is 95% completed. If nothing is specified, TaskJuggler assumes\n      # that the task is on schedule and computes the completion rate\n      # according to the current day and the plan data.\n      complete 95\n      depends !database\n      allocate dev1, dev2\n    }\n  }\n\n  task test \"Software testing\" {\n\n    task alpha \"Alpha Test\" {\n      # Efforts can not only be specified as man-days, but also as\n      # man-weeks, man-hours, etc. By default, TaskJuggler assumes\n      # that a man-week is 5 man-days or 40 man-hours. These values\n      # can be changed, of course.\n      effort 1w\n      # This task depends on a task in the scope of the enclosing\n      # task's enclosing task. So we need two exclamation marks (!!)\n      # to get there.\n      depends !!software\n      allocate test, dev2\n      note \"Hopefully most bugs will be found and fixed here.\"\n      journalentry 2002-03-01 \"Contract with Peter not yet signed\" {\n        author boss\n        alert red\n        summary -8<-\n          The paperwork is stuck with HR and I can't hunt it down.\n        ->8-\n        details -8<-\n          If we don't get the contract closed within the next week,\n          the start of the testing is at risk.\n        ->8-\n      }\n    }\n\n    task beta \"Beta Test\" {\n      effort 4w\n      depends !alpha\n      allocate test, dev1\n    }\n  }\n\n  task manual \"Manual\" {\n    effort 10w\n    depends !deliveries.start\n    allocate doc, dev3\n    purge chargeset\n    chargeset doc\n    journalentry 2002-02-28 \"User manual completed\" {\n      author boss\n      summary \"The doc writers did a really great job to finish on time.\"\n    }\n  }\n\n  task deliveries \"Milestones\" {\n\n    # Some milestones have customer payments associated with them. We\n    # credit these payments to the 'rev' account.\n    purge chargeset\n    chargeset rev\n\n    task start \"Project start\" {\n      # A task that has no duration is a milestone. It only needs a\n      # start or end criterion. All other tasks depend on this task.\n      # Here we use the built-in macro ${projectstart} to align the\n      # start of the task with the above specified project time frame.\n      start ${projectstart}\n      # For some reason the actual start of the project got delayed.\n      # We record this, so that we can compare the planned run to the\n      # delayed run of the project.\n      delayed:start 2002-01-20\n      # At the beginning of this task we receive a payment from the\n      # customer. This is credited to the account associated with this\n      # task when the task starts.\n      charge 21000.0 onstart\n    }\n\n    task prev \"Technology Preview\" {\n      depends !!software.backend\n      charge 31000.0 onstart\n      note \"All '''major''' features should be usable.\"\n    }\n\n    task beta \"Beta version\" {\n      depends !!test.alpha\n      charge 13000.0 onstart\n      note \"Fully functional, may contain bugs.\"\n    }\n\n    task done \"Ship Product to Customer\" {\n      # The next line can be uncommented to trigger a warning about\n      # the project being late. For all tasks, limits for the start and\n      # end values can be specified. Those limits are checked after the\n      # project has been scheduled. For all violated limits a warning\n      # is issued.\n      # maxend 2002-04-17\n      depends !!test.beta, !!manual\n      charge 33000.0 onstart\n      note \"All priority 1 and 2 bugs must be fixed.\"\n    }\n  }\n}\n\n# Now the project has been specified completely. Stopping here would\n# result in a valid TaskJuggler file that could be processed and\n# scheduled. But no reports would be generated to visualize the\n# results.\n\nnavigator navbar {\n  hidereport @none\n}\n\nmacro TaskTip [\n  tooltip istask() -8<-\n    '''Start: ''' <-query attribute='start'->\n    '''End: ''' <-query attribute='end'->\n    ----\n    '''Resources:'''\n\n    <-query attribute='resources'->\n    ----\n    '''Precursors: '''\n\n    <-query attribute='precursors'->\n    ----\n    '''Followers: '''\n\n    <-query attribute='followers'->\n    ->8-\n]\n\ntextreport frame \"\" {\n  header -8<-\n    == Accounting Software Project ==\n    <[navigator id=\"navbar\"]>\n  ->8-\n  footer \"----\"\n  textreport index \"Overview\" {\n    formats html\n    center '<[report id=\"overview\"]>'\n  }\n\n  textreport \"Status\" {\n    formats html\n    center -8<-\n      <[report id=\"status.dashboard\"]>\n      ----\n      <[report id=\"status.completed\"]>\n      ----\n      <[report id=\"status.ongoing\"]>\n      ----\n      <[report id=\"status.future\"]>\n    ->8-\n  }\n\n  textreport development \"Development\" {\n    formats html\n    center '<[report id=\"development\"]>'\n  }\n\n  textreport \"Deliveries\" {\n    formats html\n    center '<[report id=\"deliveries\"]>'\n  }\n\n  textreport \"ContactList\" {\n    formats html\n    title \"Contact List\"\n    center '<[report id=\"contactList\"]>'\n  }\n  textreport \"ResourceGraph\" {\n    formats html\n    title \"Resource Graph\"\n    center '<[report id=\"resourceGraph\"]>'\n  }\n}\n\n# A traditional Gantt chart with a project overview.\ntaskreport overview \"\" {\n  header -8<-\n    === Project Overview ===\n\n    The project is structured into 3 phases.\n\n    # Specification\n    # <-reportlink id='frame.development'->\n    # Testing\n\n    === Original Project Plan ===\n  ->8-\n  columns bsi { title 'WBS' },\n          name, start, end, effort, cost,\n          revenue, chart { ${TaskTip} }\n  # For this report we like to have the abbreviated weekday in front\n  # of the date. %a is the tag for this.\n  timeformat \"%a %Y-%m-%d\"\n  loadunit days\n  hideresource @all\n  balance cost rev\n  caption 'All effort values are in man days.'\n\n  footer -8<-\n    === Staffing ===\n\n    All project phases are properly staffed. See [[ResourceGraph]] for\n    detailed resource allocations.\n\n    === Current Status ===\n\n    The project started off with a delay of 4 days. This slightly affected\n    the original schedule. See [[Deliveries]] for the impact on the\n    delivery dates.\n  ->8-\n}\n\n# Macro to set the background color of a cell according to the alert\n# level of the task.\nmacro AlertColor [\n  cellcolor plan.alert = 0 \"#90FF90\" # green\n  cellcolor plan.alert = 1 \"#FFFF90\" # yellow\n  cellcolor plan.alert = 2 \"#FF9090\" # red\n]\n\ntaskreport status \"\" {\n  columns bsi { width 50 title 'WBS' }, name { width 150 },\n          start { width 100 }, end { width 100 },\n          effort { width 100 },\n          alert { tooltip plan.journal\n                          != '' \"<-query attribute='journal'->\" width 150 },\n          status { width 150 }\n  scenarios delayed\n\n  taskreport dashboard \"\" {\n    headline \"Project Dashboard (<-query attribute='now'->)\"\n    columns name { title \"Task\" ${AlertColor} width 200},\n            resources { width 200 ${AlertColor}\n                        listtype bullets\n                        listitem \"<-query attribute='name'->\"\n                        start ${projectstart} end ${projectend} },\n            alerttrend { title \"Trend\" ${AlertColor} width 50 },\n            journal { width 350 ${AlertColor} }\n    journalmode status_up\n    journalattributes headline, author, date, summary, details\n    hidetask ~hasalert(0)\n    sorttasks alert.down, delayed.end.up\n    period %{${now} - 1w} +1w\n  }\n  taskreport completed \"\" {\n    headline \"Already completed tasks\"\n    hidetask ~(delayed.end <= ${now})\n  }\n  taskreport ongoing \"\" {\n    headline \"Ongoing tasks\"\n    hidetask ~((delayed.start <= ${now}) & (delayed.end > ${now}))\n  }\n  taskreport future \"\" {\n    headline \"Future tasks\"\n    hidetask ~(delayed.start > ${now})\n  }\n}\n\n# A list of tasks showing the resources assigned to each task.\ntaskreport development \"\" {\n  scenarios delayed\n  headline \"Development - Resource Allocation Report\"\n  columns bsi { title 'WBS' }, name, start, end, effort { title \"Work\" },\n          duration, chart { ${TaskTip} scale day width 500 }\n  timeformat \"%Y-%m-%d\"\n  hideresource ~(isleaf() & isleaf_())\n  sortresources name.up\n}\n\n# A list of all tasks with the percentage completed for each task\ntaskreport deliveries \"\" {\n  headline \"Project Deliverables\"\n  columns bsi { title 'WBS' }, name, start, end, note { width 150 }, complete,\n          chart { ${TaskTip} }\n  taskroot AcSo.deliveries\n  hideresource @all\n  scenarios plan, delayed\n}\n# A list of all employees with their contact details.\nresourcereport contactList \"\" {\n  scenarios delayed\n  headline \"Contact list and duty plan\"\n  columns name,\n          email { celltext 1 \"[mailto:<-email-> <-email->]\" },\n          Phone,\n          managers { title \"Manager\" },\n          chart { scale day }\n  hideresource ~isleaf()\n  sortresources name.up\n  hidetask @all\n}\n\n# A graph showing resource allocation. It identifies whether each\n# resource is under- or over-allocated for.\nresourcereport resourceGraph \"\" {\n  scenarios delayed\n  headline \"Resource Allocation Graph\"\n  columns no, name, effort, rate, weekly { ${TaskTip} }\n  loadunit shortauto\n  # We only like to show leaf tasks for leaf resources.\n  hidetask ~(isleaf() & isleaf_())\n  sorttasks plan.start.up\n}\n\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp"
+      },
+      "position": {
+        "line": 144,
+        "character": 21
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp"
+      },
+      "position": {
+        "line": 156,
+        "character": 15
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp"
+      },
+      "position": {
+        "line": 182,
+        "character": 19
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 5,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp"
+      },
+      "position": {
+        "line": 182,
+        "character": 29
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 6,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp"
+      },
+      "position": {
+        "line": 200,
+        "character": 19
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 7,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp"
+      },
+      "position": {
+        "line": 216,
+        "character": 20
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 8,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp"
+      },
+      "position": {
+        "line": 234,
+        "character": 17
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 9,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp"
+      },
+      "position": {
+        "line": 241,
+        "character": 21
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 10,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp"
+      },
+      "position": {
+        "line": 275,
+        "character": 24
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 11,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp"
+      },
+      "position": {
+        "line": 281,
+        "character": 21
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 12,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp"
+      },
+      "position": {
+        "line": 293,
+        "character": 20
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 13,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tutorial.tjp"
+      },
+      "position": {
+        "line": 293,
+        "character": 32
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 14,
+    "method": "shutdown",
+    "params": {}
+  }
+]
