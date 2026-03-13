@@ -60,20 +60,27 @@
     "jsonrpc": "2.0",
     "id": 2,
     "result": {
-      "isIncomplete": true,
-      "items": [
-        {
-          "label": "effort",
-          "kind": 14,
-          "detail": "Work required, e.g. `effort 5d`",
-          "sortText": "1"
+      "uri": "file:///test/sample.tjp",
+      "range": {
+        "start": {
+          "line": 1,
+          "character": 7
+        },
+        "end": {
+          "line": 1,
+          "character": 14
         }
-      ]
+      }
     }
   },
   {
     "jsonrpc": "2.0",
     "id": 3,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
     "result": null
   }
 ]

@@ -90,6 +90,7 @@ void parse_result_free(ParseResult *r) {
     for (int i = 0; i < r->num_tok_spans; i++)
         free(r->tok_spans[i].text);
     free(r->tok_spans);
+    free(r->def_links);
     memset(r, 0, sizeof(*r));
 }
 
@@ -112,6 +113,13 @@ const DocSymbol *doc_symbol_find_path(const DocSymbol *syms, int n,
         if (syms[i].kind == SK_FUNCTION && strcmp(syms[i].detail, path[0]) == 0)
             return doc_symbol_find_path(syms[i].children, syms[i].num_children,
                                         path + 1, plen - 1, out_n);
+        /* Transparently traverse project containers so that task scope paths
+         * rooted inside a project body resolve correctly. */
+        if (syms[i].kind == SK_MODULE) {
+            const DocSymbol *found = doc_symbol_find_path(
+                syms[i].children, syms[i].num_children, path, plen, out_n);
+            if (found) return found;
+        }
     }
     *out_n = 0;
     return NULL;

@@ -106,18 +106,36 @@ typedef struct {
     char  *text;   /* heap-allocated; may be NULL */
 } TokenSpan;
 
+/* ── DefinitionLink ──────────────────────────────────────────────────────── *
+ *
+ * A resolved reference in the document.  source is the range of the
+ * reference expression (e.g. a dependency path), target is the
+ * selection_range of the symbol being referred to.
+ *
+ * Populated by validate_dep_refs() for every successfully resolved
+ * dependency reference so that textDocument/definition can answer without
+ * re-parsing.
+ */
+typedef struct {
+    LspRange source; /* range of the reference expression */
+    LspRange target; /* selection_range of the target symbol */
+} DefinitionLink;
+
 /* ── ParseResult ─────────────────────────────────────────────────────────── */
 
 typedef struct {
-    Diagnostic *diagnostics;
-    int         num_diagnostics;
-    int         diag_cap;
-    DocSymbol  *doc_symbols;
-    int         num_doc_symbols;
-    int         doc_sym_cap;
-    TokenSpan  *tok_spans;
-    int         num_tok_spans;
-    int         tok_span_cap;
+    Diagnostic     *diagnostics;
+    int             num_diagnostics;
+    int             diag_cap;
+    DocSymbol      *doc_symbols;
+    int             num_doc_symbols;
+    int             doc_sym_cap;
+    TokenSpan      *tok_spans;
+    int             num_tok_spans;
+    int             tok_span_cap;
+    DefinitionLink *def_links;
+    int             num_def_links;
+    int             def_link_cap;
 } ParseResult;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */

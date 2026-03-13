@@ -237,21 +237,33 @@ void free_dep_refs(void) {
     g_dep_ref_cap  = 0;
 }
 
-static int resolve_from(const DocSymbol *syms, int n, const char **segs,
-                        int nseg) {
-    if (nseg == 0) return 1;
+static const DocSymbol *resolve_from(const DocSymbol *syms, int n,
+                                     const char **segs, int nseg) {
+    if (nseg == 0) return NULL;
     for (int i = 0; i < n; i++) {
         if (syms[i].kind == SK_FUNCTION
-                && strcmp(syms[i].detail, segs[0]) == 0)
+                && strcmp(syms[i].detail, segs[0]) == 0) {
+            if (nseg == 1) return &syms[i];
             return resolve_from(syms[i].children, syms[i].num_children,
                                 segs + 1, nseg - 1);
+        }
+        /* Transparently search through project containers (SK_MODULE): tasks
+         * always live inside a project body, so the project acts as a
+         * namespace wrapper that should not require explicit path traversal. */
+        if (syms[i].kind == SK_MODULE) {
+            const DocSymbol *found = resolve_from(syms[i].children,
+                                                  syms[i].num_children,
+                                                  segs, nseg);
+            if (found) return found;
+        }
     }
-    return 0;
+    return NULL;
 }
 
-static int validate_ref(const DocSymbol *syms, int nsym,
-                        const char **scope, int scope_len,
-                        int bang_count, const char **segs, int nseg) {
+static const DocSymbol *validate_ref(const DocSymbol *syms, int nsym,
+                                     const char **scope, int scope_len,
+                                     int bang_count, const char **segs,
+                                     int nseg) {
     const DocSymbol *ctx;
     int nctx;
     if (bang_count == 0) {
@@ -259,20 +271,37 @@ static int validate_ref(const DocSymbol *syms, int nsym,
         nctx = nsym;
     } else {
         int k = scope_len;
-        if (bang_count > k) return 0;
+        if (bang_count > k) return NULL;
         ctx = doc_symbol_find_path(syms, nsym, scope, k - bang_count, &nctx);
         if (!ctx) { nctx = 0; ctx = NULL; }
     }
     return resolve_from(ctx, nctx, segs, nseg);
 }
 
+static void push_def_link(ParseResult *r, LspRange source, LspRange target) {
+    if (r->num_def_links >= r->def_link_cap) {
+        int nc = r->def_link_cap ? r->def_link_cap * 2 : 4;
+        r->def_links = realloc(r->def_links,
+                               (size_t)nc * sizeof(DefinitionLink));
+        r->def_link_cap = nc;
+    }
+    r->def_links[r->num_def_links++] = (DefinitionLink){ source, target };
+}
+
 void validate_dep_refs(const DocSymbol *syms, int nsym, ParseResult *r) {
     for (int i = 0; i < g_num_dep_refs; i++) {
         const DepRef *dr = &g_dep_refs[i];
-        if (!validate_ref(syms, nsym,
-                          (const char **)dr->scope, dr->scope_n,
-                          dr->bang_count,
-                          (const char **)dr->segs, dr->nseg)) {
+        const DocSymbol *sym = validate_ref(syms, nsym,
+                                            (const char **)dr->scope,
+                                            dr->scope_n,
+                                            dr->bang_count,
+                                            (const char **)dr->segs,
+                                            dr->nseg);
+        if (sym) {
+            /* Valid reference — record a definition link for go-to-definition */
+            push_def_link(r, dr->range, sym->selection_range);
+        } else {
+            /* Invalid reference — emit diagnostic */
             if (dr->bang_count > dr->scope_n) {
                 /* The number of leading `!` characters exceeds the nesting
                  * depth of the containing task.  e.g. a top-level task
