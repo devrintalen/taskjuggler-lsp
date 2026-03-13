@@ -18,12 +18,12 @@
 
 #include "server.h"
 #include "parser.h"
+#include "diagnostics.h"
 #include "hover.h"
 #include "signature.h"
 #include "completion.h"
 #include "semantic_tokens.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -67,51 +67,6 @@ static void doc_free(Document *d) {
     free(d->text);
     parse_result_free(&d->parse);
     memset(d, 0, sizeof(*d));
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   Publish diagnostics notification
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-static void write_message(const char *msg) {
-    printf("Content-Length: %zu\r\n\r\n%s", strlen(msg), msg);
-    fflush(stdout);
-}
-
-static void publish_diagnostics(const char *uri, const ParseResult *r) {
-    cJSON *diag_arr = cJSON_CreateArray();
-    for (int i = 0; i < r->num_diagnostics; i++) {
-        const Diagnostic *d = &r->diagnostics[i];
-        cJSON *dj = cJSON_CreateObject();
-
-        cJSON *range = cJSON_CreateObject();
-        cJSON *start = cJSON_CreateObject();
-        cJSON_AddNumberToObject(start, "line",      d->range.start.line);
-        cJSON_AddNumberToObject(start, "character", d->range.start.character);
-        cJSON *end = cJSON_CreateObject();
-        cJSON_AddNumberToObject(end, "line",      d->range.end.line);
-        cJSON_AddNumberToObject(end, "character", d->range.end.character);
-        cJSON_AddItemToObject(range, "start", start);
-        cJSON_AddItemToObject(range, "end",   end);
-        cJSON_AddItemToObject(dj, "range", range);
-        cJSON_AddNumberToObject(dj, "severity", d->severity);
-        cJSON_AddStringToObject(dj, "message",  d->message);
-        cJSON_AddItemToArray(diag_arr, dj);
-    }
-
-    cJSON *params = cJSON_CreateObject();
-    cJSON_AddStringToObject(params, "uri", uri);
-    cJSON_AddItemToObject(params, "diagnostics", diag_arr);
-
-    cJSON *notif = cJSON_CreateObject();
-    cJSON_AddStringToObject(notif, "jsonrpc", "2.0");
-    cJSON_AddStringToObject(notif, "method", "textDocument/publishDiagnostics");
-    cJSON_AddItemToObject(notif, "params", params);
-
-    char *text = cJSON_PrintUnformatted(notif);
-    write_message(text);
-    cJSON_free(text);
-    cJSON_Delete(notif);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

@@ -9,7 +9,7 @@ GEN_LEX  = src/lexer.yy.c
 GEN_GRAM = src/grammar.tab.c
 GEN_HDR  = src/grammar.tab.h
 
-SRC = src/main.c src/server.c src/parser.c \
+SRC = src/main.c src/server.c src/parser.c src/diagnostics.c \
       $(GEN_LEX) $(GEN_GRAM) \
       src/hover.c src/signature.c src/completion.c src/semantic_tokens.c
 
@@ -55,11 +55,11 @@ $(LEXTEST_BIN): $(GEN_HDR) $(GEN_LEX) $(LEXTEST_SRC)
 
 GRAMTEST_BIN = grammar-test
 GRAMTEST_SRC = tools/grammar_test.c
-GRAMTEST_OBJ = src/parser.o $(GEN_LEX:.c=.o) $(GEN_GRAM:.c=.o)
+GRAMTEST_OBJ = src/parser.o src/diagnostics.o $(GEN_LEX:.c=.o) $(GEN_GRAM:.c=.o)
 
-# Links the full lex+bison pipeline but not the LSP server or cJSON.
+# Links the full lex+bison pipeline but not the LSP server.
 $(GRAMTEST_BIN): $(GEN_HDR) $(GRAMTEST_OBJ) $(GRAMTEST_SRC)
-	$(CC) $(CFLAGS) -Wno-unused-function -o $@ $(GRAMTEST_SRC) $(GRAMTEST_OBJ)
+	$(CC) $(CFLAGS) -Wno-unused-function -o $@ $(GRAMTEST_SRC) $(GRAMTEST_OBJ) $(LDFLAGS)
 
 clean:
 	rm -f $(OBJ) $(BIN) $(GEN_LEX) $(GEN_GRAM) $(GEN_HDR)
