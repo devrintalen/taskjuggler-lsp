@@ -13,6 +13,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: setup
+      run: apt install libcjson-dev flex bison
     - name: make
       run: make
     - name: test
