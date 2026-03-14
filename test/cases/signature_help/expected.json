@@ -1,0 +1,161 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "capabilities": {
+        "textDocumentSync": {
+          "change": 1,
+          "openClose": true
+        },
+        "documentSymbolProvider": true,
+        "foldingRangeProvider": true,
+        "hoverProvider": true,
+        "definitionProvider": true,
+        "referencesProvider": true,
+        "signatureHelpProvider": {
+          "triggerCharacters": [
+            " "
+          ]
+        },
+        "completionProvider": {
+          "triggerCharacters": [
+            ",",
+            " ",
+            "!"
+          ],
+          "resolveProvider": false
+        },
+        "semanticTokensProvider": {
+          "legend": {
+            "tokenTypes": [
+              "keyword",
+              "comment",
+              "string",
+              "number",
+              "variable"
+            ],
+            "tokenModifiers": [
+              "declaration"
+            ]
+          },
+          "full": true
+        },
+        "workspaceSymbolProvider": true
+      },
+      "serverInfo": {
+        "name": [
+          "taskjuggler-lsp"
+        ]
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": "watcher-reg",
+    "method": "client/registerCapability",
+    "params": {
+      "registrations": [
+        {
+          "id": "file-watcher",
+          "method": "workspace/didChangeWatchedFiles",
+          "registerOptions": {
+            "watchers": [
+              {
+                "globPattern": "**/*.tjp"
+              },
+              {
+                "globPattern": "**/*.tji"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/sample.tjp",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": {
+      "signatures": [
+        {
+          "label": "effort <value> (min|h|d|w|m|y)",
+          "documentation": {
+            "kind": "markdown",
+            "value": "Work required (e.g. `effort 5 d`, `effort 8 h`). Distributed across allocated resources."
+          },
+          "parameters": [
+            {
+              "label": "<value>"
+            },
+            {
+              "label": "min|h|d|w|m|y"
+            }
+          ],
+          "activeParameter": 0
+        }
+      ],
+      "activeSignature": 0
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": {
+      "signatures": [
+        {
+          "label": "depends <id> [{ <attributes> }] [, <id> [{ <attributes> }]...]",
+          "documentation": {
+            "kind": "markdown",
+            "value": "Finish-to-start dependency. Use `!` prefix for relative paths, `!!` to go up a level."
+          },
+          "parameters": [
+            {
+              "label": "<id> [, <id>...]"
+            }
+          ],
+          "activeParameter": 0
+        }
+      ],
+      "activeSignature": 0
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "result": {
+      "signatures": [
+        {
+          "label": "task [<id>] <name>",
+          "documentation": {
+            "kind": "markdown",
+            "value": "Work package, summary task, or milestone."
+          },
+          "parameters": [
+            {
+              "label": "[<id>]"
+            },
+            {
+              "label": "<name>"
+            }
+          ],
+          "activeParameter": 0
+        }
+      ],
+      "activeSignature": 0
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 5,
+    "result": null
+  }
+]

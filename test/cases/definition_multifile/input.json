@@ -1,0 +1,75 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/project.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "project p \"Project\" 2024-01-01 +3m {\n}\ntask backend \"Backend\" {\n}\ntask frontend \"Frontend\" {\n  depends backend\n}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tasks.tji",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "task qa \"QA\" {\n  depends backend\n}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/project.tjp"
+      },
+      "position": {
+        "line": 5,
+        "character": 12
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tasks.tji"
+      },
+      "position": {
+        "line": 1,
+        "character": 12
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "shutdown",
+    "params": {}
+  }
+]
