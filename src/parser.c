@@ -166,15 +166,12 @@ ParseResult parse(const char *src) {
     yyparse();
     yy_delete_buffer(buf);
 
-    /* Record where dep-validation diagnostics start (after any syntax errors) */
+    /* Record where dep-validation diagnostics will start (after syntax errors).
+     * Actual validation is deferred to revalidate_dep_refs() in the server so
+     * that cross-file symbols are available. */
     result.dep_diag_start = result.num_diagnostics;
 
-    /* Post-processing: validate dep refs against the now-complete symbol tree */
-    validate_dep_refs(result.doc_symbols, result.num_doc_symbols, &result);
-
-    /* Transfer dep_refs ownership from globals to ParseResult for later
-     * cross-file revalidation.  Do NOT call free_dep_refs() here; ownership
-     * passes to ParseResult and will be freed by parse_result_free(). */
+    /* Transfer dep_refs ownership from globals to ParseResult. */
     dep_refs_transfer(&result);
 
     /* Transfer tok_spans array ownership to the ParseResult */
