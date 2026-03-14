@@ -145,6 +145,7 @@
 
 #include "diagnostics.h"
 #include "parser.h"
+#include "server.h"
 
 #include <cjson/cJSON.h>
 #include <stdio.h>
@@ -391,11 +392,6 @@ void revalidate_dep_refs(ParseResult *r,
 
 /* ── LSP publishDiagnostics notification ─────────────────────────────────── */
 
-static void write_message(const char *msg) {
-    printf("Content-Length: %zu\r\n\r\n%s", strlen(msg), msg);
-    fflush(stdout);
-}
-
 void publish_diagnostics(const char *uri, const ParseResult *r) {
     cJSON *diag_arr = cJSON_CreateArray();
     for (int i = 0; i < r->num_diagnostics; i++) {
@@ -427,7 +423,7 @@ void publish_diagnostics(const char *uri, const ParseResult *r) {
     cJSON_AddItemToObject(notif, "params", params);
 
     char *text = cJSON_PrintUnformatted(notif);
-    write_message(text);
+    lsp_send_message(text);
     cJSON_free(text);
     cJSON_Delete(notif);
 }

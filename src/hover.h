@@ -25,6 +25,32 @@
  * if none.  Caller must free result.text (if non-NULL). */
 TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
 
+/*
+ * Shared keyword-context scanner used by hover and signature help.
+ *
+ * Walks tokens up to cursor, tracking brace depth and a keyword stack.
+ * For each token in the default case:
+ *   - If filter(tok->text) is non-zero, the token is pushed as a keyword entry,
+ *     displacing any sibling entries at the same depth.
+ *   - Otherwise, if track_argc is non-zero and the token ends before cursor,
+ *     the arg_count of the innermost entry at the current depth is incremented.
+ *
+ * On return, stack[0..return_value-1] are populated and all kw fields are
+ * heap-allocated.  *out_depth holds the brace depth at cursor.
+ * The caller is responsible for freeing all kw fields in the stack.
+ */
+typedef struct {
+    char     *kw;
+    LspRange  range;
+    uint32_t  depth;
+    uint32_t  argc;
+} KwStackEntry;
+
+int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
+                  int (*filter)(const char *kw), int track_argc,
+                  KwStackEntry *stack, int stack_cap,
+                  uint32_t *out_depth);
+
 /* Return Markdown documentation for a TJP keyword, or NULL if unknown. */
 const char *keyword_docs(const char *kw);
 

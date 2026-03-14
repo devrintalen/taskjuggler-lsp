@@ -61,11 +61,6 @@ static char *read_message(void) {
     return buf;
 }
 
-static void write_message(const char *msg) {
-    printf("Content-Length: %zu\r\n\r\n%s", strlen(msg), msg);
-    fflush(stdout);
-}
-
 int main(void) {
     server_init();
     for (;;) {
@@ -76,7 +71,7 @@ int main(void) {
         free(body);
 
         if (response) {
-            write_message(response);
+            lsp_send_message(response);
             free(response);
         }
     }

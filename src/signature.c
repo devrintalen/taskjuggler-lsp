@@ -17,6 +17,7 @@
  */
 
 #include "signature.h"
+#include "hover.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -53,66 +54,12 @@ int has_signature_help(const char *kw) {
 
 /* ── active_context ──────────────────────────────────────────────────────── */
 
-/* Stack entry: (keyword, brace_depth, arg_count) */
-typedef struct { char *kw; uint32_t depth; uint32_t argc; } StackEntry;
-
 ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
-    uint32_t brace_depth = 0;
-    StackEntry stack[128];
-    int stack_n = 0;
+    KwStackEntry stack[128];
+    uint32_t brace_depth;
+    int stack_n = scan_kw_stack(tokens, num_tokens, cursor,
+                                has_signature_help, 1, stack, 128, &brace_depth);
 
-    for (int i = 0; i < num_tokens; i++) {
-        const TokenSpan *tok = &tokens[i];
-        if (tok->token_kind == TK_EOF) break;
-
-        /* Stop once token starts past cursor */
-        if (tok->start.line > cursor.line
-         || (tok->start.line == cursor.line && tok->start.character > cursor.character))
-            break;
-
-        switch (tok->token_kind) {
-        case TK_LINE_COMMENT:
-        case TK_BLOCK_COMMENT:
-            break;
-
-        case TK_LBRACE:
-            brace_depth++;
-            break;
-
-        case TK_RBRACE:
-            if (brace_depth > 0) brace_depth--;
-            while (stack_n > 0 && stack[stack_n - 1].depth > brace_depth)
-                free(stack[--stack_n].kw);
-            break;
-
-        default:
-            /* Keywords arrive as KW_* tokens with text set.
-             * Check signature help by text to stay independent of token codes. */
-            if (tok->text && has_signature_help(tok->text)) {
-                while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth)
-                    free(stack[--stack_n].kw);
-                if (stack_n < 128)
-                    stack[stack_n++] = (StackEntry){ strdup(tok->text), brace_depth, 0 };
-                break;
-            }
-            /* Count as completed argument only if token fully before cursor */
-            {
-                int fully_before = (tok->end.line < cursor.line)
-                    || (tok->end.line == cursor.line && tok->end.character <= cursor.character);
-                if (fully_before) {
-                    for (int j = stack_n - 1; j >= 0; j--) {
-                        if (stack[j].depth == brace_depth) {
-                            stack[j].argc++;
-                            break;
-                        }
-                    }
-                }
-            }
-            break;
-        }
-    }
-
-    /* Find innermost entry at current brace_depth */
     for (int i = stack_n - 1; i >= 0; i--) {
         if (stack[i].depth == brace_depth) {
             ActiveContext ac;

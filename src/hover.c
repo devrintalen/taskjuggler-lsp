@@ -50,20 +50,19 @@ TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
     return (TokenSpan){ TK_EOF, pos, pos, strdup("") };
 }
 
-/* ── active_keyword_at ───────────────────────────────────────────────────── */
+/* ── scan_kw_stack ───────────────────────────────────────────────────────── */
 
-ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
-    typedef struct { char *text; LspRange range; uint32_t depth; } KwEntry;
-
+int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
+                  int (*filter)(const char *kw), int track_argc,
+                  KwStackEntry *stack, int stack_cap,
+                  uint32_t *out_depth) {
     uint32_t brace_depth = 0;
-    KwEntry  stack[128];
-    int      stack_n = 0;
+    int stack_n = 0;
 
     for (int i = 0; i < num_tokens; i++) {
         const TokenSpan *tok = &tokens[i];
         if (tok->token_kind == TK_EOF) break;
 
-        /* Stop once a token starts past the cursor */
         if (tok->start.line > cursor.line
          || (tok->start.line == cursor.line
           && tok->start.character > cursor.character))
@@ -81,38 +80,64 @@ ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos 
         case TK_RBRACE:
             if (brace_depth > 0) brace_depth--;
             while (stack_n > 0 && stack[stack_n - 1].depth > brace_depth)
-                free(stack[--stack_n].text);
+                free(stack[--stack_n].kw);
             break;
 
         default:
-            /* Keywords arrive as KW_* tokens (not TK_IDENT) with text set.
-             * Check if this token's text has documentation. */
-            if (tok->text && keyword_docs(tok->text) != NULL) {
+            if (tok->text && filter(tok->text)) {
                 while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth)
-                    free(stack[--stack_n].text);
-                if (stack_n < 128) {
-                    stack[stack_n++] = (KwEntry){
+                    free(stack[--stack_n].kw);
+                if (stack_n < stack_cap) {
+                    stack[stack_n++] = (KwStackEntry){
                         strdup(tok->text),
                         (LspRange){ tok->start, tok->end },
-                        brace_depth
+                        brace_depth,
+                        0
                     };
+                }
+                break;
+            }
+            if (track_argc) {
+                int fully_before = (tok->end.line < cursor.line)
+                    || (tok->end.line == cursor.line
+                     && tok->end.character <= cursor.character);
+                if (fully_before) {
+                    for (int j = stack_n - 1; j >= 0; j--) {
+                        if (stack[j].depth == brace_depth) {
+                            stack[j].argc++;
+                            break;
+                        }
+                    }
                 }
             }
             break;
         }
     }
 
-    /* Return the innermost keyword at the current brace depth */
+    *out_depth = brace_depth;
+    return stack_n;
+}
+
+/* ── active_keyword_at ───────────────────────────────────────────────────── */
+
+static int kw_has_docs(const char *kw) { return keyword_docs(kw) != NULL; }
+
+ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
+    KwStackEntry stack[128];
+    uint32_t brace_depth;
+    int stack_n = scan_kw_stack(tokens, num_tokens, cursor,
+                                kw_has_docs, 0, stack, 128, &brace_depth);
+
     for (int i = stack_n - 1; i >= 0; i--) {
         if (stack[i].depth == brace_depth) {
-            ActiveKeyword ak = { stack[i].text, stack[i].range };
+            ActiveKeyword ak = { stack[i].kw, stack[i].range };
             for (int j = 0; j < stack_n; j++)
-                if (j != i) free(stack[j].text);
+                if (j != i) free(stack[j].kw);
             return ak;
         }
     }
 
-    for (int i = 0; i < stack_n; i++) free(stack[i].text);
+    for (int i = 0; i < stack_n; i++) free(stack[i].kw);
     return (ActiveKeyword){ NULL, {{0,0},{0,0}} };
 }
 

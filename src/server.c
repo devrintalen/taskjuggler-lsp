@@ -79,8 +79,8 @@ static void doc_free(Document *d) {
    Server-to-client messaging
    ═══════════════════════════════════════════════════════════════════════════ */
 
-static void send_message(const char *json_text) {
-    printf("Content-Length: %zu\r\n\r\n%s", strlen(json_text), json_text);
+void lsp_send_message(const char *msg) {
+    printf("Content-Length: %zu\r\n\r\n%s", strlen(msg), msg);
     fflush(stdout);
 }
 
@@ -294,7 +294,7 @@ static void handle_initialized(void) {
 
     char *text = cJSON_PrintUnformatted(request);
     cJSON_Delete(request);
-    send_message(text);
+    lsp_send_message(text);
     cJSON_free(text);
 }
 

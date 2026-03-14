@@ -26,3 +26,6 @@ void server_init();
  * Returns a heap-allocated JSON string response, or NULL for notifications.
  * Caller must free the returned string. */
 char *server_process(const char *json_text);
+
+/* Write one LSP-framed message to stdout. */
+void lsp_send_message(const char *msg);
