@@ -1,0 +1,89 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/project.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "project acso \"Accounting System\" 2024-01-01 +3m {\n}\ninclude \"resources.tji\"\ninclude \"tasks.tji\"\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/resources.tji",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "resource dev \"Developer\" {\n  resource dev1 \"Alice\" {\n  }\n  resource dev2 \"Bob\" {\n  }\n}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tasks.tji",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "task spec \"Specification\" {\n}\ntask impl \"Implementation\" {\n}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "textDocument/documentSymbol",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/project.tjp"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "textDocument/documentSymbol",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/resources.tji"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "textDocument/documentSymbol",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tasks.tji"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 5,
+    "method": "shutdown",
+    "params": {}
+  }
+]

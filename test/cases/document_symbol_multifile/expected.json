@@ -1,0 +1,251 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "capabilities": {
+        "textDocumentSync": {
+          "change": 1,
+          "openClose": true
+        },
+        "documentSymbolProvider": true,
+        "foldingRangeProvider": true,
+        "hoverProvider": true,
+        "definitionProvider": true,
+        "referencesProvider": true,
+        "signatureHelpProvider": {
+          "triggerCharacters": [
+            " "
+          ]
+        },
+        "completionProvider": {
+          "triggerCharacters": [
+            ",",
+            " ",
+            "!"
+          ],
+          "resolveProvider": false
+        },
+        "semanticTokensProvider": {
+          "legend": {
+            "tokenTypes": [
+              "keyword",
+              "comment",
+              "string",
+              "number",
+              "variable"
+            ],
+            "tokenModifiers": [
+              "declaration"
+            ]
+          },
+          "full": true
+        }
+      },
+      "serverInfo": {
+        "name": [
+          "taskjuggler-lsp"
+        ]
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/project.tjp",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/resources.tji",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/tasks.tji",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": [
+      {
+        "name": "\"Accounting System\"",
+        "detail": "acso",
+        "kind": 2,
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 1,
+            "character": 1
+          }
+        },
+        "selectionRange": {
+          "start": {
+            "line": 0,
+            "character": 8
+          },
+          "end": {
+            "line": 0,
+            "character": 12
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": [
+      {
+        "name": "\"Developer\"",
+        "detail": "dev",
+        "kind": 19,
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 5,
+            "character": 1
+          }
+        },
+        "selectionRange": {
+          "start": {
+            "line": 0,
+            "character": 9
+          },
+          "end": {
+            "line": 0,
+            "character": 12
+          }
+        },
+        "children": [
+          {
+            "name": "\"Alice\"",
+            "detail": "dev1",
+            "kind": 19,
+            "range": {
+              "start": {
+                "line": 1,
+                "character": 2
+              },
+              "end": {
+                "line": 2,
+                "character": 3
+              }
+            },
+            "selectionRange": {
+              "start": {
+                "line": 1,
+                "character": 11
+              },
+              "end": {
+                "line": 1,
+                "character": 15
+              }
+            }
+          },
+          {
+            "name": "\"Bob\"",
+            "detail": "dev2",
+            "kind": 19,
+            "range": {
+              "start": {
+                "line": 3,
+                "character": 2
+              },
+              "end": {
+                "line": 4,
+                "character": 3
+              }
+            },
+            "selectionRange": {
+              "start": {
+                "line": 3,
+                "character": 11
+              },
+              "end": {
+                "line": 3,
+                "character": 15
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "result": [
+      {
+        "name": "\"Specification\"",
+        "detail": "spec",
+        "kind": 12,
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 1,
+            "character": 1
+          }
+        },
+        "selectionRange": {
+          "start": {
+            "line": 0,
+            "character": 5
+          },
+          "end": {
+            "line": 0,
+            "character": 9
+          }
+        }
+      },
+      {
+        "name": "\"Implementation\"",
+        "detail": "impl",
+        "kind": 12,
+        "range": {
+          "start": {
+            "line": 2,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 1
+          }
+        },
+        "selectionRange": {
+          "start": {
+            "line": 2,
+            "character": 5
+          },
+          "end": {
+            "line": 2,
+            "character": 9
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 5,
+    "result": null
+  }
+]
