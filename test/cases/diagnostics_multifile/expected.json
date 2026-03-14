@@ -40,7 +40,8 @@
             ]
           },
           "full": true
-        }
+        },
+        "workspaceSymbolProvider": true
       },
       "serverInfo": {
         "name": [
