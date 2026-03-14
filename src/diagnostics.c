@@ -167,15 +167,6 @@ void push_diagnostic(ParseResult *r, LspRange range, int severity,
 
 /* ── Dependency reference tracking ──────────────────────────────────────── */
 
-typedef struct {
-    int    bang_count;
-    char **segs;       /* path segments, heap-copied */
-    int    nseg;
-    char **scope;      /* snapshot of task scope at parse time, heap-copied */
-    int    scope_n;
-    LspRange range;
-} DepRef;
-
 static DepRef *g_dep_refs     = NULL;
 static int     g_num_dep_refs = 0;
 static int     g_dep_ref_cap  = 0;
@@ -221,6 +212,15 @@ void push_dep_ref(ParseResult *r, int bang_count, const char *path,
 
     dr->bang_count = bang_count;
     dr->range      = (LspRange){ start, end };
+}
+
+void dep_refs_transfer(ParseResult *r) {
+    r->raw_dep_refs     = g_dep_refs;
+    r->num_raw_dep_refs = g_num_dep_refs;
+    r->raw_dep_ref_cap  = g_dep_ref_cap;
+    g_dep_refs     = NULL;
+    g_num_dep_refs = 0;
+    g_dep_ref_cap  = 0;
 }
 
 void free_dep_refs(void) {
@@ -278,14 +278,17 @@ static const DocSymbol *validate_ref(const DocSymbol *syms, int nsym,
     return resolve_from(ctx, nctx, segs, nseg);
 }
 
-static void push_def_link(ParseResult *r, LspRange source, LspRange target) {
+static void push_def_link(ParseResult *r, LspRange source, LspRange target,
+                          const char *target_uri) {
     if (r->num_def_links >= r->def_link_cap) {
         int nc = r->def_link_cap ? r->def_link_cap * 2 : 4;
         r->def_links = realloc(r->def_links,
                                (size_t)nc * sizeof(DefinitionLink));
         r->def_link_cap = nc;
     }
-    r->def_links[r->num_def_links++] = (DefinitionLink){ source, target };
+    r->def_links[r->num_def_links++] = (DefinitionLink){
+        source, target, target_uri ? strdup(target_uri) : NULL
+    };
 }
 
 void validate_dep_refs(const DocSymbol *syms, int nsym, ParseResult *r) {
@@ -299,7 +302,7 @@ void validate_dep_refs(const DocSymbol *syms, int nsym, ParseResult *r) {
                                             dr->nseg);
         if (sym) {
             /* Valid reference — record a definition link for go-to-definition */
-            push_def_link(r, dr->range, sym->selection_range);
+            push_def_link(r, dr->range, sym->selection_range, NULL);
         } else {
             /* Invalid reference — emit diagnostic */
             if (dr->bang_count > dr->scope_n) {
@@ -313,6 +316,66 @@ void validate_dep_refs(const DocSymbol *syms, int nsym, ParseResult *r) {
                 /* The bang count is valid but the resulting path does not
                  * match any task in the resolved lookup scope.  Reconstruct
                  * the dot-separated path for the error message. */
+                char path[256] = "";
+                for (int j = 0; j < dr->nseg; j++) {
+                    if (j > 0) strncat(path, ".", sizeof(path) - strlen(path) - 1);
+                    strncat(path, dr->segs[j], sizeof(path) - strlen(path) - 1);
+                }
+                char msg[320];
+                snprintf(msg, sizeof(msg), "unresolved task: `%s`", path);
+                push_diagnostic(r, dr->range, DIAG_ERROR, msg);
+            }
+        }
+    }
+}
+
+/* ── Cross-file dependency revalidation ──────────────────────────────────── */
+
+void revalidate_dep_refs(ParseResult *r,
+                         const DocSymbol * const *extra_pools,
+                         const int *extra_counts,
+                         const char * const *extra_uris,
+                         int num_extra) {
+    /* Trim dep-validation diagnostics, keeping syntax errors */
+    for (int i = r->dep_diag_start; i < r->num_diagnostics; i++)
+        free(r->diagnostics[i].message);
+    r->num_diagnostics = r->dep_diag_start;
+
+    /* Clear definition links */
+    for (int i = 0; i < r->num_def_links; i++)
+        free(r->def_links[i].target_uri);
+    r->num_def_links = 0;
+
+    /* Revalidate each raw dep ref against this file's symbols and extra pools */
+    for (int i = 0; i < r->num_raw_dep_refs; i++) {
+        const DepRef *dr = &r->raw_dep_refs[i];
+
+        /* Search this file first */
+        const DocSymbol *sym = validate_ref(r->doc_symbols, r->num_doc_symbols,
+                                            (const char **)dr->scope, dr->scope_n,
+                                            dr->bang_count,
+                                            (const char **)dr->segs, dr->nseg);
+        const char *found_uri = NULL;
+
+        /* For absolute references (no bangs), also search other open files */
+        if (!sym && dr->bang_count == 0) {
+            for (int p = 0; p < num_extra; p++) {
+                sym = resolve_from(extra_pools[p], extra_counts[p],
+                                   (const char **)dr->segs, dr->nseg);
+                if (sym) {
+                    found_uri = extra_uris[p];
+                    break;
+                }
+            }
+        }
+
+        if (sym) {
+            push_def_link(r, dr->range, sym->selection_range, found_uri);
+        } else {
+            if (dr->bang_count > dr->scope_n) {
+                push_diagnostic(r, dr->range, DIAG_WARNING,
+                    "dependency reference escapes beyond project root");
+            } else {
                 char path[256] = "";
                 for (int j = 0; j < dr->nseg; j++) {
                     if (j > 0) strncat(path, ".", sizeof(path) - strlen(path) - 1);

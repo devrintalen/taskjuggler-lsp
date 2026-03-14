@@ -70,6 +70,20 @@ struct DocSymbol {
     int        children_cap;
 };
 
+/* ── DepRef ──────────────────────────────────────────────────────────────── *
+ *
+ * A raw dependency reference captured during parsing.  Stored in ParseResult
+ * for cross-file revalidation by diagnostics.c:revalidate_dep_refs().
+ */
+typedef struct {
+    int       bang_count;
+    char    **segs;       /* dot-split path segments, heap-allocated */
+    int       nseg;
+    char    **scope;      /* task scope snapshot at parse time, heap-allocated */
+    int       scope_n;
+    LspRange  range;
+} DepRef;
+
 /* ── Diagnostic severity ─────────────────────────────────────────────────── */
 
 #define DIAG_ERROR   1
@@ -115,10 +129,15 @@ typedef struct {
  * Populated by validate_dep_refs() for every successfully resolved
  * dependency reference so that textDocument/definition can answer without
  * re-parsing.
+ *
+ * target_uri is heap-allocated and is NULL when the target is in the same
+ * document as the source.  For cross-file references it holds the URI of
+ * the file that defines the target symbol.
  */
 typedef struct {
-    LspRange source; /* range of the reference expression */
-    LspRange target; /* selection_range of the target symbol */
+    LspRange  source;     /* range of the reference expression */
+    LspRange  target;     /* selection_range of the target symbol */
+    char     *target_uri; /* heap-allocated; NULL means same document */
 } DefinitionLink;
 
 /* ── ParseResult ─────────────────────────────────────────────────────────── */
@@ -127,6 +146,7 @@ typedef struct {
     Diagnostic     *diagnostics;
     int             num_diagnostics;
     int             diag_cap;
+    int             dep_diag_start; /* diagnostics[0..dep_diag_start-1] are syntax errors */
     DocSymbol      *doc_symbols;
     int             num_doc_symbols;
     int             doc_sym_cap;
@@ -136,6 +156,9 @@ typedef struct {
     DefinitionLink *def_links;
     int             num_def_links;
     int             def_link_cap;
+    DepRef         *raw_dep_refs;     /* captured dep refs for cross-file revalidation */
+    int             num_raw_dep_refs;
+    int             raw_dep_ref_cap;
 } ParseResult;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */

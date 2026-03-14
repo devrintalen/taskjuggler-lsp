@@ -57,8 +57,9 @@ cJSON *build_definition_json(const DefinitionLink *links, int num_links,
                              LspPos cursor, const char *uri) {
     for (int i = 0; i < num_links; i++) {
         if (pos_in_range(cursor, links[i].source)) {
+            const char *target_uri = links[i].target_uri ? links[i].target_uri : uri;
             cJSON *location = cJSON_CreateObject();
-            cJSON_AddStringToObject(location, "uri", uri);
+            cJSON_AddStringToObject(location, "uri", target_uri);
             cJSON_AddItemToObject(location, "range",
                                   range_json(links[i].target));
             return location;
