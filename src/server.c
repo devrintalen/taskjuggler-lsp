@@ -27,6 +27,7 @@
 #include "signature.h"
 #include "completion.h"
 #include "semantic_tokens.h"
+#include "workspace_symbol.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -200,6 +201,7 @@ static cJSON *handle_initialize(cJSON *id, cJSON *params) {
     cJSON_AddItemToObject(caps, "signatureHelpProvider",     sig_opts);
     cJSON_AddItemToObject(caps, "completionProvider",        comp_opts);
     cJSON_AddItemToObject(caps, "semanticTokensProvider",    sem_opts);
+    cJSON_AddBoolToObject(caps, "workspaceSymbolProvider",   1);
 
     cJSON *result = cJSON_CreateObject();
     cJSON_AddItemToObject(result, "capabilities", caps);
@@ -474,6 +476,21 @@ static cJSON *handle_completion(cJSON *id, cJSON *params) {
 }
 
 
+static cJSON *handle_workspace_symbol(cJSON *id, cJSON *params) {
+    const char *query = json_str(params, "query");
+    if (!query) query = "";
+
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use) continue;
+        collect_workspace_symbols(query,
+                                  docs[i].parse.doc_symbols,
+                                  docs[i].parse.num_doc_symbols,
+                                  docs[i].uri, arr);
+    }
+    return make_response(id, arr);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    Main dispatch
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -534,6 +551,9 @@ char *server_process(const char *json_text) {
 
     } else if (strcmp(m, "textDocument/completion") == 0) {
         resp = handle_completion(id_item, params);
+
+    } else if (strcmp(m, "workspace/symbol") == 0) {
+        resp = handle_workspace_symbol(id_item, params);
 
     } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
         resp = handle_semantic_tokens_full(id_item, params);
