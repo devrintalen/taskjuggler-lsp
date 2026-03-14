@@ -18,4 +18,4 @@ jobs:
     - name: make
       run: make
     - name: test
-      run: python lsp_test.py ./taskjuggler-lsp --all test/cases/
+      run: python tools/lsp_test.py ./taskjuggler-lsp --all test/cases/
