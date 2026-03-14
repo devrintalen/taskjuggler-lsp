@@ -6,22 +6,24 @@ This is an independent implementation that provides editor tooling for TaskJuggl
 
 ## Features
 
-| Feature           | Method                                          | Status          | Notes                                                                                                 |
-|-------------------|-------------------------------------------------|-----------------|-------------------------------------------------------------------------------------------------------|
-| Lifecycle         | `initialize` / `shutdown` / `exit`              | Implemented     | Negotiates capabilities on init                                                                       |
-| Document Sync     | `textDocument/didOpen`, `didChange`, `didClose` | Implemented     | Full-document sync; caches up to 64 open files                                                        |
-| Diagnostics       | `textDocument/publishDiagnostics`               | Implemented     | Reports unresolved `depends`/`precedes` targets as errors; out-of-scope relative refs as warnings     |
-| Hover             | `textDocument/hover`                            | Implemented     | Markdown docs for 35+ TaskJuggler keywords                                                            |
-| Completion        | `textDocument/completion`                       | Implemented     | Context-aware keyword and identifier suggestions; supports hierarchical and relative (`!`) references |
-| Signature Help    | `textDocument/signatureHelp`                    | Implemented     | Parameter descriptions for 35+ keywords                                                               |
-| Document Symbols  | `textDocument/documentSymbol`                   | Implemented     | Hierarchical symbol tree for projects, tasks, resources, accounts, shifts                             |
-| Go to Definition  | `textDocument/definition`                       | Implemented     | Jumps to task declaration from `depends`/`precedes` reference paths                                  |
-| Find References   | `textDocument/references`                       | Implemented     | Finds all `depends`/`precedes` paths that reference a task; trigger from the task's declaration identifier |
-| Rename            | `textDocument/rename`                           | Not implemented |                                                                                                       |
-| Code Actions      | `textDocument/codeAction`                       | Not implemented |                                                                                                       |
-| Formatting        | `textDocument/formatting`                       | Not implemented |                                                                                                       |
-| Folding Ranges    | `textDocument/foldingRange`                     | Implemented     | Folds brace-delimited blocks (`{}`), macro bodies (`[]`), and multi-line block comments               |
-| Workspace Symbols | `workspace/symbol`                              | Not implemented |                                                                                                       |
+| Feature              | Method                                          | Status          | Notes                                                                                                 |
+|----------------------|-------------------------------------------------|-----------------|-------------------------------------------------------------------------------------------------------|
+| Lifecycle            | `initialize` / `shutdown` / `exit`              | Implemented     | Negotiates capabilities on init                                                                       |
+| Document Sync        | `textDocument/didOpen`, `didChange`, `didClose` | Implemented     | Full-document sync; caches up to 64 open files                                                        |
+| File Watching        | `workspace/didChangeWatchedFiles`               | Implemented     | Registers watchers for `**/*.tjp` and `**/*.tji`; re-parses on create/change, removes on delete      |
+| Diagnostics          | `textDocument/publishDiagnostics`               | Implemented     | Reports unresolved `depends`/`precedes` targets as errors; out-of-scope relative refs as warnings; cross-file validation |
+| Hover                | `textDocument/hover`                            | Implemented     | Markdown docs for 39 TaskJuggler keywords                                                             |
+| Completion           | `textDocument/completion`                       | Implemented     | Context-aware keyword and identifier suggestions; supports hierarchical and relative (`!`) references |
+| Signature Help       | `textDocument/signatureHelp`                    | Implemented     | Parameter descriptions for 39 keywords                                                                |
+| Document Symbols     | `textDocument/documentSymbol`                   | Implemented     | Hierarchical symbol tree for projects, tasks, resources, accounts, shifts                             |
+| Workspace Symbols    | `workspace/symbol`                              | Implemented     | Case-insensitive substring search across all open files                                               |
+| Go to Definition     | `textDocument/definition`                       | Implemented     | Jumps to task declaration from `depends`/`precedes` reference; supports cross-file references         |
+| Find References      | `textDocument/references`                       | Implemented     | Finds `depends`/`precedes` paths that reference a task; trigger from the task's declaration identifier; same-file only |
+| Folding Ranges       | `textDocument/foldingRange`                     | Implemented     | Folds brace-delimited blocks (`{}`), macro bodies (`[]`), and multi-line block comments               |
+| Semantic Tokens      | `textDocument/semanticTokens/full`              | Implemented     | Syntax highlighting for keywords, identifiers, strings, numbers, dates, and comments                  |
+| Rename               | `textDocument/rename`                           | Not implemented |                                                                                                       |
+| Code Actions         | `textDocument/codeAction`                       | Not implemented |                                                                                                       |
+| Formatting           | `textDocument/formatting`                       | Not implemented |                                                                                                       |
 
 ## Dependencies
 
@@ -73,7 +75,7 @@ make grammar-test
 To run the unit tests using the Python test harness:
 
 ```sh
-python lsp_test.py ./taskjuggler-lsp --all test/cases/
+python3 tools/lsp_test.py --all test/cases ./taskjuggler-lsp
 ```
 
 
@@ -114,7 +116,8 @@ This initialization code depends on `taskjuggler.el`, which is an Emacs major mo
 
 ## Limitations
 
-Only single-file projects are fully supported. References across files are probably broken.
+- **Find References** (`textDocument/references`) only searches the queried document's dependency links. If task `backend` is defined in `project.tjp` and referenced from `tasks.tji`, a references query on `backend` will not surface the cross-file usage. Go to Definition works cross-file; find references does not yet.
+- **Completion** does not suggest task identifiers from other open files in `depends`/`precedes` clauses. Only identifiers visible in the current file's symbol tree are offered.
 
 ## License
 
