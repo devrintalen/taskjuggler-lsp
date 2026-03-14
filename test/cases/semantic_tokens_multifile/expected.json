@@ -1,0 +1,180 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "capabilities": {
+        "textDocumentSync": {
+          "change": 1,
+          "openClose": true
+        },
+        "documentSymbolProvider": true,
+        "foldingRangeProvider": true,
+        "hoverProvider": true,
+        "definitionProvider": true,
+        "referencesProvider": true,
+        "signatureHelpProvider": {
+          "triggerCharacters": [
+            " "
+          ]
+        },
+        "completionProvider": {
+          "triggerCharacters": [
+            ",",
+            " ",
+            "!"
+          ],
+          "resolveProvider": false
+        },
+        "semanticTokensProvider": {
+          "legend": {
+            "tokenTypes": [
+              "keyword",
+              "comment",
+              "string",
+              "number",
+              "variable"
+            ],
+            "tokenModifiers": [
+              "declaration"
+            ]
+          },
+          "full": true
+        }
+      },
+      "serverInfo": {
+        "name": [
+          "taskjuggler-lsp"
+        ]
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/main.tjp",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/resources.tji",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/tasks.tji",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": {
+      "data": [
+        0,
+        0,
+        7,
+        0,
+        1,
+        0,
+        8,
+        4,
+        4,
+        0,
+        0,
+        5,
+        16,
+        2,
+        0,
+        0,
+        17,
+        10,
+        2,
+        0,
+        0,
+        11,
+        3,
+        3,
+        0,
+        2,
+        0,
+        7,
+        0,
+        0,
+        0,
+        8,
+        15,
+        2,
+        0,
+        1,
+        0,
+        7,
+        0,
+        0,
+        0,
+        8,
+        11,
+        2,
+        0
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": {
+      "data": [
+        0,
+        0,
+        8,
+        0,
+        1,
+        0,
+        9,
+        3,
+        4,
+        0,
+        0,
+        4,
+        11,
+        2,
+        0
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "result": {
+      "data": [
+        0,
+        0,
+        4,
+        0,
+        1,
+        0,
+        5,
+        2,
+        4,
+        0,
+        0,
+        3,
+        6,
+        2,
+        0
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 5,
+    "result": null
+  }
+]
