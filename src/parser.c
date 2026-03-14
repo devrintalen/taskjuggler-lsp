@@ -90,7 +90,20 @@ void parse_result_free(ParseResult *r) {
     for (int i = 0; i < r->num_tok_spans; i++)
         free(r->tok_spans[i].text);
     free(r->tok_spans);
+
+    for (int i = 0; i < r->num_def_links; i++)
+        free(r->def_links[i].target_uri);
     free(r->def_links);
+
+    for (int i = 0; i < r->num_raw_dep_refs; i++) {
+        DepRef *dr = &r->raw_dep_refs[i];
+        for (int j = 0; j < dr->nseg; j++) free(dr->segs[j]);
+        free(dr->segs);
+        for (int j = 0; j < dr->scope_n; j++) free(dr->scope[j]);
+        free(dr->scope);
+    }
+    free(r->raw_dep_refs);
+
     memset(r, 0, sizeof(*r));
 }
 
@@ -153,9 +166,13 @@ ParseResult parse(const char *src) {
     yyparse();
     yy_delete_buffer(buf);
 
-    /* Post-processing: validate dep refs against the now-complete symbol tree */
-    validate_dep_refs(result.doc_symbols, result.num_doc_symbols, &result);
-    free_dep_refs();
+    /* Record where dep-validation diagnostics will start (after syntax errors).
+     * Actual validation is deferred to revalidate_dep_refs() in the server so
+     * that cross-file symbols are available. */
+    result.dep_diag_start = result.num_diagnostics;
+
+    /* Transfer dep_refs ownership from globals to ParseResult. */
+    dep_refs_transfer(&result);
 
     /* Transfer tok_spans array ownership to the ParseResult */
     result.tok_spans     = g_tok_spans;

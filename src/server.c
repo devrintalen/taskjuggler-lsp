@@ -103,6 +103,41 @@ static cJSON *make_response(cJSON *id, cJSON *result) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   Cross-file revalidation
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Revalidate dep refs in all open documents using the combined symbol pools
+ * from every other open document, then publish updated diagnostics.
+ *
+ * Called after any document open, change, or close so that cross-file
+ * dependency references are resolved against the current workspace state.
+ */
+static void revalidate_all_docs(void) {
+    const DocSymbol *extra_pools[MAX_DOCS];
+    int              extra_counts[MAX_DOCS];
+    const char      *extra_uris[MAX_DOCS];
+
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use) continue;
+
+        int num_extra = 0;
+        for (int j = 0; j < MAX_DOCS; j++) {
+            if (!docs[j].in_use || j == i) continue;
+            extra_pools[num_extra]  = docs[j].parse.doc_symbols;
+            extra_counts[num_extra] = docs[j].parse.num_doc_symbols;
+            extra_uris[num_extra]   = docs[j].uri;
+            num_extra++;
+        }
+
+        revalidate_dep_refs(&docs[i].parse,
+                            extra_pools, extra_counts, extra_uris,
+                            num_extra);
+        publish_diagnostics(docs[i].uri, &docs[i].parse);
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    Handlers
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -209,7 +244,7 @@ static void handle_didopen(cJSON *id, cJSON *params) {
     docs[i].text   = strdup(text);
     docs[i].parse  = parse(text);
 
-    publish_diagnostics(uri, &docs[i].parse);
+    revalidate_all_docs();
 }
 
 static void handle_didchange(cJSON *params) {
@@ -236,7 +271,7 @@ static void handle_didchange(cJSON *params) {
     d->text = strdup(text);
     parse_result_free(&d->parse);
     d->parse = parse(text);
-    publish_diagnostics(uri, &d->parse);
+    revalidate_all_docs();
 }
 
 static void handle_didclose(cJSON *params) {
@@ -249,10 +284,13 @@ static void handle_didclose(cJSON *params) {
     Document *d = doc_find(uri);
     if (!d) return;
 
-    /* Publish empty diagnostics to clear client-side errors */
+    /* Publish empty diagnostics to clear client-side errors for the closed file */
     ParseResult empty = {0};
     publish_diagnostics(uri, &empty);
     doc_free(d);
+
+    /* Revalidate remaining docs — the closed file's symbols are no longer available */
+    revalidate_all_docs();
 }
 
 static cJSON *handle_document_symbol(cJSON *id, cJSON *params) {

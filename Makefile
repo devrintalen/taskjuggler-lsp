@@ -51,19 +51,8 @@ LEXTEST_SRC = tools/lexer_test.c
 $(LEXTEST_BIN): $(GEN_HDR) $(GEN_LEX) $(LEXTEST_SRC)
 	$(CC) $(CFLAGS) -Wno-unused-function -o $@ $(LEXTEST_SRC) $(GEN_LEX)
 
-# ── Standalone grammar/parser test ───────────────────────────────────────── #
-
-GRAMTEST_BIN = grammar-test
-GRAMTEST_SRC = tools/grammar_test.c
-GRAMTEST_OBJ = src/parser.o src/diagnostics.o $(GEN_LEX:.c=.o) $(GEN_GRAM:.c=.o)
-
-# Links the full lex+bison pipeline but not the LSP server.
-$(GRAMTEST_BIN): $(GEN_HDR) $(GRAMTEST_OBJ) $(GRAMTEST_SRC)
-	$(CC) $(CFLAGS) -Wno-unused-function -o $@ $(GRAMTEST_SRC) $(GRAMTEST_OBJ) $(LDFLAGS)
-
 clean:
 	rm -f $(OBJ) $(BIN) $(GEN_LEX) $(GEN_GRAM) $(GEN_HDR)
 	rm -f $(LEXTEST_BIN) tools/lexer_test.o
-	rm -f $(GRAMTEST_BIN) tools/grammar_test.o
 
-.PHONY: all clean lexer-test grammar-test
+.PHONY: all clean lexer-test
