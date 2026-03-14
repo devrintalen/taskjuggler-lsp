@@ -29,6 +29,7 @@
 #include "semantic_tokens.h"
 #include "workspace_symbol.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -72,6 +73,48 @@ static void doc_free(Document *d) {
     free(d->text);
     parse_result_free(&d->parse);
     memset(d, 0, sizeof(*d));
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Server-to-client messaging
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+static void send_message(const char *json_text) {
+    printf("Content-Length: %zu\r\n\r\n%s", strlen(json_text), json_text);
+    fflush(stdout);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   File I/O helpers
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Convert a file:// URI to a filesystem path.  Returns a heap-allocated
+ * copy of the path portion (after "file://"), or NULL if the URI does not
+ * use the file scheme.  Caller must free.
+ */
+static char *uri_to_path(const char *uri) {
+    if (!uri || strncmp(uri, "file://", 7) != 0) return NULL;
+    return strdup(uri + 7);
+}
+
+/*
+ * Read an entire file into a heap-allocated, NUL-terminated string.
+ * Returns NULL on any error.  Caller must free.
+ */
+static char *read_file(const char *path) {
+    FILE *file = fopen(path, "r");
+    if (!file) return NULL;
+    if (fseek(file, 0, SEEK_END) != 0) { fclose(file); return NULL; }
+    long size = ftell(file);
+    if (size < 0) { fclose(file); return NULL; }
+    rewind(file);
+    char *buffer = malloc((size_t)size + 1);
+    if (!buffer) { fclose(file); return NULL; }
+    size_t read_count = fread(buffer, 1, (size_t)size, file);
+    buffer[read_count] = '\0';
+    fclose(file);
+    return buffer;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -212,6 +255,103 @@ static cJSON *handle_initialize(cJSON *id, cJSON *params) {
 
 static cJSON *handle_shutdown(cJSON *id) {
     return make_response(id, cJSON_CreateNull());
+}
+
+/*
+ * Send client/registerCapability to ask the client to watch all .tjp and
+ * .tji files in the workspace.  The server will then receive
+ * workspace/didChangeWatchedFiles whenever those files change on disk.
+ */
+static void handle_initialized(void) {
+    cJSON *watcher_tjp = cJSON_CreateObject();
+    cJSON_AddStringToObject(watcher_tjp, "globPattern", "**/*.tjp");
+    cJSON *watcher_tji = cJSON_CreateObject();
+    cJSON_AddStringToObject(watcher_tji, "globPattern", "**/*.tji");
+    cJSON *watchers = cJSON_CreateArray();
+    cJSON_AddItemToArray(watchers, watcher_tjp);
+    cJSON_AddItemToArray(watchers, watcher_tji);
+
+    cJSON *register_options = cJSON_CreateObject();
+    cJSON_AddItemToObject(register_options, "watchers", watchers);
+
+    cJSON *registration = cJSON_CreateObject();
+    cJSON_AddStringToObject(registration, "id", "file-watcher");
+    cJSON_AddStringToObject(registration, "method",
+                            "workspace/didChangeWatchedFiles");
+    cJSON_AddItemToObject(registration, "registerOptions", register_options);
+
+    cJSON *registrations = cJSON_CreateArray();
+    cJSON_AddItemToArray(registrations, registration);
+
+    cJSON *params = cJSON_CreateObject();
+    cJSON_AddItemToObject(params, "registrations", registrations);
+
+    cJSON *request = cJSON_CreateObject();
+    cJSON_AddStringToObject(request, "jsonrpc", "2.0");
+    cJSON_AddStringToObject(request, "id", "watcher-reg");
+    cJSON_AddStringToObject(request, "method", "client/registerCapability");
+    cJSON_AddItemToObject(request, "params", params);
+
+    char *text = cJSON_PrintUnformatted(request);
+    cJSON_Delete(request);
+    send_message(text);
+    cJSON_free(text);
+}
+
+/*
+ * Handle workspace/didChangeWatchedFiles.
+ *
+ * The LSP spec defines three change types:
+ *   1 = Created, 2 = Changed, 3 = Deleted
+ *
+ * For Created and Changed: read the file from disk and update (or add) it
+ * in the document store, then re-parse.  For Deleted: remove the document
+ * from the store.  In all cases, revalidate_all_docs() is called so that
+ * cross-file dependency diagnostics are kept up to date.
+ */
+static void handle_did_change_watched_files(cJSON *params) {
+    cJSON *changes = cJSON_GetObjectItemCaseSensitive(params, "changes");
+    if (!changes || !cJSON_IsArray(changes)) return;
+
+    int changed = 0;
+
+    cJSON *event;
+    cJSON_ArrayForEach(event, changes) {
+        const char *uri  = json_str(event, "uri");
+        cJSON *type_item = cJSON_GetObjectItemCaseSensitive(event, "type");
+        if (!uri || !type_item || !cJSON_IsNumber(type_item)) continue;
+        int type = (int)type_item->valuedouble;
+
+        if (type == 3) {
+            /* Deleted — remove from store and clear client-side diagnostics */
+            Document *document = doc_find(uri);
+            if (document) {
+                ParseResult empty = {0};
+                publish_diagnostics(uri, &empty);
+                doc_free(document);
+                changed = 1;
+            }
+        } else {
+            /* Created (1) or Changed (2) — read from disk and (re-)parse */
+            char *path = uri_to_path(uri);
+            if (!path) continue;
+            char *text = read_file(path);
+            free(path);
+            if (!text) continue;
+
+            Document *document = doc_find(uri);
+            if (!document) document = doc_alloc(uri);
+            if (!document) { free(text); continue; }
+
+            free(document->text);
+            document->text = text;
+            parse_result_free(&document->parse);
+            document->parse = parse(text);
+            changed = 1;
+        }
+    }
+
+    if (changed) revalidate_all_docs();
 }
 
 static void handle_didopen(cJSON *id, cJSON *params) {
@@ -512,7 +652,8 @@ char *server_process(const char *json_text) {
         resp = handle_initialize(id_item, params);
 
     } else if (strcmp(m, "initialized") == 0) {
-        /* notification — no response */
+        handle_initialized();
+        /* notification — no response to client */
 
     } else if (strcmp(m, "shutdown") == 0) {
         resp = handle_shutdown(id_item);
@@ -551,6 +692,9 @@ char *server_process(const char *json_text) {
 
     } else if (strcmp(m, "textDocument/completion") == 0) {
         resp = handle_completion(id_item, params);
+
+    } else if (strcmp(m, "workspace/didChangeWatchedFiles") == 0) {
+        handle_did_change_watched_files(params);
 
     } else if (strcmp(m, "workspace/symbol") == 0) {
         resp = handle_workspace_symbol(id_item, params);
