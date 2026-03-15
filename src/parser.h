@@ -21,7 +21,19 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* ── Positions / Ranges ──────────────────────────────────────────────────── */
+/* ── Positions / Ranges ──────────────────────────────────────────────────── *
+ *
+ * Both types are zero-indexed, matching the LSP specification.
+ *
+ * Example: the identifier "spec" in the source line (line 2):
+ *
+ *   task spec "Specification" {
+ *   0123456789
+ *
+ *   LspPos start = { .line = 2, .character = 5 };
+ *   LspPos end   = { .line = 2, .character = 9 };
+ *   LspRange r   = { .start = start, .end = end };
+ */
 
 typedef struct { uint32_t line, character; } LspPos;
 typedef struct { LspPos start, end; } LspRange;
@@ -33,6 +45,18 @@ typedef struct { LspPos start, end; } LspRange;
  * in addition to this header.
  *
  * TK_EOF is bison's EOF marker (always 0) and is not declared in grammar.y.
+ *
+ * Token is used only for values passed between bison grammar rules via the
+ * %union yylval mechanism.  It is not the persistent token store; that is
+ * TokenSpan.  For example, the bison rule for a quoted string:
+ *
+ *   string_rule : TK_STR
+ *                 { $$ = (Token){ .kind  = TK_STR,
+ *                                 .start = @1.start,
+ *                                 .end   = @1.end,
+ *                                 .text  = strdup(yytext) }; }
+ *
+ * After the rule fires, $$ holds the Token; the caller frees .text when done.
  */
 #define TK_EOF 0
 
@@ -57,6 +81,40 @@ void token_free(Token *t);
  * A named declaration (project, task, resource, account, shift) in the
  * document's symbol tree.  Mirrors LSP DocumentSymbol.  Used for
  * textDocument/documentSymbol, completion identifiers, and dep validation.
+ *
+ * name is the human-readable label (the quoted string after the identifier in
+ * TJP).  detail is the short identifier used in dependency paths and cross-
+ * references.  Both are heap-allocated.
+ *
+ * range covers the full declaration including its body; selection_range covers
+ * only the identifier token, which is what the editor highlights on navigation.
+ *
+ * Example TJP input (task at line 0, subtask at line 2):
+ *
+ *   task spec "Specification" {     <- line 0
+ *       task gui "GUI" {}           <- line 2
+ *   }                               <- line 3
+ *
+ * Produces a DocSymbol tree:
+ *
+ *   DocSymbol {
+ *     .name           = "Specification",
+ *     .detail         = "spec",
+ *     .kind           = SK_FUNCTION,
+ *     .range          = { {0,0}, {3,1} },   // full task block
+ *     .selection_range= { {0,5}, {0,9} },   // just "spec"
+ *     .num_children   = 1,
+ *     .children       = [
+ *       DocSymbol {
+ *         .name           = "GUI",
+ *         .detail         = "gui",
+ *         .kind           = SK_FUNCTION,
+ *         .range          = { {2,4}, {2,22} },
+ *         .selection_range= { {2,9}, {2,12} },
+ *         .num_children   = 0,
+ *       }
+ *     ]
+ *   }
  */
 typedef struct DocSymbol DocSymbol;
 struct DocSymbol {
@@ -74,6 +132,40 @@ struct DocSymbol {
  *
  * A raw dependency reference captured during parsing.  Stored in ParseResult
  * for cross-file revalidation by diagnostics.c:revalidate_dep_refs().
+ *
+ * bang_count counts leading '!' tokens, which shift the lookup root up the
+ * scope chain.  segs[] is the dot-split path after the bangs.  scope[] is a
+ * snapshot of the enclosing task identifier chain at the point of capture, used
+ * by the validator to reproduce the relative-lookup algorithm at any time.
+ *
+ * Lookup rule: given scope depth k = scope_n and bang_count n,
+ *   n == 0  ->  global (root-level) lookup
+ *   n >= 1  ->  start at scope[0..k-n-1] (navigate n levels up), then
+ *               search children for segs[0], then segs[1], etc.
+ *   n > k   ->  invalid (too many bangs)
+ *
+ * Example TJP input (cursor task path = ["spec", "gui"], k=2):
+ *
+ *   task spec "Specification" {
+ *       task database "Database" {}
+ *       task gui "GUI" {
+ *           depends !database       <- line 3, characters 12-21
+ *       }
+ *   }
+ *
+ * Produces:
+ *
+ *   DepRef {
+ *     .bang_count = 1,
+ *     .segs       = ["database"],
+ *     .nseg       = 1,
+ *     .scope      = ["spec", "gui"],
+ *     .scope_n    = 2,
+ *     .range      = { {3,12}, {3,21} },  // "!database"
+ *   }
+ *
+ * The validator resolves this as: navigate to scope[0..0] = ["spec"], then
+ * find "database" among spec's children -> spec.database. Valid.
  */
 typedef struct {
     int       bang_count;
@@ -89,7 +181,30 @@ typedef struct {
 #define DIAG_ERROR   1
 #define DIAG_WARNING 2
 
-/* ── Diagnostic ──────────────────────────────────────────────────────────── */
+/* ── Diagnostic ──────────────────────────────────────────────────────────── *
+ *
+ * Represents a single error or warning to be reported to the editor.
+ * severity uses the LSP DiagnosticSeverity values (DIAG_ERROR=1, DIAG_WARNING=2).
+ *
+ * Two sources of diagnostics are stored together in ParseResult, distinguished
+ * by dep_diag_start:
+ *   [0 .. dep_diag_start-1]  ->  syntax errors from the bison parser
+ *   [dep_diag_start .. end]  ->  semantic errors from dep validation
+ *
+ * Example TJP input with an unresolved dependency:
+ *
+ *   task gui "GUI" {
+ *       depends missing_task       <- line 1, characters 16-28
+ *   }
+ *
+ * Produces:
+ *
+ *   Diagnostic {
+ *     .range    = { {1,16}, {1,28} },
+ *     .severity = DIAG_ERROR,
+ *     .message  = "Unknown task: missing_task",
+ *   }
+ */
 
 typedef struct {
     LspRange range;
@@ -113,6 +228,22 @@ typedef struct {
  * text is heap-allocated (strdup of yytext); NULL only for tokens where
  * the text is never needed (e.g. comments).  Caller must not modify it;
  * parse_result_free() frees it.
+ *
+ * Example TJP input (line 0):
+ *
+ *   task spec "Specification" {
+ *
+ * Produces this sequence in tok_spans[]:
+ *
+ *   [0] { .token_kind=KW_TASK, .start={0,0},  .end={0,4},  .text="task"            }
+ *   [1] { .token_kind=TK_IDENT,.start={0,5},  .end={0,9},  .text="spec"            }
+ *   [2] { .token_kind=TK_STR,  .start={0,10}, .end={0,25}, .text="Specification"   }
+ *   [3] { .token_kind=TK_LBRACE,.start={0,26},.end={0,27}, .text="{"               }
+ *
+ * Feature code binary-searches or scans this array by position.  For example,
+ * hover at character 6 lands in [1], so the server knows the cursor is on an
+ * identifier.  Completion at character 27 (after '{') scans backwards through
+ * the array to find the enclosing keyword context.
  */
 typedef struct {
     int    token_kind;
@@ -133,6 +264,24 @@ typedef struct {
  * target_uri is heap-allocated and is NULL when the target is in the same
  * document as the source.  For cross-file references it holds the URI of
  * the file that defines the target symbol.
+ *
+ * Example TJP input:
+ *
+ *   task database "Database" {}     <- line 0; "database" is at {0,5}..{0,13}
+ *   task gui "GUI" {
+ *       depends database            <- line 2; "database" is at {2,16}..{2,24}
+ *   }
+ *
+ * After validate_dep_refs() resolves the dependency, it emits:
+ *
+ *   DefinitionLink {
+ *     .source     = { {2,16}, {2,24} },   // range of "database" in depends expr
+ *     .target     = { {0,5},  {0,13} },   // selection_range of the task symbol
+ *     .target_uri = NULL,                  // same document
+ *   }
+ *
+ * When the user invokes go-to-definition with the cursor anywhere in source,
+ * the server finds this link and jumps the editor to target.
  */
 typedef struct {
     LspRange  source;     /* range of the reference expression */
@@ -140,7 +289,47 @@ typedef struct {
     char     *target_uri; /* heap-allocated; NULL means same document */
 } DefinitionLink;
 
-/* ── ParseResult ─────────────────────────────────────────────────────────── */
+/* ── ParseResult ─────────────────────────────────────────────────────────── *
+ *
+ * The complete output of a single parse() call.  All dynamic arrays are
+ * owned by this struct and freed by parse_result_free().
+ *
+ * Example TJP input:
+ *
+ *   task database "Database" {}
+ *   task gui "GUI" {
+ *       depends database
+ *   }
+ *
+ * After parse() and validate_dep_refs():
+ *
+ *   ParseResult {
+ *     .num_diagnostics = 0,          // no errors
+ *     .dep_diag_start  = 0,
+ *
+ *     .doc_symbols = [               // two top-level tasks
+ *       DocSymbol { .detail="database", ... },
+ *       DocSymbol { .detail="gui", ... },
+ *     ],
+ *     .num_doc_symbols = 2,
+ *
+ *     .tok_spans = [                 // every token in the file, in order
+ *       {KW_TASK,"task",...}, {TK_IDENT,"database",...}, ...
+ *       {KW_DEPENDS,"depends",...}, {TK_IDENT,"database",...}, ...
+ *     ],
+ *     .num_tok_spans = N,
+ *
+ *     .def_links = [                 // one resolved dependency
+ *       DefinitionLink { .source={2,16..24}, .target={0,5..13}, .target_uri=NULL },
+ *     ],
+ *     .num_def_links = 1,
+ *
+ *     .raw_dep_refs = [              // same dep, stored for revalidation
+ *       DepRef { .bang_count=0, .segs=["database"], .scope=["gui"], ... },
+ *     ],
+ *     .num_raw_dep_refs = 1,
+ *   }
+ */
 
 typedef struct {
     Diagnostic     *diagnostics;

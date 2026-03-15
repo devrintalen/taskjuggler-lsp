@@ -34,6 +34,97 @@
 #include <string.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   Data flow overview
+   ═══════════════════════════════════════════════════════════════════════════
+ *
+ * INBOUND (editor → server)
+ * ─────────────────────────
+ * The editor sends JSON-RPC messages over stdin.  main() reads each message,
+ * strips the Content-Length header, and calls server_process(json_text).
+ * server_process() parses the JSON, dispatches to the matching handle_*
+ * function, serialises the returned cJSON response with
+ * cJSON_PrintUnformatted(), and returns the string to main() which calls
+ * lsp_send_message() to write it to stdout.
+ *
+ * DOCUMENT LIFECYCLE
+ * ──────────────────
+ * Every open document is stored as a Document in the static docs[] array.
+ * The Document holds the raw source text and a fully populated ParseResult.
+ *
+ * On didOpen / didChange / didChangeWatchedFiles (created or changed):
+ *
+ *   source text
+ *       │
+ *       ▼
+ *   parse(text)                  ← parser.c entry point
+ *       │  runs the flex lexer and bison parser together:
+ *       │    lexer  →  tok_spans[]        (every token, in order)
+ *       │    grammar→  doc_symbols[]      (task/resource/… tree)
+ *       │    grammar→  raw_dep_refs[]     (unresolved dep expressions)
+ *       │    grammar→  diagnostics[0..dep_diag_start-1]  (syntax errors)
+ *       ▼
+ *   ParseResult (stored in Document.parse)
+ *       │
+ *       ▼
+ *   revalidate_all_docs()        ← called for every open document
+ *       │  for each document, gathers doc_symbols[] from all *other* open
+ *       │  documents as extra symbol pools, then calls:
+ *       │
+ *       ├─► revalidate_dep_refs(&parse, extra_pools, …)   ← diagnostics.c
+ *       │       resolves each raw_dep_ref against the local + extra pools:
+ *       │         success → appends a DefinitionLink to def_links[]
+ *       │         failure → appends an error Diagnostic to diagnostics[]
+ *       │                   (starting at dep_diag_start)
+ *       │
+ *       └─► publish_diagnostics(uri, &parse)              ← diagnostics.c
+ *               serialises diagnostics[] and pushes a
+ *               textDocument/publishDiagnostics notification to the editor
+ *
+ * On didClose / file deleted:
+ *   parse_result_free() is called to release the ParseResult, the Document
+ *   slot is cleared, and revalidate_all_docs() runs so that references from
+ *   other files to symbols in the closed file are re-checked.
+ *
+ * QUERY DISPATCH — which ParseResult field feeds each feature
+ * ───────────────────────────────────────────────────────────
+ *
+ *   ParseResult field    Feature handlers that consume it
+ *   ─────────────────    ───────────────────────────────────────────────────
+ *   tok_spans[]          hover            → active_keyword_at()
+ *                        signature_help   → active_context()
+ *                        completion       → build_completions_json()
+ *                        folding_range    → build_folding_ranges_json()
+ *                        semantic_tokens  → build_semantic_tokens_json()
+ *
+ *   doc_symbols[]        document_symbol  → build_document_symbols_json()
+ *                        workspace_symbol → collect_workspace_symbols()
+ *                        completion       → build_completions_json() (IDs)
+ *                        references       → build_references_json()
+ *
+ *   def_links[]          definition       → build_definition_json()
+ *                        references       → build_references_json()
+ *
+ *   diagnostics[]        (pushed proactively via publish_diagnostics;
+ *                         never queried on demand)
+ *
+ *   raw_dep_refs[]       (consumed only by revalidate_dep_refs;
+ *                         not read by any query handler)
+ *
+ * OUTBOUND (server → editor)
+ * ──────────────────────────
+ * Query handlers return a heap-allocated cJSON* response built by
+ * make_response(id, result).  server_process() serialises it to a string and
+ * returns it to main(), which writes:
+ *
+ *   Content-Length: <N>\r\n\r\n<json>
+ *
+ * to stdout via lsp_send_message().  Diagnostic push notifications follow
+ * the same path but are sent directly from publish_diagnostics() without
+ * going through the response/id machinery.
+ *
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════════════════════════════
    Document store
    ═══════════════════════════════════════════════════════════════════════════ */
 
