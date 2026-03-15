@@ -1,0 +1,65 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/sample.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "project p \"P\" 2024-01-01 +3m {\n}\ntask backend \"Backend\" {\n}\ntask frontend \"Frontend\" {\n  depends backend\n}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didChange",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/sample.tjp",
+        "version": 2
+      },
+      "contentChanges": [
+        {
+          "text": "project p \"P\" 2024-01-01 +3m {\n}\ntask backend \"Backend\" {\n}\ntask frontend \"Frontend\" {\n  depends nonexistent\n}\n"
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didChange",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/sample.tjp",
+        "version": 3
+      },
+      "contentChanges": [
+        {
+          "text": "project p \"P\" 2024-01-01 +3m {\n}\ntask backend \"Backend\" {\n}\ntask frontend \"Frontend\" {\n  depends backend\n}\n"
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "shutdown",
+    "params": {}
+  }
+]
