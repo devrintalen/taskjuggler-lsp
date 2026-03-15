@@ -24,6 +24,21 @@ import sys
 import threading
 
 
+# ── ANSI color helpers ────────────────────────────────────────────────────────
+
+def _use_color():
+    return sys.stdout.isatty()
+
+def _c(code, text):
+    return f"\033[{code}m{text}\033[0m" if _use_color() else text
+
+def green(t):  return _c("32",   t)
+def red(t):    return _c("31",   t)
+def yellow(t): return _c("33",   t)
+def bold(t):   return _c("1",    t)
+def dim(t):    return _c("2",    t)
+
+
 def frame_message(message):
     """Encode a dict as an LSP-framed message (bytes)."""
     body = json.dumps(message, separators=(',', ':')).encode('utf-8')
@@ -108,7 +123,7 @@ def format_json(obj):
 
 
 def diff_output(expected, actual):
-    """Return a unified diff string, or empty string if equal."""
+    """Return a colored unified diff string, or empty string if equal."""
     expected_lines = format_json(expected).splitlines(keepends=True)
     actual_lines = format_json(actual).splitlines(keepends=True)
     diff = list(difflib.unified_diff(
@@ -116,7 +131,19 @@ def diff_output(expected, actual):
         fromfile='expected.json',
         tofile='actual output',
     ))
-    return ''.join(diff)
+    if not diff:
+        return ''
+    result = []
+    for line in diff:
+        if line.startswith('+') and not line.startswith('+++'):
+            result.append(green(line))
+        elif line.startswith('-') and not line.startswith('---'):
+            result.append(red(line))
+        elif line.startswith('@@'):
+            result.append(yellow(line))
+        else:
+            result.append(dim(line))
+    return ''.join(result)
 
 
 def run_test_case(server_binary, case_dir, record):
@@ -126,7 +153,7 @@ def run_test_case(server_binary, case_dir, record):
     case_name = os.path.basename(case_dir)
 
     if not os.path.isfile(input_path):
-        print(f"  SKIP  {case_name}: no input.json")
+        print(f"  {yellow('SKIP')}  {case_name}  {dim('no input.json')}")
         return True
 
     with open(input_path, 'r') as input_file:
@@ -138,11 +165,11 @@ def run_test_case(server_binary, case_dir, record):
         with open(expected_path, 'w') as expected_file:
             json.dump(actual, expected_file, indent=2)
             expected_file.write('\n')
-        print(f"  RECORDED  {case_name}  ({len(actual)} message(s))")
+        print(f"  {yellow('RECORDED')}  {case_name}  {dim(f'({len(actual)} message(s))')}")
         return True
 
     if not os.path.isfile(expected_path):
-        print(f"  FAIL  {case_name}: no expected.json (run with --record to create it)")
+        print(f"  {red('FAIL')}  {case_name}  {dim('no expected.json (run with --record to create it)')}")
         return False
 
     with open(expected_path, 'r') as expected_file:
@@ -150,10 +177,10 @@ def run_test_case(server_binary, case_dir, record):
 
     diff = diff_output(expected, actual)
     if not diff:
-        print(f"  PASS  {case_name}")
+        print(f"  {green('✓')}  {case_name}")
         return True
 
-    print(f"  FAIL  {case_name}")
+    print(f"  {red('✗')}  {bold(case_name)}")
     print(diff)
     return False
 
@@ -208,9 +235,15 @@ def main():
 
     total = passed + failed
     if args.record:
-        print(f"\nRecorded {total} test case(s).")
+        print(f"\n{dim('─' * 40)}")
+        print(f"  Recorded {bold(str(total))} test case(s).")
     else:
-        print(f"\n{passed}/{total} passed.")
+        print(f"\n{dim('─' * 40)}")
+        if failed:
+            summary = f"  {green(str(passed))} passed · {red(str(failed))} failed"
+        else:
+            summary = f"  {green(bold(str(passed)))} passed"
+        print(summary)
         if failed:
             sys.exit(1)
 
