@@ -157,6 +157,7 @@ static int emit_kw_mfrag_text(int code, const char *text) {
 %x BLOCK_COMMENT
 %x SCISSORS
 %x DQUOTE
+%x SQUOTE
 
 %%
 
@@ -201,6 +202,19 @@ static int emit_kw_mfrag_text(int code, const char *text) {
                   BEGIN(INITIAL); return emit_plain(TK_ERROR); }
     \\[^\n]     { STR_APPEND(yytext, yyleng); }
     [^\"\\\n]+  { STR_APPEND(yytext, yyleng); }
+    <<EOF>>     { BEGIN(INITIAL); return emit_plain(TK_ERROR); }
+}
+
+    /* Single-quoted string: '...' — valid in TJP as an alternative to "..." */
+\'              { mfrag_sl = tok_sl; mfrag_sc = tok_sc;
+                  STR_RESET(); STR_APPEND("'", 1); BEGIN(SQUOTE); }
+<SQUOTE>{
+    \'          { STR_APPEND("'", 1); STR_FINISH();
+                  BEGIN(INITIAL); return emit_kw_mfrag_text(TK_STR, str_buf); }
+    \n          { yycolumn = 0;
+                  BEGIN(INITIAL); return emit_plain(TK_ERROR); }
+    \\[^\n]     { STR_APPEND(yytext, yyleng); }
+    [^\'\\\n]+  { STR_APPEND(yytext, yyleng); }
     <<EOF>>     { BEGIN(INITIAL); return emit_plain(TK_ERROR); }
 }
 
