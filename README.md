@@ -65,18 +65,19 @@ make lexer-test
 ./lexer-test test/tutorial.tjp
 ```
 
-To build and run the standalone grammar test tool:
-
-```sh
-make grammar-test
-./grammar-test test/tutorial.tjp
-```
-
-To run the unit tests using the Python test harness:
+To run the LSP integration tests:
 
 ```sh
 python3 tools/lsp_test.py --all test/cases ./taskjuggler-lsp
 ```
+
+### Python tools
+
+- **`tools/lsp_test.py`** — Golden-file test harness. Replays a JSON array of LSP messages against the server and compares output to `expected.json`. Pass `--record` to write a new golden file instead of comparing.
+- **`tools/lsp_bench.py`** — Benchmarks the server by replaying a message sequence and reporting per-method round-trip times. Accepts `--iterations`, `--warmup`, and `--methods` options; supports `perf record` via `--perf`.
+- **`tools/lsp_callgrind.py`** — Profiles a single LSP request under Valgrind Callgrind and produces an annotated call tree with inclusive/exclusive instruction counts.
+- **`tools/lsp_log_parse.py`** — Converts an Emacs `lsp-mode` trace log into a JSON message sequence compatible with `lsp_test.py` and `lsp_bench.py`.
+- **`tools/callgrind_parse.py`** — Parses a raw `callgrind.out` file and prints a flat profile and call tree without requiring `callgrind_annotate`.
 
 
 ## Usage
