@@ -69,7 +69,7 @@ $(GEN_GRAM:.c=.o): $(GEN_GRAM)
 LEXTEST_BIN = lexer-test
 LEXTEST_SRC = tools/lexer_test.c
 
-# Links only the generated lexer — no parser, server, or cJSON needed.
+# Links only the generated lexer — no parser, server, or JSON library needed.
 $(LEXTEST_BIN): $(GEN_HDR) $(GEN_LEX) $(LEXTEST_SRC)
 	$(CC) $(CFLAGS) -Wno-unused-function -o $@ $(LEXTEST_SRC) $(GEN_LEX)
 
