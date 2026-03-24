@@ -19,7 +19,7 @@
 #pragma once
 
 #include "parser.h"
-#include <cjson/cJSON.h>
+#include <yyjson.h>
 
 /*
  * Build a Location JSON object for textDocument/definition.
@@ -29,8 +29,9 @@
  *
  *   { "uri": "<uri>", "range": <selection_range of target symbol> }
  *
- * Returns NULL when no definition link covers the cursor position.  The
- * caller is responsible for cJSON_Delete()ing the returned object.
+ * Returns NULL when no definition link covers the cursor position.
+ * Values are allocated in doc; caller owns doc.
  */
-cJSON *build_definition_json(const DefinitionLink *links, int num_links,
-                             LspPos cursor, const char *uri);
+yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
+                                       const DefinitionLink *links, int num_links,
+                                       LspPos cursor, const char *uri);

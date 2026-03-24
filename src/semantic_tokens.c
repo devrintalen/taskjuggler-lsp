@@ -108,16 +108,16 @@ static int classify(int kind, int *out_type, int *out_modifiers) {
 /* Append one five-integer entry to the data array.  Zero-length entries are
  * silently dropped; they arise at the end of a multi-line token when the
  * closing delimiter sits at the very start of a line. */
-static void push_entry(cJSON *data,
+static void push_entry(yyjson_mut_doc *doc, yyjson_mut_val *data,
                         uint32_t delta_line, uint32_t delta_start,
                         uint32_t length,
                         int token_type, int modifiers) {
     if (length == 0) return;
-    cJSON_AddItemToArray(data, cJSON_CreateNumber((double)delta_line));
-    cJSON_AddItemToArray(data, cJSON_CreateNumber((double)delta_start));
-    cJSON_AddItemToArray(data, cJSON_CreateNumber((double)length));
-    cJSON_AddItemToArray(data, cJSON_CreateNumber((double)token_type));
-    cJSON_AddItemToArray(data, cJSON_CreateNumber((double)modifiers));
+    yyjson_mut_arr_add_uint(doc, data, delta_line);
+    yyjson_mut_arr_add_uint(doc, data, delta_start);
+    yyjson_mut_arr_add_uint(doc, data, length);
+    yyjson_mut_arr_add_uint(doc, data, (uint64_t)token_type);
+    yyjson_mut_arr_add_uint(doc, data, (uint64_t)modifiers);
 }
 
 /* Emit one or more data entries for a single token, splitting across source
@@ -129,7 +129,7 @@ static void push_entry(cJSON *data,
  * the source, so the character count up to each '\n' is the highlight length
  * for that line without any further adjustment.
  */
-static void emit_token(cJSON *data,
+static void emit_token(yyjson_mut_doc *doc, yyjson_mut_val *data,
                         uint32_t start_line, uint32_t start_char,
                         uint32_t end_line,   uint32_t end_char,
                         int token_type, int modifiers,
@@ -141,7 +141,7 @@ static void emit_token(cJSON *data,
         uint32_t delta_start = (delta_line == 0)
                                ? start_char - *prev_char
                                : start_char;
-        push_entry(data, delta_line, delta_start,
+        push_entry(doc, data, delta_line, delta_start,
                    end_char - start_char, token_type, modifiers);
         *prev_line = start_line;
         *prev_char = start_char;
@@ -164,7 +164,7 @@ static void emit_token(cJSON *data,
         uint32_t seg_len = nl ? (uint32_t)(nl - p) : (uint32_t)strlen(p);
 
         if (seg_len > 0) {
-            push_entry(data, delta_line, delta_start, seg_len, token_type, modifiers);
+            push_entry(doc, data, delta_line, delta_start, seg_len, token_type, modifiers);
             *prev_line = current_line;
             *prev_char = current_char;
         }
@@ -181,7 +181,7 @@ static void emit_token(cJSON *data,
         uint32_t delta_start = (delta_line == 0)
                                ? current_char - *prev_char
                                : current_char;
-        push_entry(data, delta_line, delta_start, end_char, token_type, modifiers);
+        push_entry(doc, data, delta_line, delta_start, end_char, token_type, modifiers);
         *prev_line = current_line;
         *prev_char = current_char;
     }
@@ -189,8 +189,9 @@ static void emit_token(cJSON *data,
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
-cJSON *build_semantic_tokens_json(const TokenSpan *spans, int num_spans) {
-    cJSON *data = cJSON_CreateArray();
+yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
+                                            const TokenSpan *spans, int num_spans) {
+    yyjson_mut_val *data = yyjson_mut_arr(doc);
     uint32_t prev_line = 0, prev_char = 0;
 
     for (int i = 0; i < num_spans; i++) {
@@ -198,7 +199,7 @@ cJSON *build_semantic_tokens_json(const TokenSpan *spans, int num_spans) {
         int token_type, modifiers;
         if (!classify(s->token_kind, &token_type, &modifiers)) continue;
 
-        emit_token(data,
+        emit_token(doc, data,
                    s->start.line, s->start.character,
                    s->end.line,   s->end.character,
                    token_type, modifiers,
@@ -206,7 +207,7 @@ cJSON *build_semantic_tokens_json(const TokenSpan *spans, int num_spans) {
                    &prev_line, &prev_char);
     }
 
-    cJSON *result = cJSON_CreateObject();
-    cJSON_AddItemToObject(result, "data", data);
+    yyjson_mut_val *result = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, result, "data", data);
     return result;
 }

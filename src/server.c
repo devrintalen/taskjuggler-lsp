@@ -29,6 +29,7 @@
 #include "semantic_tokens.h"
 #include "workspace_symbol.h"
 
+#include <yyjson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -212,28 +213,39 @@ static char *read_file(const char *path) {
    JSON helpers
    ═══════════════════════════════════════════════════════════════════════════ */
 
-static LspPos json_to_pos(const cJSON *obj) {
+static LspPos json_to_pos(yyjson_val *obj) {
     LspPos p = {0};
     if (!obj) return p;
-    cJSON *ln = cJSON_GetObjectItemCaseSensitive(obj, "line");
-    cJSON *ch = cJSON_GetObjectItemCaseSensitive(obj, "character");
-    if (cJSON_IsNumber(ln)) p.line      = (uint32_t)ln->valuedouble;
-    if (cJSON_IsNumber(ch)) p.character = (uint32_t)ch->valuedouble;
+    yyjson_val *ln = yyjson_obj_get(obj, "line");
+    yyjson_val *ch = yyjson_obj_get(obj, "character");
+    if (ln && yyjson_is_num(ln)) p.line      = (uint32_t)yyjson_get_num(ln);
+    if (ch && yyjson_is_num(ch)) p.character = (uint32_t)yyjson_get_num(ch);
     return p;
 }
 
-static const char *json_str(const cJSON *obj, const char *key) {
-    cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
-    return (item && cJSON_IsString(item)) ? item->valuestring : NULL;
+static const char *json_str(yyjson_val *obj, const char *key) {
+    if (!obj) return NULL;
+    yyjson_val *item = yyjson_obj_get(obj, key);
+    return (item && yyjson_is_str(item)) ? yyjson_get_str(item) : NULL;
 }
 
-/* Build a success response. Takes ownership of result. */
-static cJSON *make_response(cJSON *id, cJSON *result) {
-    cJSON *resp = cJSON_CreateObject();
-    cJSON_AddStringToObject(resp, "jsonrpc", "2.0");
-    if (id) cJSON_AddItemToObject(resp, "id", cJSON_Duplicate(id, 1));
-    else    cJSON_AddNullToObject(resp, "id");
-    cJSON_AddItemToObject(resp, "result", result);
+/* Copy an immutable id value into doc as a mutable value. */
+static yyjson_mut_val *copy_id(yyjson_mut_doc *doc, yyjson_val *id) {
+    if (!id || yyjson_is_null(id)) return yyjson_mut_null(doc);
+    if (yyjson_is_str(id))  return yyjson_mut_str(doc, yyjson_get_str(id));
+    if (yyjson_is_uint(id)) return yyjson_mut_uint(doc, yyjson_get_uint(id));
+    if (yyjson_is_sint(id)) return yyjson_mut_int(doc, yyjson_get_int(id));
+    if (yyjson_is_real(id)) return yyjson_mut_real(doc, yyjson_get_real(id));
+    return yyjson_mut_null(doc);
+}
+
+/* Build a success response envelope around result. */
+static yyjson_mut_val *make_response(yyjson_mut_doc *doc, yyjson_val *id,
+                                      yyjson_mut_val *result) {
+    yyjson_mut_val *resp = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, resp, "jsonrpc", "2.0");
+    yyjson_mut_obj_add_val(doc, resp, "id", copy_id(doc, id));
+    yyjson_mut_obj_add_val(doc, resp, "result", result);
     return resp;
 }
 
@@ -276,76 +288,74 @@ static void revalidate_all_docs(void) {
    Handlers
    ═══════════════════════════════════════════════════════════════════════════ */
 
-static cJSON *handle_initialize(cJSON *id, cJSON *params) {
+static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
+                                          yyjson_val *params) {
     (void)params;
 
     // TODO none of the client capabilities are checked here.
 
     /* Server info */
-    cJSON *server_info = cJSON_CreateObject();
-    cJSON *sn = cJSON_CreateArray();
+    yyjson_mut_val *server_info = yyjson_mut_obj(doc);
+    yyjson_mut_val *sn = yyjson_mut_arr(doc);
     // TODO add server version, with program version macro so it is always up to date
-    cJSON_AddItemToArray(sn, cJSON_CreateString("taskjuggler-lsp"));
-    cJSON_AddItemToObject(server_info, "name", sn);
+    yyjson_mut_arr_add_str(doc, sn, "taskjuggler-lsp");
+    yyjson_mut_obj_add_val(doc, server_info, "name", sn);
 
     /* Completion options */
-    cJSON *comp_triggers = cJSON_CreateArray();
-    cJSON_AddItemToArray(comp_triggers, cJSON_CreateString(","));
-    cJSON_AddItemToArray(comp_triggers, cJSON_CreateString(" "));
-    cJSON_AddItemToArray(comp_triggers, cJSON_CreateString("!"));
-    cJSON *comp_opts = cJSON_CreateObject();
-    cJSON_AddItemToObject(comp_opts, "triggerCharacters", comp_triggers);
-    cJSON_AddBoolToObject(comp_opts,  "resolveProvider", 0);
+    yyjson_mut_val *comp_triggers = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_str(doc, comp_triggers, ",");
+    yyjson_mut_arr_add_str(doc, comp_triggers, " ");
+    yyjson_mut_arr_add_str(doc, comp_triggers, "!");
+    yyjson_mut_val *comp_opts = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc,  comp_opts, "triggerCharacters", comp_triggers);
+    yyjson_mut_obj_add_bool(doc, comp_opts, "resolveProvider", false);
 
     /* Signature help */
-    cJSON *sig_triggers = cJSON_CreateArray();
-    cJSON_AddItemToArray(sig_triggers, cJSON_CreateString(" "));
-    cJSON *sig_opts = cJSON_CreateObject();
-    cJSON_AddItemToObject(sig_opts, "triggerCharacters", sig_triggers);
+    yyjson_mut_val *sig_triggers = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_str(doc, sig_triggers, " ");
+    yyjson_mut_val *sig_opts = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, sig_opts, "triggerCharacters", sig_triggers);
 
     /* Capabilities */
-    cJSON *caps = cJSON_CreateObject();
-    cJSON *tds = cJSON_CreateObject();
-    cJSON_AddNumberToObject(tds, "change", 1); /* TextDocumentSyncKind.Full */
-    cJSON *open_close = cJSON_CreateBool(1);
-    cJSON_AddItemToObject(tds, "openClose", open_close);
+    yyjson_mut_val *caps = yyjson_mut_obj(doc);
+    yyjson_mut_val *tds = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_uint(doc, tds, "change", 1); /* TextDocumentSyncKind.Full */
+    yyjson_mut_obj_add_bool(doc, tds, "openClose", true);
     /* Semantic tokens */
-    cJSON *sem_types = cJSON_CreateArray();
+    yyjson_mut_val *sem_types = yyjson_mut_arr(doc);
     for (int i = 0; i < num_semantic_token_types; i++)
-        cJSON_AddItemToArray(sem_types,
-                             cJSON_CreateString(semantic_token_type_names[i]));
-    cJSON *sem_mods = cJSON_CreateArray();
+        yyjson_mut_arr_add_str(doc, sem_types, semantic_token_type_names[i]);
+    yyjson_mut_val *sem_mods = yyjson_mut_arr(doc);
     for (int i = 0; i < num_semantic_token_modifiers; i++)
-        cJSON_AddItemToArray(sem_mods,
-                             cJSON_CreateString(semantic_token_modifier_names[i]));
-    cJSON *sem_legend = cJSON_CreateObject();
-    cJSON_AddItemToObject(sem_legend, "tokenTypes",     sem_types);
-    cJSON_AddItemToObject(sem_legend, "tokenModifiers", sem_mods);
-    cJSON *sem_opts = cJSON_CreateObject();
-    cJSON_AddItemToObject(sem_opts, "legend", sem_legend);
-    cJSON_AddBoolToObject(sem_opts,  "full",  1);
+        yyjson_mut_arr_add_str(doc, sem_mods, semantic_token_modifier_names[i]);
+    yyjson_mut_val *sem_legend = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, sem_legend, "tokenTypes",     sem_types);
+    yyjson_mut_obj_add_val(doc, sem_legend, "tokenModifiers", sem_mods);
+    yyjson_mut_val *sem_opts = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc,  sem_opts, "legend", sem_legend);
+    yyjson_mut_obj_add_bool(doc, sem_opts, "full",   true);
     /* TODO: add "range": true when textDocument/semanticTokens/range is implemented */
 
-    cJSON_AddItemToObject(caps, "textDocumentSync",          tds);
-    cJSON_AddBoolToObject(caps, "documentSymbolProvider",    1);
-    cJSON_AddBoolToObject(caps, "foldingRangeProvider",      1);
-    cJSON_AddBoolToObject(caps, "hoverProvider",             1);
-    cJSON_AddBoolToObject(caps, "definitionProvider",        1);
-    cJSON_AddBoolToObject(caps, "referencesProvider",        1);
-    cJSON_AddItemToObject(caps, "signatureHelpProvider",     sig_opts);
-    cJSON_AddItemToObject(caps, "completionProvider",        comp_opts);
-    cJSON_AddItemToObject(caps, "semanticTokensProvider",    sem_opts);
-    cJSON_AddBoolToObject(caps, "workspaceSymbolProvider",   1);
+    yyjson_mut_obj_add_val(doc,  caps, "textDocumentSync",          tds);
+    yyjson_mut_obj_add_bool(doc, caps, "documentSymbolProvider",    true);
+    yyjson_mut_obj_add_bool(doc, caps, "foldingRangeProvider",      true);
+    yyjson_mut_obj_add_bool(doc, caps, "hoverProvider",             true);
+    yyjson_mut_obj_add_bool(doc, caps, "definitionProvider",        true);
+    yyjson_mut_obj_add_bool(doc, caps, "referencesProvider",        true);
+    yyjson_mut_obj_add_val(doc,  caps, "signatureHelpProvider",     sig_opts);
+    yyjson_mut_obj_add_val(doc,  caps, "completionProvider",        comp_opts);
+    yyjson_mut_obj_add_val(doc,  caps, "semanticTokensProvider",    sem_opts);
+    yyjson_mut_obj_add_bool(doc, caps, "workspaceSymbolProvider",   true);
 
-    cJSON *result = cJSON_CreateObject();
-    cJSON_AddItemToObject(result, "capabilities", caps);
-    cJSON_AddItemToObject(result, "serverInfo",   server_info);
+    yyjson_mut_val *result = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, result, "capabilities", caps);
+    yyjson_mut_obj_add_val(doc, result, "serverInfo",   server_info);
 
-    return make_response(id, result);
+    return make_response(doc, id, result);
 }
 
-static cJSON *handle_shutdown(cJSON *id) {
-    return make_response(id, cJSON_CreateNull());
+static yyjson_mut_val *handle_shutdown(yyjson_mut_doc *doc, yyjson_val *id) {
+    return make_response(doc, id, yyjson_mut_null(doc));
 }
 
 /*
@@ -354,39 +364,41 @@ static cJSON *handle_shutdown(cJSON *id) {
  * workspace/didChangeWatchedFiles whenever those files change on disk.
  */
 static void handle_initialized(void) {
-    cJSON *watcher_tjp = cJSON_CreateObject();
-    cJSON_AddStringToObject(watcher_tjp, "globPattern", "**/*.tjp");
-    cJSON *watcher_tji = cJSON_CreateObject();
-    cJSON_AddStringToObject(watcher_tji, "globPattern", "**/*.tji");
-    cJSON *watchers = cJSON_CreateArray();
-    cJSON_AddItemToArray(watchers, watcher_tjp);
-    cJSON_AddItemToArray(watchers, watcher_tji);
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
 
-    cJSON *register_options = cJSON_CreateObject();
-    cJSON_AddItemToObject(register_options, "watchers", watchers);
+    yyjson_mut_val *watcher_tjp = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, watcher_tjp, "globPattern", "**/*.tjp");
+    yyjson_mut_val *watcher_tji = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, watcher_tji, "globPattern", "**/*.tji");
+    yyjson_mut_val *watchers = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_val(watchers, watcher_tjp);
+    yyjson_mut_arr_add_val(watchers, watcher_tji);
 
-    cJSON *registration = cJSON_CreateObject();
-    cJSON_AddStringToObject(registration, "id", "file-watcher");
-    cJSON_AddStringToObject(registration, "method",
-                            "workspace/didChangeWatchedFiles");
-    cJSON_AddItemToObject(registration, "registerOptions", register_options);
+    yyjson_mut_val *register_options = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, register_options, "watchers", watchers);
 
-    cJSON *registrations = cJSON_CreateArray();
-    cJSON_AddItemToArray(registrations, registration);
+    yyjson_mut_val *registration = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, registration, "id",     "file-watcher");
+    yyjson_mut_obj_add_str(doc, registration, "method", "workspace/didChangeWatchedFiles");
+    yyjson_mut_obj_add_val(doc, registration, "registerOptions", register_options);
 
-    cJSON *params = cJSON_CreateObject();
-    cJSON_AddItemToObject(params, "registrations", registrations);
+    yyjson_mut_val *registrations = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_val(registrations, registration);
 
-    cJSON *request = cJSON_CreateObject();
-    cJSON_AddStringToObject(request, "jsonrpc", "2.0");
-    cJSON_AddStringToObject(request, "id", "watcher-reg");
-    cJSON_AddStringToObject(request, "method", "client/registerCapability");
-    cJSON_AddItemToObject(request, "params", params);
+    yyjson_mut_val *params = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, params, "registrations", registrations);
 
-    char *text = cJSON_PrintUnformatted(request);
-    cJSON_Delete(request);
+    yyjson_mut_val *request = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, request, "jsonrpc", "2.0");
+    yyjson_mut_obj_add_str(doc, request, "id",      "watcher-reg");
+    yyjson_mut_obj_add_str(doc, request, "method",  "client/registerCapability");
+    yyjson_mut_obj_add_val(doc, request, "params",  params);
+
+    yyjson_mut_doc_set_root(doc, request);
+    char *text = yyjson_mut_write(doc, 0, NULL);
+    yyjson_mut_doc_free(doc);
     lsp_send_message(text);
-    cJSON_free(text);
+    free(text);
 }
 
 /*
@@ -400,18 +412,20 @@ static void handle_initialized(void) {
  * from the store.  In all cases, revalidate_all_docs() is called so that
  * cross-file dependency diagnostics are kept up to date.
  */
-static void handle_did_change_watched_files(cJSON *params) {
-    cJSON *changes = cJSON_GetObjectItemCaseSensitive(params, "changes");
-    if (!changes || !cJSON_IsArray(changes)) return;
+static void handle_did_change_watched_files(yyjson_val *params) {
+    if (!params) return;
+    yyjson_val *changes = yyjson_obj_get(params, "changes");
+    if (!changes || !yyjson_is_arr(changes)) return;
 
     int changed = 0;
 
-    cJSON *event;
-    cJSON_ArrayForEach(event, changes) {
-        const char *uri  = json_str(event, "uri");
-        cJSON *type_item = cJSON_GetObjectItemCaseSensitive(event, "type");
-        if (!uri || !type_item || !cJSON_IsNumber(type_item)) continue;
-        int type = (int)type_item->valuedouble;
+    size_t idx, max;
+    yyjson_val *event;
+    yyjson_arr_foreach(changes, idx, max, event) {
+        const char *uri   = json_str(event, "uri");
+        yyjson_val *type_item = yyjson_obj_get(event, "type");
+        if (!uri || !type_item || !yyjson_is_num(type_item)) continue;
+        int type = (int)yyjson_get_num(type_item);
 
         if (type == 3) {
             /* Deleted — remove from store and clear client-side diagnostics */
@@ -445,9 +459,9 @@ static void handle_did_change_watched_files(cJSON *params) {
     if (changed) revalidate_all_docs();
 }
 
-static void handle_didopen(cJSON *id, cJSON *params) {
-    (void)id;
-    cJSON *tdi = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+static void handle_didopen(yyjson_val *params) {
+    if (!params) return;
+    yyjson_val *tdi = yyjson_obj_get(params, "textDocument");
     if (!tdi) return;
 
     const char *uri  = json_str(tdi, "uri");
@@ -480,19 +494,19 @@ static void handle_didopen(cJSON *id, cJSON *params) {
     revalidate_all_docs();
 }
 
-static void handle_didchange(cJSON *params) {
-    cJSON *tdi     = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
-    cJSON *changes = cJSON_GetObjectItemCaseSensitive(params, "contentChanges");
-    if (!tdi || !changes || !cJSON_IsArray(changes)) return;
+static void handle_didchange(yyjson_val *params) {
+    if (!params) return;
+    yyjson_val *tdi     = yyjson_obj_get(params, "textDocument");
+    yyjson_val *changes = yyjson_obj_get(params, "contentChanges");
+    if (!tdi || !changes || !yyjson_is_arr(changes)) return;
 
     const char *uri = json_str(tdi, "uri");
     if (!uri) return;
 
-    int n = cJSON_GetArraySize(changes);
-    if (n <= 0) return;
+    if (yyjson_arr_size(changes) == 0) return;
 
     /* Use the last change (full sync) */
-    cJSON      *last = cJSON_GetArrayItem(changes, n - 1);
+    yyjson_val *last = yyjson_arr_get_last(changes);
     const char *text = json_str(last, "text");
     if (!text) return;
 
@@ -507,8 +521,9 @@ static void handle_didchange(cJSON *params) {
     revalidate_all_docs();
 }
 
-static void handle_didclose(cJSON *params) {
-    cJSON *tdi = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+static void handle_didclose(yyjson_val *params) {
+    if (!params) return;
+    yyjson_val *tdi = yyjson_obj_get(params, "textDocument");
     if (!tdi) return;
 
     const char *uri = json_str(tdi, "uri");
@@ -526,200 +541,230 @@ static void handle_didclose(cJSON *params) {
     revalidate_all_docs();
 }
 
-static cJSON *handle_document_symbol(cJSON *id, cJSON *params) {
+static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
+                                               yyjson_val *params) {
     const char *uri = NULL;
-    cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
-    if (td) uri = json_str(td, "uri");
-    if (!uri) return make_response(id, cJSON_CreateNull());
+    if (params) {
+        yyjson_val *td = yyjson_obj_get(params, "textDocument");
+        if (td) uri = json_str(td, "uri");
+    }
+    if (!uri) return make_response(doc, id, yyjson_mut_null(doc));
 
     Document *d = doc_find(uri);
-    if (!d) return make_response(id, cJSON_CreateNull());
+    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    cJSON *arr = build_document_symbols_json(d->parse.doc_symbols,
-                                             d->parse.num_doc_symbols);
-    return make_response(id, arr);
+    yyjson_mut_val *arr = build_document_symbols_json(doc,
+                                                       d->parse.doc_symbols,
+                                                       d->parse.num_doc_symbols);
+    return make_response(doc, id, arr);
 }
 
-static cJSON *handle_folding_range(cJSON *id, cJSON *params) {
+static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
+                                             yyjson_val *params) {
     const char *uri = NULL;
-    cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
-    if (td) uri = json_str(td, "uri");
-    if (!uri) return make_response(id, cJSON_CreateNull());
+    if (params) {
+        yyjson_val *td = yyjson_obj_get(params, "textDocument");
+        if (td) uri = json_str(td, "uri");
+    }
+    if (!uri) return make_response(doc, id, yyjson_mut_null(doc));
 
     Document *d = doc_find(uri);
-    if (!d) return make_response(id, cJSON_CreateNull());
+    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    cJSON *arr = build_folding_ranges_json(d->parse.tok_spans,
-                                           d->parse.num_tok_spans);
-    return make_response(id, arr);
+    yyjson_mut_val *arr = build_folding_ranges_json(doc,
+                                                     d->parse.tok_spans,
+                                                     d->parse.num_tok_spans);
+    return make_response(doc, id, arr);
 }
 
-static cJSON *handle_hover(cJSON *id, cJSON *params) {
-    cJSON *tdp = cJSON_GetObjectItemCaseSensitive(params, "textDocumentPosition");
+static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
+                                     yyjson_val *params) {
+    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
+
+    yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
     if (!tdp) tdp = params; /* some clients pass position at top level */
 
     const char *uri = NULL;
-    cJSON *td = cJSON_GetObjectItemCaseSensitive(tdp, "textDocument");
+    yyjson_val *td = yyjson_obj_get(tdp, "textDocument");
     if (td) uri = json_str(td, "uri");
     if (!uri) {
-        td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+        td = yyjson_obj_get(params, "textDocument");
         if (td) uri = json_str(td, "uri");
     }
 
-    cJSON *pos_obj = cJSON_GetObjectItemCaseSensitive(tdp, "position");
-    if (!pos_obj) pos_obj = cJSON_GetObjectItemCaseSensitive(params, "position");
+    yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
+    if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
 
-    if (!uri || !pos_obj) return make_response(id, cJSON_CreateNull());
+    if (!uri || !pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
 
     Document *d = doc_find(uri);
-    if (!d) return make_response(id, cJSON_CreateNull());
+    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
 
     ActiveKeyword ak = active_keyword_at(d->parse.tok_spans, d->parse.num_tok_spans, pos);
-    if (!ak.keyword) return make_response(id, cJSON_CreateNull());
+    if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     const char *doc_text = keyword_docs(ak.keyword);
     free(ak.keyword);
-    if (!doc_text) return make_response(id, cJSON_CreateNull());
+    if (!doc_text) return make_response(doc, id, yyjson_mut_null(doc));
 
-    cJSON *contents = cJSON_CreateObject();
-    cJSON_AddStringToObject(contents, "kind",  "markdown");
-    cJSON_AddStringToObject(contents, "value", doc_text);
+    yyjson_mut_val *contents = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, contents, "kind",  "markdown");
+    yyjson_mut_obj_add_str(doc, contents, "value", doc_text);
 
-    cJSON *hover = cJSON_CreateObject();
-    cJSON_AddItemToObject(hover, "contents", contents);
-    cJSON_AddItemToObject(hover, "range",    range_json(ak.range));
+    yyjson_mut_val *hover = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, hover, "contents", contents);
+    yyjson_mut_obj_add_val(doc, hover, "range",    range_json(doc, ak.range));
 
-    return make_response(id, hover);
+    return make_response(doc, id, hover);
 }
 
-static cJSON *handle_signature_help(cJSON *id, cJSON *params) {
-    cJSON *tdp = cJSON_GetObjectItemCaseSensitive(params, "textDocumentPosition");
+static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id,
+                                              yyjson_val *params) {
+    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
+
+    yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
     if (!tdp) tdp = params;
 
     const char *uri = NULL;
-    cJSON *td = cJSON_GetObjectItemCaseSensitive(tdp, "textDocument");
+    yyjson_val *td = yyjson_obj_get(tdp, "textDocument");
     if (td) uri = json_str(td, "uri");
     if (!uri) {
-        td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+        td = yyjson_obj_get(params, "textDocument");
         if (td) uri = json_str(td, "uri");
     }
 
-    cJSON *pos_obj = cJSON_GetObjectItemCaseSensitive(tdp, "position");
-    if (!pos_obj) pos_obj = cJSON_GetObjectItemCaseSensitive(params, "position");
+    yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
+    if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
 
-    if (!uri || !pos_obj) return make_response(id, cJSON_CreateNull());
+    if (!uri || !pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
 
     Document *d = doc_find(uri);
-    if (!d) return make_response(id, cJSON_CreateNull());
+    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
     ActiveContext ac = active_context(d->parse.tok_spans, d->parse.num_tok_spans, pos);
-    if (!ac.keyword) return make_response(id, cJSON_CreateNull());
+    if (!ac.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
-    cJSON *sig = build_signature_help_json(ac.keyword, ac.arg_count);
+    yyjson_mut_val *sig = build_signature_help_json(doc, ac.keyword, ac.arg_count);
     free(ac.keyword);
-    if (!sig) return make_response(id, cJSON_CreateNull());
-    return make_response(id, sig);
+    if (!sig) return make_response(doc, id, yyjson_mut_null(doc));
+    return make_response(doc, id, sig);
 }
 
-static cJSON *handle_semantic_tokens_full(cJSON *id, cJSON *params) {
+static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
+                                                    yyjson_val *params) {
     const char *uri = NULL;
-    cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
-    if (td) uri = json_str(td, "uri");
-    if (!uri) return make_response(id, cJSON_CreateNull());
+    if (params) {
+        yyjson_val *td = yyjson_obj_get(params, "textDocument");
+        if (td) uri = json_str(td, "uri");
+    }
+    if (!uri) return make_response(doc, id, yyjson_mut_null(doc));
 
     Document *d = doc_find(uri);
-    if (!d) return make_response(id, cJSON_CreateNull());
+    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    cJSON *result = build_semantic_tokens_json(d->parse.tok_spans,
-                                               d->parse.num_tok_spans);
-    return make_response(id, result);
+    yyjson_mut_val *result = build_semantic_tokens_json(doc,
+                                                         d->parse.tok_spans,
+                                                         d->parse.num_tok_spans);
+    return make_response(doc, id, result);
 }
 
-static cJSON *handle_references(cJSON *id, cJSON *params) {
+static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
+                                          yyjson_val *params) {
+    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     const char *uri = NULL;
-    cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+    yyjson_val *td = yyjson_obj_get(params, "textDocument");
     if (td) uri = json_str(td, "uri");
 
-    cJSON *pos_obj = cJSON_GetObjectItemCaseSensitive(params, "position");
+    yyjson_val *pos_obj = yyjson_obj_get(params, "position");
 
-    if (!uri || !pos_obj) return make_response(id, cJSON_CreateNull());
+    if (!uri || !pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
 
     Document *d = doc_find(uri);
-    if (!d) return make_response(id, cJSON_CreateNull());
+    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    LspPos pos    = json_to_pos(pos_obj);
-    cJSON *result = build_references_json(d->parse.def_links,
-                                          d->parse.num_def_links,
-                                          d->parse.doc_symbols,
-                                          d->parse.num_doc_symbols,
-                                          pos, uri);
-    if (!result) return make_response(id, cJSON_CreateNull());
-    return make_response(id, result);
+    LspPos pos         = json_to_pos(pos_obj);
+    yyjson_mut_val *result = build_references_json(doc,
+                                                    d->parse.def_links,
+                                                    d->parse.num_def_links,
+                                                    d->parse.doc_symbols,
+                                                    d->parse.num_doc_symbols,
+                                                    pos, uri);
+    if (!result) return make_response(doc, id, yyjson_mut_null(doc));
+    return make_response(doc, id, result);
 }
 
-static cJSON *handle_definition(cJSON *id, cJSON *params) {
+static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
+                                          yyjson_val *params) {
+    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     const char *uri = NULL;
-    cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+    yyjson_val *td = yyjson_obj_get(params, "textDocument");
     if (td) uri = json_str(td, "uri");
 
-    cJSON *pos_obj = cJSON_GetObjectItemCaseSensitive(params, "position");
+    yyjson_val *pos_obj = yyjson_obj_get(params, "position");
 
-    if (!uri || !pos_obj) return make_response(id, cJSON_CreateNull());
+    if (!uri || !pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
 
     Document *d = doc_find(uri);
-    if (!d) return make_response(id, cJSON_CreateNull());
+    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    LspPos pos    = json_to_pos(pos_obj);
-    cJSON *result = build_definition_json(d->parse.def_links,
-                                          d->parse.num_def_links,
-                                          pos, uri);
-    if (!result) return make_response(id, cJSON_CreateNull());
-    return make_response(id, result);
+    LspPos pos         = json_to_pos(pos_obj);
+    yyjson_mut_val *result = build_definition_json(doc,
+                                                    d->parse.def_links,
+                                                    d->parse.num_def_links,
+                                                    pos, uri);
+    if (!result) return make_response(doc, id, yyjson_mut_null(doc));
+    return make_response(doc, id, result);
 }
 
-static cJSON *handle_completion(cJSON *id, cJSON *params) {
+static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
+                                          yyjson_val *params) {
+    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     const char *uri = NULL;
-    cJSON *tdp = cJSON_GetObjectItemCaseSensitive(params, "textDocumentPosition");
+    yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
     if (!tdp) tdp = params;
 
-    cJSON *td = cJSON_GetObjectItemCaseSensitive(tdp, "textDocument");
+    yyjson_val *td = yyjson_obj_get(tdp, "textDocument");
     if (td) uri = json_str(td, "uri");
     if (!uri) {
-        td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+        td = yyjson_obj_get(params, "textDocument");
         if (td) uri = json_str(td, "uri");
     }
 
-    cJSON *pos_obj = cJSON_GetObjectItemCaseSensitive(tdp, "position");
-    if (!pos_obj) pos_obj = cJSON_GetObjectItemCaseSensitive(params, "position");
+    yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
+    if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
 
-    if (!uri || !pos_obj) return make_response(id, cJSON_CreateNull());
+    if (!uri || !pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
 
     Document *d = doc_find(uri);
-    if (!d) return make_response(id, cJSON_CreateNull());
+    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    LspPos pos    = json_to_pos(pos_obj);
-    cJSON *result = build_completions_json(d->parse.tok_spans, d->parse.num_tok_spans, pos,
-                                           d->parse.doc_symbols, d->parse.num_doc_symbols);
-    return make_response(id, result);
+    LspPos pos             = json_to_pos(pos_obj);
+    yyjson_mut_val *result = build_completions_json(doc,
+                                                     d->parse.tok_spans,
+                                                     d->parse.num_tok_spans,
+                                                     pos,
+                                                     d->parse.doc_symbols,
+                                                     d->parse.num_doc_symbols);
+    return make_response(doc, id, result);
 }
 
-
-static cJSON *handle_workspace_symbol(cJSON *id, cJSON *params) {
-    const char *query = json_str(params, "query");
+static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
+                                                yyjson_val *params) {
+    const char *query = params ? json_str(params, "query") : NULL;
     if (!query) query = "";
 
-    cJSON *arr = cJSON_CreateArray();
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
-        collect_workspace_symbols(query,
+        collect_workspace_symbols(doc, query,
                                   docs[i].parse.doc_symbols,
                                   docs[i].parse.num_doc_symbols,
                                   docs[i].uri, arr);
     }
-    return make_response(id, arr);
+    return make_response(doc, id, arr);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -727,35 +772,37 @@ static cJSON *handle_workspace_symbol(cJSON *id, cJSON *params) {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 char *server_process(const char *json_text) {
-    cJSON *msg = cJSON_Parse(json_text);
-    if (!msg) return NULL;
+    yyjson_doc *in_doc = yyjson_read(json_text, strlen(json_text), 0);
+    if (!in_doc) return NULL;
 
-    cJSON *id_item = cJSON_GetObjectItemCaseSensitive(msg, "id");
-    cJSON *method  = cJSON_GetObjectItemCaseSensitive(msg, "method");
-    cJSON *params  = cJSON_GetObjectItemCaseSensitive(msg, "params");
-    if (!params) params = cJSON_CreateObject(); /* avoid NULL checks everywhere */
+    yyjson_val *root    = yyjson_doc_get_root(in_doc);
+    yyjson_val *id_item = yyjson_obj_get(root, "id");
+    yyjson_val *method  = yyjson_obj_get(root, "method");
+    yyjson_val *params  = yyjson_obj_get(root, "params");
 
-    const char *m = (method && cJSON_IsString(method)) ? method->valuestring : "";
+    const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
 
-    cJSON *resp = NULL;
+    yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *resp = NULL;
 
     if (strcmp(m, "initialize") == 0) {
-        resp = handle_initialize(id_item, params);
+        resp = handle_initialize(out_doc, id_item, params);
 
     } else if (strcmp(m, "initialized") == 0) {
         handle_initialized();
         /* notification — no response to client */
 
     } else if (strcmp(m, "shutdown") == 0) {
-        resp = handle_shutdown(id_item);
+        resp = handle_shutdown(out_doc, id_item);
 
     } else if (strcmp(m, "exit") == 0) {
-        cJSON_Delete(msg);
+        yyjson_doc_free(in_doc);
+        yyjson_mut_doc_free(out_doc);
         exit(0);
 
     } else if (strcmp(m, "textDocument/didOpen") == 0) {
-	 handle_didopen(id_item, params);
-	 /* no response needed */
+        handle_didopen(params);
+        /* no response needed */
 
     } else if (strcmp(m, "textDocument/didChange") == 0) {
         handle_didchange(params);
@@ -764,34 +811,34 @@ char *server_process(const char *json_text) {
         handle_didclose(params);
 
     } else if (strcmp(m, "textDocument/documentSymbol") == 0) {
-        resp = handle_document_symbol(id_item, params);
+        resp = handle_document_symbol(out_doc, id_item, params);
 
     } else if (strcmp(m, "textDocument/foldingRange") == 0) {
-        resp = handle_folding_range(id_item, params);
+        resp = handle_folding_range(out_doc, id_item, params);
 
     } else if (strcmp(m, "textDocument/hover") == 0) {
-        resp = handle_hover(id_item, params);
+        resp = handle_hover(out_doc, id_item, params);
 
     } else if (strcmp(m, "textDocument/signatureHelp") == 0) {
-        resp = handle_signature_help(id_item, params);
+        resp = handle_signature_help(out_doc, id_item, params);
 
     } else if (strcmp(m, "textDocument/references") == 0) {
-        resp = handle_references(id_item, params);
+        resp = handle_references(out_doc, id_item, params);
 
     } else if (strcmp(m, "textDocument/definition") == 0) {
-        resp = handle_definition(id_item, params);
+        resp = handle_definition(out_doc, id_item, params);
 
     } else if (strcmp(m, "textDocument/completion") == 0) {
-        resp = handle_completion(id_item, params);
+        resp = handle_completion(out_doc, id_item, params);
 
     } else if (strcmp(m, "workspace/didChangeWatchedFiles") == 0) {
         handle_did_change_watched_files(params);
 
     } else if (strcmp(m, "workspace/symbol") == 0) {
-        resp = handle_workspace_symbol(id_item, params);
+        resp = handle_workspace_symbol(out_doc, id_item, params);
 
     } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
-        resp = handle_semantic_tokens_full(id_item, params);
+        resp = handle_semantic_tokens_full(out_doc, id_item, params);
 
     /* TODO: textDocument/semanticTokens/full/delta — requires storing a
      * resultId per document and computing a token diff against the previously
@@ -804,15 +851,19 @@ char *server_process(const char *json_text) {
 
     } else if (id_item) {
         /* Unknown request — return null result */
-        resp = make_response(id_item, cJSON_CreateNull());
+        resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
     }
 
-    cJSON_Delete(msg);
+    yyjson_doc_free(in_doc);
 
-    if (!resp) return NULL;
+    if (!resp) {
+        yyjson_mut_doc_free(out_doc);
+        return NULL;
+    }
 
-    char *text = cJSON_PrintUnformatted(resp);
-    cJSON_Delete(resp);
+    yyjson_mut_doc_set_root(out_doc, resp);
+    char *text = yyjson_mut_write(out_doc, 0, NULL);
+    yyjson_mut_doc_free(out_doc);
     return text;
 }
 

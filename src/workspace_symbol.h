@@ -19,14 +19,14 @@
 #pragma once
 
 #include "parser.h"
-#include <cjson/cJSON.h>
+#include <yyjson.h>
 
 /*
  * Append SymbolInformation entries whose name contains `query`
  * (case-insensitive substring; empty query matches all) from the given
  * symbol tree into `arr`.  `uri` is the document URI placed in each
- * entry's location field.
+ * entry's location field.  Values are allocated in doc.
  */
-void collect_workspace_symbols(const char *query,
+void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
                                 const DocSymbol *syms, int n,
-                                const char *uri, cJSON *arr);
+                                const char *uri, yyjson_mut_val *arr);

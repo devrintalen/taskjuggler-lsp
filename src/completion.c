@@ -452,14 +452,17 @@ static int completion_kind_for(int sym_kind) {
 
 /* ── build_completions_json ──────────────────────────────────────────────── */
 
-cJSON *build_completions_json(const TokenSpan *tokens, int num_tokens, LspPos cursor,
-                         const DocSymbol *symbols, int num_symbols) {
+yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
+                                        const TokenSpan *tokens, int num_tokens,
+                                        LspPos cursor,
+                                        const DocSymbol *symbols, int num_symbols) {
     int    stack_n = 0;
     char **stack   = block_stack(tokens, num_tokens, cursor, &stack_n);
     char  *partial = partial_word(tokens, num_tokens, cursor);
     char  *fw      = line_first_word(tokens, num_tokens, cursor);
 
-    cJSON *items = cJSON_CreateArray();
+    yyjson_mut_val *items = yyjson_mut_arr(doc);
+    int item_count = 0;
 
     /* Suppress completions while typing a declaration keyword's id/name */
     if (fw && (strcmp(fw, "project")    == 0 || strcmp(fw, "task")       == 0
@@ -534,21 +537,24 @@ cJSON *build_completions_json(const TokenSpan *tokens, int num_tokens, LspPos cu
 
                 if (!id_match && !name_match) continue;
 
-                cJSON *item = cJSON_CreateObject();
-                cJSON_AddStringToObject(item, "label", id);
-                cJSON_AddNumberToObject(item, "kind", completion_kind_for(id_kind));
-                cJSON_AddStringToObject(item, "detail", name);
-                cJSON_AddStringToObject(item, "sortText", "0");
+                yyjson_mut_val *item = yyjson_mut_obj(doc);
+                /* Use strcpy variants: id/name come from IdList which is freed
+                 * before make_response, and ft is a local stack buffer. */
+                yyjson_mut_obj_add_strcpy(doc, item, "label",    id);
+                yyjson_mut_obj_add_uint(doc,   item, "kind",     (uint64_t)completion_kind_for(id_kind));
+                yyjson_mut_obj_add_strcpy(doc, item, "detail",   name);
+                yyjson_mut_obj_add_str(doc,    item, "sortText", "0");
 
                 if (name_match && !id_match) {
-                    cJSON_AddStringToObject(item, "filterText", partial);
+                    yyjson_mut_obj_add_strcpy(doc, item, "filterText", partial);
                 } else if (bang_prefix[0] && !partial[0]) {
                     char ft[1024];
                     snprintf(ft, sizeof(ft), "%s%s", bang_prefix, id);
-                    cJSON_AddStringToObject(item, "filterText", ft);
+                    yyjson_mut_obj_add_strcpy(doc, item, "filterText", ft);
                 }
 
-                cJSON_AddItemToArray(items, item);
+                yyjson_mut_arr_add_val(items, item);
+                item_count++;
             }
 
             idlist_free(&ids);
@@ -567,12 +573,13 @@ cJSON *build_completions_json(const TokenSpan *tokens, int num_tokens, LspPos cu
             const KwEntry *table = kws_for_stack(stack, stack_n);
             for (int i = 0; table[i].kw; i++) {
                 if (!partial[0] || istarts(table[i].kw, partial)) {
-                    cJSON *item = cJSON_CreateObject();
-                    cJSON_AddStringToObject(item, "label", table[i].kw);
-                    cJSON_AddNumberToObject(item, "kind", CIK_KEYWORD);
-                    cJSON_AddStringToObject(item, "detail", table[i].doc);
-                    cJSON_AddStringToObject(item, "sortText", "1");
-                    cJSON_AddItemToArray(items, item);
+                    yyjson_mut_val *item = yyjson_mut_obj(doc);
+                    yyjson_mut_obj_add_str(doc,  item, "label",    table[i].kw);
+                    yyjson_mut_obj_add_uint(doc, item, "kind",     CIK_KEYWORD);
+                    yyjson_mut_obj_add_str(doc,  item, "detail",   table[i].doc);
+                    yyjson_mut_obj_add_str(doc,  item, "sortText", "1");
+                    yyjson_mut_arr_add_val(items, item);
+                    item_count++;
                 }
             }
         }
@@ -583,13 +590,11 @@ done:
     free(partial);
     free(fw);
 
-    if (cJSON_GetArraySize(items) == 0) {
-        cJSON_Delete(items);
-        return cJSON_CreateNull();
-    }
+    if (item_count == 0)
+        return yyjson_mut_null(doc);
 
-    cJSON *list = cJSON_CreateObject();
-    cJSON_AddBoolToObject(list, "isIncomplete", 1);
-    cJSON_AddItemToObject(list, "items", items);
+    yyjson_mut_val *list = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_bool(doc, list, "isIncomplete", true);
+    yyjson_mut_obj_add_val(doc, list, "items", items);
     return list;
 }

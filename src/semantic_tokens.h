@@ -19,7 +19,7 @@
 #pragma once
 
 #include "parser.h"
-#include <cjson/cJSON.h>
+#include <yyjson.h>
 
 /* ── Semantic token type indices ─────────────────────────────────────────── *
  *
@@ -68,6 +68,7 @@ extern const int          num_semantic_token_modifiers;
  * Tokens recorded in tok_spans solely for cursor-position queries
  * (TK_LBRACE, TK_RBRACE, TK_BANG, TK_DOT, TK_COMMA) are silently skipped.
  *
- * Caller owns the returned cJSON object.
+ * Values are allocated in doc; caller owns doc.
  */
-cJSON *build_semantic_tokens_json(const TokenSpan *spans, int num_spans);
+yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
+                                            const TokenSpan *spans, int num_spans);

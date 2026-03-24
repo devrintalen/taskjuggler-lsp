@@ -147,7 +147,7 @@
 #include "parser.h"
 #include "server.h"
 
-#include <cjson/cJSON.h>
+#include <yyjson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -393,37 +393,40 @@ void revalidate_dep_refs(ParseResult *r,
 /* ── LSP publishDiagnostics notification ─────────────────────────────────── */
 
 void publish_diagnostics(const char *uri, const ParseResult *r) {
-    cJSON *diag_arr = cJSON_CreateArray();
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+
+    yyjson_mut_val *diag_arr = yyjson_mut_arr(doc);
     for (int i = 0; i < r->num_diagnostics; i++) {
         const Diagnostic *d = &r->diagnostics[i];
-        cJSON *dj = cJSON_CreateObject();
+        yyjson_mut_val *dj = yyjson_mut_obj(doc);
 
-        cJSON *range = cJSON_CreateObject();
-        cJSON *start = cJSON_CreateObject();
-        cJSON_AddNumberToObject(start, "line",      d->range.start.line);
-        cJSON_AddNumberToObject(start, "character", d->range.start.character);
-        cJSON *end = cJSON_CreateObject();
-        cJSON_AddNumberToObject(end, "line",      d->range.end.line);
-        cJSON_AddNumberToObject(end, "character", d->range.end.character);
-        cJSON_AddItemToObject(range, "start", start);
-        cJSON_AddItemToObject(range, "end",   end);
-        cJSON_AddItemToObject(dj, "range", range);
-        cJSON_AddNumberToObject(dj, "severity", d->severity);
-        cJSON_AddStringToObject(dj, "message",  d->message);
-        cJSON_AddItemToArray(diag_arr, dj);
+        yyjson_mut_val *range = yyjson_mut_obj(doc);
+        yyjson_mut_val *start = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_uint(doc, start, "line",      d->range.start.line);
+        yyjson_mut_obj_add_uint(doc, start, "character", d->range.start.character);
+        yyjson_mut_val *end = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_uint(doc, end, "line",      d->range.end.line);
+        yyjson_mut_obj_add_uint(doc, end, "character", d->range.end.character);
+        yyjson_mut_obj_add_val(doc, range, "start", start);
+        yyjson_mut_obj_add_val(doc, range, "end",   end);
+        yyjson_mut_obj_add_val(doc,  dj, "range",    range);
+        yyjson_mut_obj_add_uint(doc, dj, "severity", (uint64_t)d->severity);
+        yyjson_mut_obj_add_str(doc,  dj, "message",  d->message);
+        yyjson_mut_arr_add_val(diag_arr, dj);
     }
 
-    cJSON *params = cJSON_CreateObject();
-    cJSON_AddStringToObject(params, "uri", uri);
-    cJSON_AddItemToObject(params, "diagnostics", diag_arr);
+    yyjson_mut_val *params = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, params, "uri", uri);
+    yyjson_mut_obj_add_val(doc, params, "diagnostics", diag_arr);
 
-    cJSON *notif = cJSON_CreateObject();
-    cJSON_AddStringToObject(notif, "jsonrpc", "2.0");
-    cJSON_AddStringToObject(notif, "method", "textDocument/publishDiagnostics");
-    cJSON_AddItemToObject(notif, "params", params);
+    yyjson_mut_val *notif = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, notif, "jsonrpc", "2.0");
+    yyjson_mut_obj_add_str(doc, notif, "method",  "textDocument/publishDiagnostics");
+    yyjson_mut_obj_add_val(doc, notif, "params",  params);
 
-    char *text = cJSON_PrintUnformatted(notif);
+    yyjson_mut_doc_set_root(doc, notif);
+    char *text = yyjson_mut_write(doc, 0, NULL);
+    yyjson_mut_doc_free(doc);
     lsp_send_message(text);
-    cJSON_free(text);
-    cJSON_Delete(notif);
+    free(text);
 }

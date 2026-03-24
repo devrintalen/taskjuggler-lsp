@@ -22,10 +22,10 @@
 #include <string.h>
 #include <strings.h>
 
-static void collect_recursive(const char *query,
+static void collect_recursive(yyjson_mut_doc *doc, const char *query,
                                const DocSymbol *syms, int n,
                                const char *uri, const char *container,
-                               cJSON *arr)
+                               yyjson_mut_val *arr)
 {
     for (int i = 0; i < n; i++) {
         const DocSymbol *sym = &syms[i];
@@ -35,29 +35,30 @@ static void collect_recursive(const char *query,
         int matches = (query[0] == '\0') || (strcasestr(name, query) != NULL);
 
         if (matches) {
-            cJSON *entry = cJSON_CreateObject();
-            cJSON_AddStringToObject(entry, "name", name);
-            cJSON_AddNumberToObject(entry, "kind", sym->kind);
+            yyjson_mut_val *entry = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_str(doc, entry, "name", name);
+            yyjson_mut_obj_add_uint(doc, entry, "kind", (uint64_t)sym->kind);
             if (container)
-                cJSON_AddStringToObject(entry, "containerName", container);
+                yyjson_mut_obj_add_str(doc, entry, "containerName", container);
 
-            cJSON *location = cJSON_CreateObject();
-            cJSON_AddStringToObject(location, "uri", uri);
-            cJSON_AddItemToObject(location, "range", range_json(sym->selection_range));
-            cJSON_AddItemToObject(entry, "location", location);
+            yyjson_mut_val *location = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_str(doc, location, "uri", uri);
+            yyjson_mut_obj_add_val(doc, location, "range",
+                                   range_json(doc, sym->selection_range));
+            yyjson_mut_obj_add_val(doc, entry, "location", location);
 
-            cJSON_AddItemToArray(arr, entry);
+            yyjson_mut_arr_add_val(arr, entry);
         }
 
         if (sym->num_children > 0)
-            collect_recursive(query, sym->children, sym->num_children,
+            collect_recursive(doc, query, sym->children, sym->num_children,
                               uri, name, arr);
     }
 }
 
-void collect_workspace_symbols(const char *query,
+void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
                                 const DocSymbol *syms, int n,
-                                const char *uri, cJSON *arr)
+                                const char *uri, yyjson_mut_val *arr)
 {
-    collect_recursive(query, syms, n, uri, NULL, arr);
+    collect_recursive(doc, query, syms, n, uri, NULL, arr);
 }

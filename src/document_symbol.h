@@ -19,13 +19,14 @@
 #pragma once
 
 #include "parser.h"
-#include <cjson/cJSON.h>
+#include <yyjson.h>
 
-/* Serialize an LspRange to a JSON object. */
-cJSON *range_json(LspRange r);
+/* Serialize an LspRange to a mutable JSON object. */
+yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r);
 
 /*
  * Build the JSON array of DocumentSymbol objects for
  * textDocument/documentSymbol responses.
  */
-cJSON *build_document_symbols_json(const DocSymbol *syms, int n);
+yyjson_mut_val *build_document_symbols_json(yyjson_mut_doc *doc,
+                                             const DocSymbol *syms, int n);

@@ -83,7 +83,8 @@ typedef struct {
     const char  *doc;
 } SigDef;
 
-static cJSON *make_sig_json(const SigDef *def, uint32_t active_param) {
+static yyjson_mut_val *make_sig_json(yyjson_mut_doc *doc, const SigDef *def,
+                                      uint32_t active_param) {
     /* Count params */
     int nparams = 0;
     if (def->params) while (def->params[nparams]) nparams++;
@@ -91,43 +92,44 @@ static cJSON *make_sig_json(const SigDef *def, uint32_t active_param) {
     uint32_t clamped = (nparams == 0) ? 0
                      : (active_param < (uint32_t)nparams ? active_param : (uint32_t)(nparams - 1));
 
-    cJSON *param_arr = cJSON_CreateArray();
+    yyjson_mut_val *param_arr = yyjson_mut_arr(doc);
     for (int i = 0; i < nparams; i++) {
-        cJSON *pi = cJSON_CreateObject();
-        cJSON_AddStringToObject(pi, "label", def->params[i]);
-        cJSON_AddItemToArray(param_arr, pi);
+        yyjson_mut_val *pi = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc, pi, "label", def->params[i]);
+        yyjson_mut_arr_add_val(param_arr, pi);
     }
 
-    cJSON *sig = cJSON_CreateObject();
-    cJSON_AddStringToObject(sig, "label", def->label);
-    cJSON *doc_obj = cJSON_CreateObject();
-    cJSON_AddStringToObject(doc_obj, "kind", "markdown");
-    cJSON_AddStringToObject(doc_obj, "value", def->doc);
-    cJSON_AddItemToObject(sig, "documentation", doc_obj);
-    cJSON_AddItemToObject(sig, "parameters", param_arr);
+    yyjson_mut_val *sig = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, sig, "label", def->label);
+    yyjson_mut_val *doc_obj = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, doc_obj, "kind",  "markdown");
+    yyjson_mut_obj_add_str(doc, doc_obj, "value", def->doc);
+    yyjson_mut_obj_add_val(doc, sig, "documentation", doc_obj);
+    yyjson_mut_obj_add_val(doc, sig, "parameters", param_arr);
     /* LSP 3.16: activeParameter lives inside SignatureInformation */
     if (nparams > 0)
-        cJSON_AddNumberToObject(sig, "activeParameter", (double)clamped);
+        yyjson_mut_obj_add_uint(doc, sig, "activeParameter", clamped);
     else
-        cJSON_AddNullToObject(sig, "activeParameter");
+        yyjson_mut_obj_add_null(doc, sig, "activeParameter");
 
-    cJSON *root = cJSON_CreateObject();
-    cJSON *sigs = cJSON_CreateArray();
-    cJSON_AddItemToArray(sigs, sig);
-    cJSON_AddItemToObject(root, "signatures", sigs);
-    cJSON_AddNumberToObject(root, "activeSignature", 0);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_val *sigs = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_val(sigs, sig);
+    yyjson_mut_obj_add_val(doc, root, "signatures", sigs);
+    yyjson_mut_obj_add_uint(doc, root, "activeSignature", 0);
 
     return root;
 }
 
-cJSON *build_signature_help_json(const char *kw, uint32_t active_param) {
+yyjson_mut_val *build_signature_help_json(yyjson_mut_doc *doc, const char *kw,
+                                           uint32_t active_param) {
     if (!kw) return NULL;
 
 /* SIG0: keyword with no parameters */
-#define SIG0(lbl, doc) \
+#define SIG0(lbl, sigdoc) \
     do { \
-        SigDef d = { lbl, NULL, doc }; \
-        return make_sig_json(&d, active_param); \
+        SigDef d = { lbl, NULL, sigdoc }; \
+        return make_sig_json(doc, &d, active_param); \
     } while(0)
 
 /* SIG: keyword with one or more parameters.
@@ -155,11 +157,11 @@ cJSON *build_signature_help_json(const char *kw, uint32_t active_param) {
  *   Misc:          alertlevel, columns, caption, center, formats, headline,
  *                  hidetask, hideresource, rolluptask, rollupresource, sortby
  */
-#define SIG(lbl, doc, ...) \
+#define SIG(lbl, sigdoc, ...) \
     do { \
         static const char *params[] = { __VA_ARGS__, NULL }; \
-        SigDef d = { lbl, params, doc }; \
-        return make_sig_json(&d, active_param); \
+        SigDef d = { lbl, params, sigdoc }; \
+        return make_sig_json(doc, &d, active_param); \
     } while(0)
 
     if (strcmp(kw, "project") == 0) SIG(

@@ -76,20 +76,21 @@ static const DocSymbol *find_task_at(const DocSymbol *syms, int n, LspPos pos) {
     return NULL;
 }
 
-cJSON *build_references_json(const DefinitionLink *links, int num_links,
-                             const DocSymbol *symbols, int num_symbols,
-                             LspPos cursor, const char *uri) {
+yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
+                                       const DefinitionLink *links, int num_links,
+                                       const DocSymbol *symbols, int num_symbols,
+                                       LspPos cursor, const char *uri) {
     const DocSymbol *task = find_task_at(symbols, num_symbols, cursor);
     if (!task) return NULL;
 
-    cJSON *arr = cJSON_CreateArray();
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
     for (int i = 0; i < num_links; i++) {
         if (range_eq(links[i].target, task->selection_range)) {
-            cJSON *location = cJSON_CreateObject();
-            cJSON_AddStringToObject(location, "uri", uri);
-            cJSON_AddItemToObject(location, "range",
-                                  range_json(links[i].source));
-            cJSON_AddItemToArray(arr, location);
+            yyjson_mut_val *location = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_str(doc, location, "uri", uri);
+            yyjson_mut_obj_add_val(doc, location, "range",
+                                   range_json(doc, links[i].source));
+            yyjson_mut_arr_add_val(arr, location);
         }
     }
     return arr;

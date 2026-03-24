@@ -18,8 +18,6 @@
 
 #pragma once
 
-#include <cjson/cJSON.h>
-
 void server_init();
 
 /* Process one JSON-RPC request/notification.

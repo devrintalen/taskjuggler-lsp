@@ -20,11 +20,13 @@
 
 #include "parser.h"
 #include "grammar.tab.h"
-#include <cjson/cJSON.h>
+#include <yyjson.h>
 
 /*
- * Return a JSON CompletionList object (or cJSON_CreateNull() if no items)
- * for the given cursor position.  Caller owns the returned cJSON object.
+ * Return a JSON CompletionList object (or null if no items) for the given
+ * cursor position.  Values are allocated in doc; caller owns doc.
  */
-cJSON *build_completions_json(const TokenSpan *tokens, int num_tokens, LspPos cursor,
-                              const DocSymbol *symbols, int num_symbols);
+yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
+                                        const TokenSpan *tokens, int num_tokens,
+                                        LspPos cursor,
+                                        const DocSymbol *symbols, int num_symbols);

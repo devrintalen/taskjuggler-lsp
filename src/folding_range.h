@@ -19,7 +19,7 @@
 #pragma once
 
 #include "parser.h"
-#include <cjson/cJSON.h>
+#include <yyjson.h>
 
 /*
  * Build the JSON array of FoldingRange objects for
@@ -29,6 +29,8 @@
  *   "region"  — brace-delimited blocks ({ ... }), covering at least two lines
  *   "comment" — multi-line block comments
  *
- * Caller owns the returned cJSON array.
+ * Values are allocated in doc; caller owns doc.
  */
-cJSON *build_folding_ranges_json(const TokenSpan *spans, int num_spans);
+yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
+                                           const TokenSpan *spans,
+                                           int num_spans);

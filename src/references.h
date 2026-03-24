@@ -19,12 +19,12 @@
 #pragma once
 
 #include "parser.h"
-#include <cjson/cJSON.h>
+#include <yyjson.h>
 
 /*
  * Build a Location[] JSON array for textDocument/references.
  *
- * Returns null when the cursor is not on a task declaration identifier.
+ * Returns NULL when the cursor is not on a task declaration identifier.
  * Returns an empty array when the cursor is on a task declaration that
  * no dependency reference points to.
  * Otherwise returns an array of Location objects, one per dependency
@@ -34,8 +34,9 @@
  * Only dependency references recorded as DefinitionLinks are returned;
  * resource references (allocate, responsible, booking) are not included.
  *
- * The caller is responsible for cJSON_Delete()ing the returned object.
+ * Values are allocated in doc; caller owns doc.
  */
-cJSON *build_references_json(const DefinitionLink *links, int num_links,
-                             const DocSymbol *symbols, int num_symbols,
-                             LspPos cursor, const char *uri);
+yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
+                                       const DefinitionLink *links, int num_links,
+                                       const DocSymbol *symbols, int num_symbols,
+                                       LspPos cursor, const char *uri);

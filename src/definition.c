@@ -53,15 +53,16 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-cJSON *build_definition_json(const DefinitionLink *links, int num_links,
-                             LspPos cursor, const char *uri) {
+yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
+                                       const DefinitionLink *links, int num_links,
+                                       LspPos cursor, const char *uri) {
     for (int i = 0; i < num_links; i++) {
         if (pos_in_range(cursor, links[i].source)) {
             const char *target_uri = links[i].target_uri ? links[i].target_uri : uri;
-            cJSON *location = cJSON_CreateObject();
-            cJSON_AddStringToObject(location, "uri", target_uri);
-            cJSON_AddItemToObject(location, "range",
-                                  range_json(links[i].target));
+            yyjson_mut_val *location = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_str(doc, location, "uri", target_uri);
+            yyjson_mut_obj_add_val(doc, location, "range",
+                                   range_json(doc, links[i].target));
             return location;
         }
     }

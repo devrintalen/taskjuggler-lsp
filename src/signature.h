@@ -20,7 +20,7 @@
 
 #include "parser.h"
 #include "grammar.tab.h"
-#include <cjson/cJSON.h>
+#include <yyjson.h>
 
 /* Result of scanning context up to a cursor position. */
 typedef struct {
@@ -41,6 +41,8 @@ ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cur
 /*
  * Build a LSP SignatureHelp JSON object for `kw` with `active_param`
  * highlighted, or NULL if `kw` has no known signature.
- * Caller owns the returned cJSON object.
+ * Values are allocated in doc; caller owns doc.
  */
-cJSON *build_signature_help_json(const char *kw, uint32_t active_param);
+yyjson_mut_val *build_signature_help_json(yyjson_mut_doc *doc,
+                                           const char *kw,
+                                           uint32_t active_param);

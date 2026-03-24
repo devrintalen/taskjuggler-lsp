@@ -22,18 +22,19 @@
 /* Maximum nesting depth for brace matching. */
 #define MAX_BRACE_DEPTH 256
 
-static void push_range(cJSON *arr,
+static void push_range(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                         uint32_t start_line, uint32_t end_line,
                         const char *kind) {
-    cJSON *obj = cJSON_CreateObject();
-    cJSON_AddNumberToObject(obj, "startLine", (double)start_line);
-    cJSON_AddNumberToObject(obj, "endLine",   (double)end_line);
-    cJSON_AddStringToObject(obj, "kind",      kind);
-    cJSON_AddItemToArray(arr, obj);
+    yyjson_mut_val *obj = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_uint(doc, obj, "startLine", start_line);
+    yyjson_mut_obj_add_uint(doc, obj, "endLine",   end_line);
+    yyjson_mut_obj_add_str(doc,  obj, "kind",      kind);
+    yyjson_mut_arr_add_val(arr, obj);
 }
 
-cJSON *build_folding_ranges_json(const TokenSpan *spans, int num_spans) {
-    cJSON *arr = cJSON_CreateArray();
+yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
+                                           const TokenSpan *spans, int num_spans) {
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
 
     uint32_t brace_stack[MAX_BRACE_DEPTH];
     int brace_depth = 0;
@@ -55,7 +56,7 @@ cJSON *build_folding_ranges_json(const TokenSpan *spans, int num_spans) {
                 uint32_t start_line = brace_stack[--brace_depth];
                 uint32_t end_line   = s->start.line;
                 if (end_line > start_line)
-                    push_range(arr, start_line, end_line, "region");
+                    push_range(doc, arr, start_line, end_line, "region");
             }
             break;
 
@@ -69,13 +70,13 @@ cJSON *build_folding_ranges_json(const TokenSpan *spans, int num_spans) {
                 uint32_t start_line = bracket_stack[--bracket_depth];
                 uint32_t end_line   = s->start.line;
                 if (end_line > start_line)
-                    push_range(arr, start_line, end_line, "region");
+                    push_range(doc, arr, start_line, end_line, "region");
             }
             break;
 
         case TK_BLOCK_COMMENT:
             if (s->end.line > s->start.line)
-                push_range(arr, s->start.line, s->end.line, "comment");
+                push_range(doc, arr, s->start.line, s->end.line, "comment");
             break;
 
         default:
