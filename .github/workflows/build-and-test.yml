@@ -14,7 +14,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - run: sudo apt update
-    - run: sudo apt install libcjson-dev flex bison
+    - run: sudo apt install flex bison cmake
+    - name: install yyjson
+      run: |
+        git clone --depth 1 https://github.com/ibireme/yyjson.git
+        cmake -S yyjson -B yyjson/build
+        sudo cmake --build yyjson/build --target install
     - name: make
       run: make
     - name: test
