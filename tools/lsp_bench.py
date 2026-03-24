@@ -16,6 +16,9 @@ Options:
   --warmup N       Warmup runs whose timings are discarded (default: 1)
   --methods M,...  Comma-separated list of methods to include in the report
                    (default: all, excluding initialize)
+  --perf FILE      Record a single run under `perf record`, writing perf.data
+                   to FILE (default: perf.data).  Implies --warmup 1
+                   --iterations 1.  View results with: perf report -i FILE
 """
 
 import argparse
@@ -80,14 +83,23 @@ def _reader_thread(stdout, q):
             break
 
 
-def run_scenario(server_binary, messages, response_timeout=30.0):
+def run_scenario(server_binary, messages, response_timeout=30.0, perf_output=None):
     """Start the server, replay messages, and return timing data.
 
     Returns a list of (method, elapsed_ms) for every request that received
     a response.
+
+    If perf_output is set, the server is launched under `perf record` and
+    the profile is written to that path.
     """
+    if perf_output:
+        cmd = ['perf', 'record', '-g', '-F', '997', '-o', perf_output,
+               '--', server_binary]
+    else:
+        cmd = [server_binary]
+
     process = subprocess.Popen(
-        [server_binary],
+        cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
     )
@@ -214,6 +226,11 @@ def main():
         help='Comma-separated list of methods to include in the report '
              '(default: all except initialize)',
     )
+    parser.add_argument(
+        '--perf', metavar='FILE', nargs='?', const='perf.data',
+        help='Record a single run under perf record, writing profile to FILE '
+             '(default: perf.data).  View with: perf report -i FILE',
+    )
     args = parser.parse_args()
 
     with open(args.input) as f:
@@ -223,6 +240,10 @@ def main():
         report_methods = set(args.methods.split(','))
     else:
         report_methods = None  # all except initialize
+
+    if args.perf:
+        args.warmup = 1
+        args.iterations = 1
 
     total_runs = args.warmup + args.iterations
     all_timings: dict[str, list[float]] = {}
@@ -240,8 +261,12 @@ def main():
 
         print(label, end='', flush=True)
 
+        is_perf_run = args.perf and not is_warmup
         try:
-            timings = run_scenario(args.server, messages)
+            timings = run_scenario(
+                args.server, messages,
+                perf_output=args.perf if is_perf_run else None,
+            )
         except (TimeoutError, EOFError) as exc:
             print(f"ERROR: {exc}")
             sys.exit(1)
@@ -289,6 +314,12 @@ def main():
         )
 
     print()
+
+    if args.perf:
+        print(dim(f"  perf data written to: {args.perf}"))
+        print(dim(f"  view with:  perf report -i {args.perf}"))
+        print(dim(f"  flamegraph: perf script -i {args.perf} | stackcollapse-perf.pl | flamegraph.pl > flame.svg"))
+        print()
 
 
 if __name__ == '__main__':

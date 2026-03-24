@@ -21,6 +21,28 @@ all: $(BIN)
 $(BIN): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+# Debug build with symbols for use with perf/valgrind.
+# Output binary: taskjuggler-lsp-debug
+DEBUG_CFLAGS = -Wall -Wextra -std=c11 -O2 -g -no-pie -D_DEFAULT_SOURCE
+DEBUG_OBJ    = $(SRC:.c=.debug.o)
+DEBUG_BIN    = taskjuggler-lsp-debug
+
+debug: $(DEBUG_BIN)
+
+$(DEBUG_BIN): $(DEBUG_OBJ)
+	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(DEBUG_OBJ): $(GEN_HDR)
+
+src/lexer.yy.debug.o: src/lexer.yy.c
+	$(CC) $(DEBUG_CFLAGS) -Wno-unused-function -c -o $@ $<
+
+src/grammar.tab.debug.o: src/grammar.tab.c
+	$(CC) $(DEBUG_CFLAGS) -Wno-unused-function -c -o $@ $<
+
+%.debug.o: %.c
+	$(CC) $(DEBUG_CFLAGS) -c -o $@  $<
+
 # All object files need the generated header for token type definitions.
 $(OBJ): $(GEN_HDR)
 
@@ -53,6 +75,7 @@ $(LEXTEST_BIN): $(GEN_HDR) $(GEN_LEX) $(LEXTEST_SRC)
 
 clean:
 	rm -f $(OBJ) $(BIN) $(GEN_LEX) $(GEN_GRAM) $(GEN_HDR)
+	rm -f $(DEBUG_OBJ) $(DEBUG_BIN)
 	rm -f $(LEXTEST_BIN) tools/lexer_test.o
 
-.PHONY: all clean lexer-test
+.PHONY: all debug clean lexer-test

@@ -135,58 +135,104 @@ static DocSymbol make_doc_symbol(Token kw, Token id, Token name, BodyResult body
 
 /* ── Token declarations ──────────────────────────────────────────────────── */
 
+/*
+ * LSP-documented keywords — MUST be declared first, before KW_DOCS_END.
+ *
+ * scan_kw_stack() uses the token kind as a fast pre-filter: only tokens
+ * whose kind is strictly less than KW_DOCS_END are passed to the feature-
+ * specific filter function (keyword_docs / has_signature_help).  Bison
+ * assigns token values in declaration order, so any keyword that has either
+ * hover documentation or signature-help support must appear in this block.
+ *
+ * When adding hover docs or signature help for a new keyword:
+ *   1. Move (or add) its KW_* token to this block, above KW_DOCS_END.
+ *   2. Add it to keyword_docs() in hover.c and/or sig_keywords[] in
+ *      signature.c as appropriate.
+ * Forgetting step 1 means the keyword will never reach the feature code,
+ * so hover/signature will silently return nothing for it.
+ */
+/* Declarations */
 %token <tok> KW_PROJECT KW_TASK KW_RESOURCE KW_ACCOUNT KW_SHIFT
+%token <tok> KW_MACRO KW_INCLUDE KW_FLAGS KW_SUPPLEMENT
+/* Task attributes */
+%token <tok> KW_EFFORT KW_DURATION KW_LENGTH KW_MILESTONE
+%token <tok> KW_DEPENDS KW_PRECEDES KW_ALLOCATE
+%token <tok> KW_START KW_END KW_MAXSTART KW_MINSTART KW_MAXEND KW_MINEND
+%token <tok> KW_PRIORITY KW_COMPLETE KW_NOTE KW_RESPONSIBLE
+%token <tok> KW_BOOKING KW_SCHEDULED
+/* Resource attributes */
+%token <tok> KW_RATE KW_EFFICIENCY KW_VACATION KW_LEAVES
+/* Project attributes */
+%token <tok> KW_NOW KW_CURRENCY KW_TIMEFORMAT KW_TIMEZONE
+%token <tok> KW_WORKINGHOURS KW_TIMINGRESOLUTION KW_SCENARIO
+
+/*
+ * KW_DOCS_END — sentinel marking the end of the LSP-documented keyword range.
+ *
+ * This token is never returned by the lexer and never appears in grammar
+ * rules.  Its only purpose is to give scan_kw_stack() a numeric upper bound:
+ *
+ *   if (tok->token_kind < KW_DOCS_END && filter(tok->text)) { ... }
+ *
+ * Because Bison assigns token values consecutively in declaration order,
+ * every token declared above this line has a value less than KW_DOCS_END,
+ * and every token declared below has a value greater.  This lets the check
+ * skip string comparisons entirely for the ~85% of tokens (identifiers,
+ * strings, dates, numbers, undocumented keywords) that can never match.
+ */
+%token KW_DOCS_END
+
+/* All remaining keywords — no hover docs or signature help (yet). */
 %token <tok> KW_ACCOUNTPREFIX KW_ACCOUNTREPORT KW_ACCOUNTROOT KW_ACTIVE
-%token <tok> KW_ADOPT KW_AGGREGATE KW_ALERT KW_ALERTLEVELS KW_ALLOCATE
-%token <tok> KW_ALTERNATIVE KW_AUTHOR KW_AUXDIR KW_BALANCE KW_BOOKING
+%token <tok> KW_ADOPT KW_AGGREGATE KW_ALERT KW_ALERTLEVELS
+%token <tok> KW_ALTERNATIVE KW_AUTHOR KW_AUXDIR KW_BALANCE
 %token <tok> KW_CAPTION KW_CELLCOLOR KW_CELLTEXT KW_CENTER KW_CHARGE
-%token <tok> KW_CHARGESET KW_COLUMNS KW_COMPLETE KW_COPYRIGHT
-%token <tok> KW_CREDITS KW_CURRENCY KW_CURRENCYFORMAT
+%token <tok> KW_CHARGESET KW_COLUMNS KW_COPYRIGHT
+%token <tok> KW_CREDITS KW_CURRENCYFORMAT
 %token <tok> KW_DAILYMAX KW_DAILYMIN KW_DAILYWORKINGHOURS
-%token <tok> KW_DATE KW_DEFINITIONS KW_DEPENDS KW_DETAILS KW_DISABLED
-%token <tok> KW_DURATION KW_EFFICIENCY KW_EFFORT KW_EFFORTDONE KW_EFFORTLEFT
-%token <tok> KW_EMAIL KW_ENABLED KW_END KW_ENDCREDIT KW_EPILOG
-%token <tok> KW_EXPORT KW_EXTEND KW_FAIL KW_FLAGS KW_FONTCOLOR
+%token <tok> KW_DATE KW_DEFINITIONS KW_DETAILS KW_DISABLED
+%token <tok> KW_EFFORTDONE KW_EFFORTLEFT
+%token <tok> KW_EMAIL KW_ENABLED KW_ENDCREDIT KW_EPILOG
+%token <tok> KW_EXPORT KW_EXTEND KW_FAIL KW_FONTCOLOR
 %token <tok> KW_FOOTER KW_FORMATS KW_GAPDURATION KW_GAPLENGTH
 %token <tok> KW_HALIGN KW_HASALERT KW_HEADER KW_HEADLINE KW_HEIGHT
 %token <tok> KW_HIDEACCOUNT KW_HIDEJOURNALENTRY KW_HIDEREPORT
 %token <tok> KW_HIDERESOURCE KW_HIDETASK KW_ICALREPORT
-%token <tok> KW_INCLUDE KW_INHERIT
+%token <tok> KW_INHERIT
 %token <tok> KW_ISACTIVE KW_ISCHILDOF KW_ISDEPENDENCYOF KW_ISDUTYOF
 %token <tok> KW_ISFEATUREOF KW_ISLEAF KW_ISMILESTONE KW_ISONGOING
 %token <tok> KW_ISRESOURCE KW_ISRESPONSIBILITYOF KW_ISTASK KW_ISVALID
 %token <tok> KW_JOURNALATTRIBUTES KW_JOURNALENTRY KW_JOURNALMODE
-%token <tok> KW_LEAVEALLOWANCES KW_LEAVES KW_LEFT KW_LENGTH
+%token <tok> KW_LEAVEALLOWANCES KW_LEFT
 %token <tok> KW_LIMITS KW_LISTITEM KW_LISTTYPE KW_LOADUNIT
-%token <tok> KW_MACRO KW_MANAGERS KW_MANDATORY KW_MARKDATE
-%token <tok> KW_MAXEND KW_MAXIMUM KW_MAXSTART KW_MILESTONE
-%token <tok> KW_MINEND KW_MINIMUM KW_MINSTART
+%token <tok> KW_MANAGERS KW_MANDATORY KW_MARKDATE
+%token <tok> KW_MAXIMUM KW_MINIMUM
 %token <tok> KW_MONTHLYMAX KW_MONTHLYMIN
-%token <tok> KW_NAVIGATOR KW_NEWTASK KW_NIKUREPORT KW_NOTE
-%token <tok> KW_NOVEVENTS KW_NOW KW_NUMBER KW_NUMBERFORMAT
+%token <tok> KW_NAVIGATOR KW_NEWTASK KW_NIKUREPORT
+%token <tok> KW_NOVEVENTS KW_NUMBER KW_NUMBERFORMAT
 %token <tok> KW_ONEND KW_ONSTART KW_OPENNODES KW_OUTPUTDIR KW_OVERTIME
-%token <tok> KW_PERIOD KW_PERSISTENT KW_PRECEDES KW_PRIORITY
+%token <tok> KW_PERIOD KW_PERSISTENT
 %token <tok> KW_PROJECTID KW_PROJECTIDS KW_PROJECTION KW_PROLOG KW_PURGE
-%token <tok> KW_RATE KW_RAWHTMLHEAD KW_REFERENCE KW_REMAINING KW_REPLACE
+%token <tok> KW_RAWHTMLHEAD KW_REFERENCE KW_REMAINING KW_REPLACE
 %token <tok> KW_REPORTPREFIX KW_RESOURCEATTRIBUTES KW_RESOURCEPREFIX
-%token <tok> KW_RESOURCEREPORT KW_RESOURCEROOT KW_RESOURCES KW_RESPONSIBLE
+%token <tok> KW_RESOURCEREPORT KW_RESOURCEROOT KW_RESOURCES
 %token <tok> KW_RICHTEXT KW_RIGHT
 %token <tok> KW_ROLLUPACCOUNT KW_ROLLUPRESOURCE KW_ROLLUPTASK
-%token <tok> KW_SCALE KW_SCENARIO KW_SCENARIOS KW_SCENARIOSPECIFIC
-%token <tok> KW_SCHEDULED KW_SCHEDULING KW_SCHEDULINGMODE
+%token <tok> KW_SCALE KW_SCENARIOS KW_SCENARIOSPECIFIC
+%token <tok> KW_SCHEDULING KW_SCHEDULINGMODE
 %token <tok> KW_SELECT KW_SELFCONTAINED KW_SHIFTS KW_SHORTTIMEFORMAT
 %token <tok> KW_SLOPPY KW_SORTACCOUNTS KW_SORTJOURNALENTRIES
 %token <tok> KW_SORTRESOURCES KW_SORTTASKS
-%token <tok> KW_START KW_STARTCREDIT KW_STATUS KW_STATUSSHEET
-%token <tok> KW_STATUSSHEETREPORT KW_STRICT KW_SUMMARY KW_SUPPLEMENT
+%token <tok> KW_STARTCREDIT KW_STATUS KW_STATUSSHEET
+%token <tok> KW_STATUSSHEETREPORT KW_STRICT KW_SUMMARY
 %token <tok> KW_TAGFILE KW_TASKATTRIBUTES KW_TASKPREFIX KW_TASKREPORT
 %token <tok> KW_TASKROOT KW_TEXT KW_TEXTREPORT
-%token <tok> KW_TIMEFORMAT KW_TIMEFORMAT1 KW_TIMEFORMAT2 KW_TIMEOFF
-%token <tok> KW_TIMESHEET KW_TIMESHEETREPORT KW_TIMEZONE KW_TIMINGRESOLUTION
+%token <tok> KW_TIMEFORMAT1 KW_TIMEFORMAT2 KW_TIMEOFF
+%token <tok> KW_TIMESHEET KW_TIMESHEETREPORT
 %token <tok> KW_TITLE KW_TOOLTIP KW_TRACEREPORT KW_TRACKINGSCENARIO
-%token <tok> KW_TREELEVEL KW_VACATION KW_WARN
+%token <tok> KW_TREELEVEL KW_WARN
 %token <tok> KW_WEEKLYMAX KW_WEEKLYMIN KW_WEEKSTARTSMONDAY KW_WEEKSTARTSSUNDAY
-%token <tok> KW_WIDTH KW_WORK KW_WORKINGHOURS KW_YEARLYWORKINGDAYS
+%token <tok> KW_WIDTH KW_WORK KW_YEARLYWORKINGDAYS
 
 %token <tok> TK_IDENT
 %token <tok> TK_STR TK_INTEGER TK_FLOAT TK_DATE TK_DURATION
