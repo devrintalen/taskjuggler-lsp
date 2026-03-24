@@ -14,7 +14,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - run: sudo apt update
-    - run: sudo apt install libcjson-dev flex bison
+    - run: sudo apt install libyyjson-dev flex bison
     - name: make
       run: make
     - name: test
