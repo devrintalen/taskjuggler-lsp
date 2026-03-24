@@ -11,7 +11,7 @@ The project supports TaskJuggler v3 and does not support earlier versions.
 ## Dependencies
 
 Depends on:
-- cJSON
+- yyjson
 - Flex
 - Bison
 

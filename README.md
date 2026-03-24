@@ -27,7 +27,7 @@ This is an independent implementation that provides editor tooling for TaskJuggl
 
 ## Dependencies
 
-- [cJSON](https://github.com/DaveGamble/cJSON)
+- [yyjson](https://github.com/ibireme/yyjson)
 - [Flex](https://github.com/westes/flex)
 - [Bison](https://www.gnu.org/software/bison/)
 - [Python](https://www.python.org/) (for running unit tests)
@@ -35,13 +35,13 @@ This is an independent implementation that provides editor tooling for TaskJuggl
 On Debian/Ubuntu:
 
 ```sh
-apt install libcjson-dev flex bison
+apt install libyyjson-dev flex bison
 ```
 
 On Gentoo:
 
 ```sh
-emerge -a dev-libs/cJSON sys-devel/flex sys-devel/bison
+emerge -a dev-libs/yyjson sys-devel/flex sys-devel/bison
 ```
 
 ## Building
