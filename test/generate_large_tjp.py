@@ -114,11 +114,25 @@ def dep_ref(source, target):
     """
     Build a TJP depends reference from source leaf to target leaf.
 
-    Prefixes the target's full dotted ID with enough '!' characters to
-    navigate from inside source's task block up to the project root.
-    A task at depth D requires D '!' characters to reach the root scope.
+    Uses the minimum number of '!' characters needed to navigate up to
+    the first common ancestor of source and target, then appends the
+    relative path from that ancestor down to the target.
+
+    For example, given source g0.g1.t5 and target g0.g2.t3, the common
+    ancestor is g0 (prefix length 1), so num_bangs = 3 - 1 = 2 and the
+    reference is '!!g2.t3'.
     """
-    return "!" * source.depth + target.full_id
+    source_parts = source.full_id.split(".")
+    target_parts = target.full_id.split(".")
+    common_len = 0
+    for s, t in zip(source_parts, target_parts):
+        if s == t:
+            common_len += 1
+        else:
+            break
+    num_bangs = len(source_parts) - common_len
+    path = ".".join(target_parts[common_len:])
+    return "!" * num_bangs + path
 
 
 def write_task(out, node, indent):
