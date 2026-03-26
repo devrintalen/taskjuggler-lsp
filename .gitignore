@@ -8,3 +8,4 @@
 /src/grammar.tab.h
 /lexer-test
 /grammar-test
+/test/large_*.tjp
