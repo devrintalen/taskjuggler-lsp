@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""
+generate_large_tjp.py — Generate large valid TaskJuggler (.tjp) files
+for LSP performance testing.
+
+Usage:
+    python3 generate_large_tjp.py --tasks 1000 --depth 3 --deps-per-task 2.5
+    python3 generate_large_tjp.py --tasks 10000 --depth 4 --width 8 --output big.tjp
+"""
+
+import argparse
+import math
+import random
+import sys
+from dataclasses import dataclass, field
+
+
+@dataclass
+class TaskNode:
+    local_id: str       # ID within the parent task block
+    full_id: str        # Absolute dotted path from the project root
+    depth: int          # 1 = top-level task
+    children: list = field(default_factory=list)
+    dep_targets: list = field(default_factory=list)
+
+    @property
+    def is_leaf(self):
+        return not self.children
+
+
+def build_tree(total_leaves, depth, width):
+    """
+    Build a task tree and return (root_tasks, all_leaves).
+
+    Interior nodes receive sequential IDs g0, g1, ...; leaf nodes
+    receive sequential IDs t0, t1, ...  The leaves list is ordered by
+    creation, which is used to guarantee an acyclic dependency graph.
+    """
+    leaf_counter = [0]
+    group_counter = [0]
+
+    def make_level(prefix, current_depth, leaves_needed):
+        nodes = []
+        if current_depth >= depth:
+            # Emit leaf tasks at this level.
+            for _ in range(leaves_needed):
+                idx = leaf_counter[0]
+                leaf_counter[0] += 1
+                lid = f"t{idx}"
+                fid = f"{prefix}.{lid}" if prefix else lid
+                nodes.append(TaskNode(local_id=lid, full_id=fid,
+                                      depth=current_depth))
+        else:
+            # Emit interior group tasks and recurse.
+            num_groups = min(width, leaves_needed)
+            base = leaves_needed // num_groups
+            remainder = leaves_needed % num_groups
+            for i in range(num_groups):
+                child_leaves = base + (1 if i < remainder else 0)
+                idx = group_counter[0]
+                group_counter[0] += 1
+                lid = f"g{idx}"
+                fid = f"{prefix}.{lid}" if prefix else lid
+                children = make_level(fid, current_depth + 1, child_leaves)
+                nodes.append(TaskNode(local_id=lid, full_id=fid,
+                                      depth=current_depth, children=children))
+        return nodes
+
+    roots = make_level("", 1, total_leaves)
+
+    def collect_leaves(nodes):
+        result = []
+        for node in nodes:
+            if node.is_leaf:
+                result.append(node)
+            else:
+                result.extend(collect_leaves(node.children))
+        return result
+
+    return roots, collect_leaves(roots)
+
+
+def poisson_sample(lam, rng):
+    """Sample from Poisson(lam) using Knuth's algorithm."""
+    limit = math.exp(-lam)
+    count = 0
+    product = 1.0
+    while product > limit:
+        count += 1
+        product *= rng.random()
+    return count - 1
+
+
+def assign_dependencies(leaves, deps_per_task, rng):
+    """
+    Assign depends edges to leaf tasks.
+
+    Each leaf may only target leaves with a lower creation index,
+    which guarantees the dependency graph is acyclic.  The number of
+    edges per leaf is drawn from a Poisson distribution with mean
+    deps_per_task (capped at the number of available predecessors).
+    """
+    for i, leaf in enumerate(leaves):
+        if i == 0 or deps_per_task <= 0:
+            continue
+        available = i
+        lam = min(deps_per_task, available)
+        num_deps = min(poisson_sample(lam, rng), available)
+        if num_deps > 0:
+            leaf.dep_targets = rng.sample(leaves[:i], num_deps)
+
+
+def dep_ref(source, target):
+    """
+    Build a TJP depends reference from source leaf to target leaf.
+
+    Prefixes the target's full dotted ID with enough '!' characters to
+    navigate from inside source's task block up to the project root.
+    A task at depth D requires D '!' characters to reach the root scope.
+    """
+    return "!" * source.depth + target.full_id
+
+
+def write_task(out, node, indent):
+    ind = "    " * indent
+    if node.is_leaf:
+        out.write(f"{ind}task {node.local_id} \"Task {node.local_id}\" {{\n")
+        if node.dep_targets:
+            refs = ", ".join(dep_ref(node, t) for t in node.dep_targets)
+            out.write(f"{ind}    depends {refs}\n")
+        out.write(f"{ind}}}\n")
+    else:
+        out.write(f"{ind}task {node.local_id} \"Group {node.local_id}\" {{\n")
+        for child in node.children:
+            write_task(out, child, indent + 1)
+        out.write(f"{ind}}}\n")
+
+
+def write_tjp(out, roots, params):
+    # Derive a reproducible but arbitrary project header from the seed so
+    # that the values vary across seeds without requiring user input.
+    header_rng = random.Random(params['seed'] ^ 0xABCD1234)
+    year = header_rng.randint(2010, 2030)
+    month = header_rng.randint(1, 12)
+    day = header_rng.randint(1, 28)
+    duration = header_rng.randint(1, 30)
+
+    out.write("/* Generated by generate_large_tjp.py\n")
+    out.write(f" * tasks={params['tasks']} depth={params['depth']} "
+              f"width={params['width']} "
+              f"deps_per_task={params['deps_per_task']} "
+              f"seed={params['seed']}\n")
+    out.write(" */\n\n")
+    out.write(f"project generated \"Generated Project\" "
+              f"{year:04d}-{month:02d}-{day:02d} +{duration}y {{\n")
+    out.write("    timezone \"UTC\"\n")
+    out.write("}\n\n")
+
+    for root in roots:
+        write_task(out, root, 0)
+        out.write("\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate large valid TJP files for LSP performance testing."
+    )
+    parser.add_argument(
+        "--tasks", type=int, default=100,
+        help="Total number of leaf tasks (default: 100)"
+    )
+    parser.add_argument(
+        "--depth", type=int, default=2,
+        help="Task tree nesting depth; 1 = flat list of tasks (default: 2)"
+    )
+    parser.add_argument(
+        "--width", type=int, default=None,
+        help="Branching factor at each interior level "
+             "(default: derived as tasks^(1/depth))"
+    )
+    parser.add_argument(
+        "--deps-per-task", type=float, default=2.0,
+        help="Average number of depends edges per leaf task (default: 2.0)"
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="RNG seed for reproducibility (default: 42)"
+    )
+    parser.add_argument(
+        "--output", default=None,
+        help="Output file path (default: stdout)"
+    )
+    args = parser.parse_args()
+
+    if args.depth < 1:
+        parser.error("--depth must be >= 1")
+    if args.tasks < 1:
+        parser.error("--tasks must be >= 1")
+    if args.deps_per_task < 0:
+        parser.error("--deps-per-task must be >= 0")
+
+    width = args.width
+    if width is None:
+        if args.depth == 1:
+            width = args.tasks
+        else:
+            width = max(2, round(args.tasks ** (1.0 / args.depth)))
+
+    rng = random.Random(args.seed)
+    roots, leaves = build_tree(args.tasks, args.depth, width)
+    assign_dependencies(leaves, args.deps_per_task, rng)
+
+    params = {
+        'tasks': args.tasks,
+        'depth': args.depth,
+        'width': width,
+        'deps_per_task': args.deps_per_task,
+        'seed': args.seed,
+    }
+
+    if args.output:
+        with open(args.output, 'w') as f:
+            write_tjp(f, roots, params)
+    else:
+        write_tjp(sys.stdout, roots, params)
+
+
+if __name__ == "__main__":
+    main()
