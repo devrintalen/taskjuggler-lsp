@@ -238,6 +238,63 @@ void free_dep_refs(void) {
     g_dep_ref_cap  = 0;
 }
 
+/* ── SymMap: string-keyed lookup table for DocSymbol pointers ────────────── *
+ *
+ * Open-addressing hash map with linear probing.  Keys are borrowed pointers
+ * into DocSymbol.detail (owned by the ParseResult); the map does not copy or
+ * free them.  Cap must be a power of two and at least 2× the entry count.
+ */
+typedef struct { const char *key; const DocSymbol *val; } SymMapEntry;
+typedef struct { SymMapEntry *entries; int cap; } SymMap;
+
+static void symmap_init(SymMap *m, int cap) {
+    m->cap     = cap;
+    m->entries = calloc((size_t)cap, sizeof(SymMapEntry));
+}
+
+static void symmap_free(SymMap *m) {
+    free(m->entries);
+    m->entries = NULL;
+    m->cap     = 0;
+}
+
+/* FNV-1a hash */
+static uint32_t symmap_hash(const char *s) {
+    uint32_t h = 2166136261u;
+    while (*s) h = (h ^ (unsigned char)*s++) * 16777619u;
+    return h;
+}
+
+static void symmap_insert(SymMap *m, const char *key, const DocSymbol *val) {
+    uint32_t i = symmap_hash(key) & (uint32_t)(m->cap - 1);
+    while (m->entries[i].key) {
+        if (strcmp(m->entries[i].key, key) == 0) return;
+        i = (i + 1) & (uint32_t)(m->cap - 1);
+    }
+    m->entries[i] = (SymMapEntry){ key, val };
+}
+
+static const DocSymbol *symmap_get(const SymMap *m, const char *key) {
+    uint32_t i = symmap_hash(key) & (uint32_t)(m->cap - 1);
+    while (m->entries[i].key) {
+        if (strcmp(m->entries[i].key, key) == 0) return m->entries[i].val;
+        i = (i + 1) & (uint32_t)(m->cap - 1);
+    }
+    return NULL;
+}
+
+/* Populate map from syms[], recursing into SK_MODULE transparently so that
+ * tasks inside a project { } block are included at the same level as
+ * top-level tasks. */
+static void symmap_populate(SymMap *m, const DocSymbol *syms, int n) {
+    for (int i = 0; i < n; i++) {
+        if (syms[i].kind == SK_FUNCTION && syms[i].detail)
+            symmap_insert(m, syms[i].detail, &syms[i]);
+        else if (syms[i].kind == SK_MODULE)
+            symmap_populate(m, syms[i].children, syms[i].num_children);
+    }
+}
+
 static const DocSymbol *resolve_from(const DocSymbol *syms, int n,
                                      const char **segs, int nseg) {
     if (nseg == 0) return NULL;
@@ -259,6 +316,18 @@ static const DocSymbol *resolve_from(const DocSymbol *syms, int n,
         }
     }
     return NULL;
+}
+
+/* Like resolve_from() but uses a pre-built SymMap for the first path segment.
+ * Falls back to the regular linear resolve_from() for subsequent segments
+ * (child arrays are small so linear scan is fine there). */
+static const DocSymbol *resolve_from_map(const SymMap *map,
+                                          const char **segs, int nseg) {
+    if (nseg == 0) return NULL;
+    const DocSymbol *first = symmap_get(map, segs[0]);
+    if (!first) return NULL;
+    if (nseg == 1) return first;
+    return resolve_from(first->children, first->num_children, segs + 1, nseg - 1);
 }
 
 static const DocSymbol *validate_ref(const DocSymbol *syms, int nsym,
@@ -347,47 +416,75 @@ void revalidate_dep_refs(ParseResult *r,
         free(r->def_links[i].target_uri);
     r->num_def_links = 0;
 
-    /* Revalidate each raw dep ref against this file's symbols and extra pools */
+    /* Build root-level lookup map once for all dep refs in this document. */
+    int map_cap = 16;
+    while (map_cap < r->num_doc_symbols * 2 + 1) map_cap <<= 1;
+    SymMap root_map;
+    symmap_init(&root_map, map_cap);
+    symmap_populate(&root_map, r->doc_symbols, r->num_doc_symbols);
+
     for (int i = 0; i < r->num_raw_dep_refs; i++) {
-        const DepRef *dr = &r->raw_dep_refs[i];
+        const DepRef      *dr        = &r->raw_dep_refs[i];
+        const DocSymbol   *sym       = NULL;
+        const char        *found_uri = NULL;
 
-        /* Search this file first */
-        const DocSymbol *sym = validate_ref(r->doc_symbols, r->num_doc_symbols,
-                                            (const char **)dr->scope, dr->scope_n,
-                                            dr->bang_count,
-                                            (const char **)dr->segs, dr->nseg);
-        const char *found_uri = NULL;
+        int k = dr->scope_n;
 
-        /* For absolute references (no bangs), also search other open files */
+        /* Too many bangs: reference escapes the project root. */
+        if (dr->bang_count > k) {
+            push_diagnostic(r, dr->range, DIAG_WARNING,
+                "dependency reference escapes beyond project root");
+            continue;
+        }
+
+        /* nav_len: scope levels to navigate before searching.
+         * bang_count == 0 is an absolute reference — always searches from
+         * the project root (nav_len = 0).
+         * bang_count > 0 navigates up (k - bang_count) levels; if that also
+         * reaches the root, use the hash map too. */
+        int nav_len = (dr->bang_count == 0) ? 0 : (k - dr->bang_count);
+
+        if (nav_len == 0) {
+            /* Root-level lookup — use the hash map. */
+            sym = resolve_from_map(&root_map,
+                                   (const char **)dr->segs, dr->nseg);
+        } else {
+            /* Subtree lookup — navigate to the ancestor, then linear scan.
+             * Child arrays are bounded by the tree branching factor so this
+             * path stays fast. */
+            int nctx;
+            const DocSymbol *ctx = doc_symbol_find_path(
+                r->doc_symbols, r->num_doc_symbols,
+                (const char **)dr->scope, nav_len, &nctx);
+            if (ctx)
+                sym = resolve_from(ctx, nctx,
+                                   (const char **)dr->segs, dr->nseg);
+        }
+
+        /* For absolute references (no bangs), also search other open files. */
         if (!sym && dr->bang_count == 0) {
             for (int p = 0; p < num_extra; p++) {
                 sym = resolve_from(extra_pools[p], extra_counts[p],
                                    (const char **)dr->segs, dr->nseg);
-                if (sym) {
-                    found_uri = extra_uris[p];
-                    break;
-                }
+                if (sym) { found_uri = extra_uris[p]; break; }
             }
         }
 
         if (sym) {
             push_def_link(r, dr->range, sym->selection_range, found_uri);
         } else {
-            if (dr->bang_count > dr->scope_n) {
-                push_diagnostic(r, dr->range, DIAG_WARNING,
-                    "dependency reference escapes beyond project root");
-            } else {
-                char path[256] = "";
-                for (int j = 0; j < dr->nseg; j++) {
-                    if (j > 0) strncat(path, ".", sizeof(path) - strlen(path) - 1);
-                    strncat(path, dr->segs[j], sizeof(path) - strlen(path) - 1);
-                }
-                char msg[320];
-                snprintf(msg, sizeof(msg), "unresolved task: `%s`", path);
-                push_diagnostic(r, dr->range, DIAG_ERROR, msg);
+            char path[256] = "";
+            for (int j = 0; j < dr->nseg; j++) {
+                if (j > 0) strncat(path, ".", sizeof(path) - strlen(path) - 1);
+                strncat(path, dr->segs[j], sizeof(path) - strlen(path) - 1);
             }
+            char msg[320];
+            snprintf(msg, sizeof(msg), "unresolved task: `%s`", path);
+            push_diagnostic(r, dr->range, DIAG_ERROR, msg);
         }
     }
+
+    symmap_free(&root_map);
 }
 
 /* ── LSP publishDiagnostics notification ─────────────────────────────────── */
