@@ -30,7 +30,7 @@
  * Currently two categories of checks are performed:
  *
  * A. Syntax errors (emitted during yyparse() via grammar.y error rules)
- * B. Semantic checks (emitted after yyparse() in validate_dep_refs())
+ * B. Semantic checks (emitted by revalidate_dep_refs() after all documents
  *
  *
  * A. Syntax errors
@@ -66,9 +66,12 @@
  * ────────────────────────────────────────────────────
  * TaskJuggler's `depends` and `precedes` keywords accept task references
  * that use a leading sequence of `!` characters to navigate the task
- * hierarchy relative to the referring task.  After yyparse() completes and
- * the full symbol tree is available, validate_dep_refs() checks every
- * reference recorded by push_dep_ref() against the tree.
+ * hierarchy relative to the referring task.  Raw references are collected
+ * during parsing via push_dep_ref() and transferred to ParseResult.  The
+ * server calls revalidate_dep_refs() after every document change, supplying
+ * all open documents as extra symbol pools so cross-file references resolve.
+ * revalidate_dep_refs() builds a root-level SymMap (hash map) once per call
+ * for O(n+m) validation instead of the O(n×m) linear scan it replaced.
  *
  * Reference resolution rules (k = nesting depth of the referring task):
  *
@@ -181,7 +184,7 @@ void dep_refs_reset(void) {
 void push_dep_ref(ParseResult *r, int bang_count, const char *path,
                   const char **scope, int scope_n,
                   LspPos start, LspPos end) {
-    (void)r; /* not used directly; diagnostics emitted in validate_dep_refs */
+    (void)r; /* not used directly; diagnostics emitted in revalidate_dep_refs */
     if (g_dep_ref_cap <= g_num_dep_refs) {
         g_dep_ref_cap = g_dep_ref_cap ? g_dep_ref_cap * 2 : 8;
         g_dep_refs = realloc(g_dep_refs, (size_t)g_dep_ref_cap * sizeof(DepRef));

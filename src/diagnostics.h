@@ -28,10 +28,10 @@ void push_diagnostic(ParseResult *r, LspRange range, int severity,
 /* ── Dependency reference tracking ──────────────────────────────────────── *
  *
  * Called from grammar.y semantic actions to record each dep_ref seen during
- * parsing.  After yyparse() returns, validate_dep_refs() checks every
- * recorded reference against the completed symbol tree.  dep_refs_reset()
- * must be called at the start of each parse() invocation and free_dep_refs()
- * after validation is complete.
+ * parsing.  Raw refs are transferred to ParseResult via dep_refs_transfer()
+ * and later checked by revalidate_dep_refs() in the server once all open
+ * documents are available.  dep_refs_reset() must be called at the start of
+ * each parse() invocation and free_dep_refs() after validation is complete.
  */
 
 void push_dep_ref(ParseResult *r, int bang_count, const char *path,

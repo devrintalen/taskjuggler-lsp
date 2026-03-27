@@ -257,7 +257,7 @@ typedef struct {
  * reference expression (e.g. a dependency path), target is the
  * selection_range of the symbol being referred to.
  *
- * Populated by validate_dep_refs() for every successfully resolved
+ * Populated by revalidate_dep_refs() for every successfully resolved
  * dependency reference so that textDocument/definition can answer without
  * re-parsing.
  *
@@ -272,7 +272,7 @@ typedef struct {
  *       depends database            <- line 2; "database" is at {2,16}..{2,24}
  *   }
  *
- * After validate_dep_refs() resolves the dependency, it emits:
+ * After revalidate_dep_refs() resolves the dependency, it emits:
  *
  *   DefinitionLink {
  *     .source     = { {2,16}, {2,24} },   // range of "database" in depends expr
@@ -301,7 +301,7 @@ typedef struct {
  *       depends database
  *   }
  *
- * After parse() and validate_dep_refs():
+ * After parse() and revalidate_dep_refs():
  *
  *   ParseResult {
  *     .num_diagnostics = 0,          // no errors

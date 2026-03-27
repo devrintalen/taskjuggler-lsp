@@ -25,7 +25,7 @@
  *
  *   doc_symbols — the symbol tree; each SK_FUNCTION node has a selection_range
  *                 covering its declaration identifier
- *   def_links   — the DefinitionLink array populated by validate_dep_refs();
+ *   def_links   — the DefinitionLink array populated by revalidate_dep_refs();
  *                 each entry maps a reference's source range to the target
  *                 symbol's selection_range
  *

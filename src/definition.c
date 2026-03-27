@@ -28,8 +28,8 @@
  *             dependency path in a `depends` or `precedes` clause)
  *   target — the selection_range of the symbol being referred to
  *
- * These links are populated by diagnostics.c:validate_dep_refs() at parse
- * time for every successfully resolved dependency reference.
+ * These links are populated by diagnostics.c:revalidate_dep_refs() after
+ * every document change for every successfully resolved dependency reference.
  *
  * At query time, build_definition_json() scans the link array for an entry
  * whose source range contains the cursor and, when found, returns a Location
