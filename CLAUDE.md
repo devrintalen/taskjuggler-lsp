@@ -76,3 +76,43 @@ python3 tools/callgrind_parse.py test/callgrind/flat_completion/callgrind.out \
     --tree handle_completion
 ```
 
+### Callgrind findings (2026-03-27)
+
+Profiled 8 scenarios across the 5 fixture files. Handler-inclusive instruction counts
+(excluding the one-time parse cost on didOpen):
+
+| Scenario | Handler Ir |
+|---|---|
+| flat (10k tasks) × completion | 14.4M |
+| flat (10k tasks) × hover | 7.5M |
+| flat (10k tasks) × semantic-tokens | 13.9M |
+| heavy_deps (2k tasks, 8 deps) × completion | 16.2M |
+| heavy_deps (2k tasks, 8 deps) × references | ~51K |
+| deep (500 tasks, depth=5) × completion | 1.56M |
+| deep (500 tasks, depth=5) × hover | 604K |
+| nodeps (5k tasks, 0 deps) × completion | 5.6M |
+
+**Bottleneck 1 — `has_signature_help` called inside `scan_kw_stack` (hover.c)**
+`scan_kw_stack` walks backwards through the token array on every hover/completion
+request. It calls `has_signature_help` once per scanned token to classify the keyword
+context. On flat 10k: 27,258 `has_signature_help` calls costing 3.56M Ir — ~40% of the
+total completion handler cost. Fix: compute the signature-help flag once at the start
+of the scan rather than re-checking on each token.
+
+**Bottleneck 2 — `tok_span_at` linear scan (hover.c)**
+`tok_span_at` finds the token at the cursor position with a linear walk over the token
+array. Cost on flat 10k: 1.37M Ir; on heavy_deps: 2.01M Ir.
+Fix: binary search (tokens are stored in source order).
+
+**Bottleneck 3 — Semantic tokens JSON serialization (semantic_tokens.c)**
+`push_entry` (116,910 calls): 10.8M Ir. `yyjson_mut_write_opts` serializing the result:
+14.0M Ir. Together that is ~80% of the semantic-tokens handler cost — the token
+classification logic itself is cheap. Fix: build the LSP integer array directly into a
+flat buffer rather than via a yyjson object tree, then emit it once.
+
+**Bottleneck 4 — `build_completions_json` dep-ref traversal (completion.c)**
+With 0 deps: `build_completions_json` self cost is 1.3M Ir.
+With 8 deps/task: self cost jumps to 7.76M Ir despite 2.5× fewer tasks.
+The identifier-collection loop visits dep references every request.
+Fix: cache the candidate identifier list per document; invalidate on didChange.
+
