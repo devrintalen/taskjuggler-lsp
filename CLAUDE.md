@@ -92,12 +92,23 @@ Profiled 8 scenarios across the 5 fixture files. Handler-inclusive instruction c
 | deep (500 tasks, depth=5) × hover | 604K |
 | nodeps (5k tasks, 0 deps) × completion | 5.6M |
 
-**Bottleneck 1 — `has_signature_help` called inside `scan_kw_stack` (hover.c)**
+**Bottleneck 1 — `has_signature_help` / `kw_has_docs` called inside `scan_kw_stack` (hover.c)**
 `scan_kw_stack` walks backwards through the token array on every hover/completion
 request. It calls `has_signature_help` once per scanned token to classify the keyword
 context. On flat 10k: 27,258 `has_signature_help` calls costing 3.56M Ir — ~40% of the
 total completion handler cost. Fix: compute the signature-help flag once at the start
 of the scan rather than re-checking on each token.
+
+**Fixed (2026-03-27):** Added `KW_SIG_END` sentinel to `grammar.y` (placed immediately
+before `KW_DOCS_END`). Changed `scan_kw_stack` to accept `int kind_max` instead of a
+filter function pointer; callers pass `KW_SIG_END` (sig help) or `KW_DOCS_END` (hover).
+Removed `has_signature_help()`/`sig_keywords[]` and `kw_has_docs()`/`doc_keywords[]`
+entirely. Result: zero string comparisons in the scan hot path.
+
+| Scenario | Before | After | Δ |
+|---|---|---|---|
+| flat (10k) × completion | 14.4M Ir | 10.9M Ir | −3.5M (−24%) |
+| flat (10k) × hover | 7.5M Ir | 3.9M Ir | −3.6M (−48%) |
 
 **Bottleneck 2 — `tok_span_at` linear scan (hover.c)**
 `tok_span_at` finds the token at the cursor position with a linear walk over the token

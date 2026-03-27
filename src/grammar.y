@@ -136,20 +136,25 @@ static DocSymbol make_doc_symbol(Token kw, Token id, Token name, BodyResult body
 /* ── Token declarations ──────────────────────────────────────────────────── */
 
 /*
- * LSP-documented keywords — MUST be declared first, before KW_DOCS_END.
+ * LSP-documented keywords — MUST be declared first, in one of the two
+ * sub-ranges below.  scan_kw_stack() uses the token kind as a fast filter
+ * with no string comparisons:
  *
- * scan_kw_stack() uses the token kind as a fast pre-filter: only tokens
- * whose kind is strictly less than KW_DOCS_END are passed to the feature-
- * specific filter function (keyword_docs / has_signature_help).  Bison
- * assigns token values in declaration order, so any keyword that has either
- * hover documentation or signature-help support must appear in this block.
+ *   kind < KW_SIG_END   → keyword has signature help (and hover docs)
+ *   kind < KW_DOCS_END  → keyword has hover docs only
  *
- * When adding hover docs or signature help for a new keyword:
- *   1. Move (or add) its KW_* token to this block, above KW_DOCS_END.
- *   2. Add it to keyword_docs() in hover.c and/or sig_keywords[] in
- *      signature.c as appropriate.
- * Forgetting step 1 means the keyword will never reach the feature code,
- * so hover/signature will silently return nothing for it.
+ * Bison assigns token values in declaration order, so placement here
+ * determines which range a keyword falls into.
+ *
+ * When adding a new keyword:
+ *   - With signature help AND hover docs: declare before KW_SIG_END;
+ *     add to keyword_docs() in hover.c and build_signature_help_json()
+ *     in signature.c.
+ *   - With hover docs only: declare between KW_SIG_END and KW_DOCS_END;
+ *     add to keyword_docs() in hover.c.
+ *   - Neither: declare after KW_DOCS_END (no further action needed).
+ * Forgetting this placement means hover/signature will silently return
+ * nothing for the keyword.
  */
 /* Declarations */
 %token <tok> KW_PROJECT KW_TASK KW_RESOURCE KW_ACCOUNT KW_SHIFT
@@ -167,18 +172,22 @@ static DocSymbol make_doc_symbol(Token kw, Token id, Token name, BodyResult body
 %token <tok> KW_WORKINGHOURS KW_TIMINGRESOLUTION KW_SCENARIO
 
 /*
- * KW_DOCS_END — sentinel marking the end of the LSP-documented keyword range.
+ * KW_SIG_END — sentinel marking the end of the signature-help keyword range.
  *
- * This token is never returned by the lexer and never appears in grammar
- * rules.  Its only purpose is to give scan_kw_stack() a numeric upper bound:
+ * Never returned by the lexer; never appears in grammar rules.
+ * scan_kw_stack() checks tok->token_kind < KW_SIG_END to decide whether
+ * a token should be pushed when scanning for signature-help context.
+ */
+%token KW_SIG_END
+
+/*
+ * KW_DOCS_END — sentinel marking the end of all LSP-documented keywords.
  *
- *   if (tok->token_kind < KW_DOCS_END && filter(tok->text)) { ... }
- *
- * Because Bison assigns token values consecutively in declaration order,
- * every token declared above this line has a value less than KW_DOCS_END,
- * and every token declared below has a value greater.  This lets the check
- * skip string comparisons entirely for the ~85% of tokens (identifiers,
- * strings, dates, numbers, undocumented keywords) that can never match.
+ * Never returned by the lexer; never appears in grammar rules.
+ * scan_kw_stack() checks tok->token_kind < KW_DOCS_END to decide whether
+ * a token should be pushed when scanning for hover-docs context.
+ * Tokens with kind >= KW_DOCS_END (~85% of all tokens) are skipped with
+ * a single integer comparison — no string lookup needed.
  */
 %token KW_DOCS_END
 

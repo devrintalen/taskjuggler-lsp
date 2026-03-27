@@ -70,7 +70,8 @@ TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
  * tokens     — token span array from the ParseResult
  * num_tokens — number of entries in tokens
  * cursor     — stop scanning after this position
- * filter     — predicate: returns 1 for keyword strings that should be tracked
+ * kind_max   — tokens with token_kind < kind_max are treated as keywords to track;
+ *              pass KW_DOCS_END for hover, KW_SIG_END for signature help
  * track_argc — if non-zero, count non-keyword, non-comment tokens as arguments
  * stack      — caller-allocated array to hold the keyword stack entries
  * stack_cap  — capacity of stack
@@ -79,7 +80,7 @@ TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
  * Returns the number of entries written to stack.
  */
 int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
-                  int (*filter)(const char *kw), int track_argc,
+                  int kind_max, int track_argc,
                   KwStackEntry *stack, int stack_cap,
                   uint32_t *out_depth) {
     uint32_t brace_depth = 0;
@@ -110,7 +111,7 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
             break;
 
         default:
-            if (tok->token_kind < KW_DOCS_END && tok->text && filter(tok->text)) {
+            if (tok->token_kind < kind_max && tok->text) {
                 while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth)
                     free(stack[--stack_n].kw);
                 if (stack_n < stack_cap) {
@@ -146,35 +147,6 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
 
 /* ── active_keyword_at ───────────────────────────────────────────────────── */
 
-/* Sorted list of all keywords that have a hover-docs entry.
- * Must be kept in sync with keyword_docs(). */
-static const char * const doc_keywords[] = {
-    "account", "allocate", "booking", "complete", "currency",
-    "depends", "duration", "efficiency", "effort", "end",
-    "flags", "include", "leaves", "length", "macro",
-    "maxend", "maxstart", "milestone", "minend", "minstart",
-    "note", "now", "precedes", "priority", "project",
-    "rate", "resource", "responsible", "scenario", "scheduled",
-    "shift", "start", "supplement", "task", "timeformat",
-    "timingresolution", "timezone", "vacation", "workinghours",
-};
-static const int num_doc_keywords =
-    (int)(sizeof(doc_keywords) / sizeof(doc_keywords[0]));
-
-/* Returns 1 if kw is present in the sorted doc_keywords table (binary search). */
-static int kw_has_docs(const char *kw) {
-    if (!kw) return 0;
-    int lo = 0, hi = num_doc_keywords - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        int cmp = strcmp(kw, doc_keywords[mid]);
-        if (cmp == 0) return 1;
-        if (cmp < 0)  hi = mid - 1;
-        else          lo = mid + 1;
-    }
-    return 0;
-}
-
 /* Return the innermost keyword that has hover documentation and whose brace
  * depth matches the cursor's brace depth.  The returned keyword string is
  * heap-allocated; caller must free it.  Returns {NULL, ...} if none found.
@@ -187,7 +159,7 @@ ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos 
     KwStackEntry stack[128];
     uint32_t brace_depth;
     int stack_n = scan_kw_stack(tokens, num_tokens, cursor,
-                                kw_has_docs, 0, stack, 128, &brace_depth);
+                                KW_DOCS_END, 0, stack, 128, &brace_depth);
 
     for (int i = stack_n - 1; i >= 0; i--) {
         if (stack[i].depth == brace_depth) {

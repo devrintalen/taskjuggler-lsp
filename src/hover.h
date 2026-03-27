@@ -30,10 +30,13 @@ TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
  *
  * Walks tokens up to cursor, tracking brace depth and a keyword stack.
  * For each token in the default case:
- *   - If filter(tok->text) is non-zero, the token is pushed as a keyword entry,
+ *   - If tok->token_kind < kind_max, the token is pushed as a keyword entry,
  *     displacing any sibling entries at the same depth.
  *   - Otherwise, if track_argc is non-zero and the token ends before cursor,
  *     the arg_count of the innermost entry at the current depth is incremented.
+ *
+ * Pass KW_DOCS_END as kind_max to capture all hover-documented keywords.
+ * Pass KW_SIG_END as kind_max to capture only signature-help keywords.
  *
  * On return, stack[0..return_value-1] are populated and all kw fields are
  * heap-allocated.  *out_depth holds the brace depth at cursor.
@@ -47,7 +50,7 @@ typedef struct {
 } KwStackEntry;
 
 int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
-                  int (*filter)(const char *kw), int track_argc,
+                  int kind_max, int track_argc,
                   KwStackEntry *stack, int stack_cap,
                   uint32_t *out_depth);
 
