@@ -97,15 +97,21 @@ def read_message(stream):
 # ── Session builder ───────────────────────────────────────────────────────────
 
 def sample_positions(text, count, rng):
-    """Return up to `count` (line, 0) positions from non-empty, non-comment lines."""
+    """Return up to `count` (line, character) positions from non-empty, non-comment lines.
+
+    The character is placed at the end of the line's content so that all tokens
+    on the line precede the cursor, exercising the full context-scanning paths in
+    hover and completion handlers.
+    """
+    lines = text.splitlines()
     candidate_lines = [
-        i for i, line in enumerate(text.splitlines())
+        i for i, line in enumerate(lines)
         if line.strip() and not line.strip().startswith('/*') and not line.strip().startswith('*')
     ]
     if not candidate_lines:
         return [(0, 0)]
     sample_size = min(count, len(candidate_lines))
-    return [(line_num, 0) for line_num in rng.sample(candidate_lines, sample_size)]
+    return [(line_num, len(lines[line_num].rstrip())) for line_num in rng.sample(candidate_lines, sample_size)]
 
 
 def build_session(tjp_text, uri, request_types, positions, repeat):
