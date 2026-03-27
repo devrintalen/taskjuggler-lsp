@@ -71,4 +71,5 @@ extern const int          num_semantic_token_modifiers;
  * Values are allocated in doc; caller owns doc.
  */
 yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
-                                            const TokenSpan *spans, int num_spans);
+                                            const TokenSpan *spans, int num_spans,
+                                            int num_sem_entries);

@@ -105,19 +105,19 @@ static int classify(int kind, int *out_type, int *out_modifiers) {
 
 /* ── Delta-encoded data emission ─────────────────────────────────────────── */
 
-/* Append one five-integer entry to the data array.  Zero-length entries are
+/* Append one five-integer entry to the flat buffer.  Zero-length entries are
  * silently dropped; they arise at the end of a multi-line token when the
  * closing delimiter sits at the very start of a line. */
-static void push_entry(yyjson_mut_doc *doc, yyjson_mut_val *data,
+static void push_entry(uint32_t *buf, int *count,
                         uint32_t delta_line, uint32_t delta_start,
                         uint32_t length,
                         int token_type, int modifiers) {
     if (length == 0) return;
-    yyjson_mut_arr_add_uint(doc, data, delta_line);
-    yyjson_mut_arr_add_uint(doc, data, delta_start);
-    yyjson_mut_arr_add_uint(doc, data, length);
-    yyjson_mut_arr_add_uint(doc, data, (uint64_t)token_type);
-    yyjson_mut_arr_add_uint(doc, data, (uint64_t)modifiers);
+    buf[(*count)++] = delta_line;
+    buf[(*count)++] = delta_start;
+    buf[(*count)++] = length;
+    buf[(*count)++] = (uint32_t)token_type;
+    buf[(*count)++] = (uint32_t)modifiers;
 }
 
 /* Emit one or more data entries for a single token, splitting across source
@@ -129,7 +129,7 @@ static void push_entry(yyjson_mut_doc *doc, yyjson_mut_val *data,
  * the source, so the character count up to each '\n' is the highlight length
  * for that line without any further adjustment.
  */
-static void emit_token(yyjson_mut_doc *doc, yyjson_mut_val *data,
+static void emit_token(uint32_t *buf, int *count,
                         uint32_t start_line, uint32_t start_char,
                         uint32_t end_line,   uint32_t end_char,
                         int token_type, int modifiers,
@@ -141,7 +141,7 @@ static void emit_token(yyjson_mut_doc *doc, yyjson_mut_val *data,
         uint32_t delta_start = (delta_line == 0)
                                ? start_char - *prev_char
                                : start_char;
-        push_entry(doc, data, delta_line, delta_start,
+        push_entry(buf, count, delta_line, delta_start,
                    end_char - start_char, token_type, modifiers);
         *prev_line = start_line;
         *prev_char = start_char;
@@ -164,7 +164,7 @@ static void emit_token(yyjson_mut_doc *doc, yyjson_mut_val *data,
         uint32_t seg_len = nl ? (uint32_t)(nl - p) : (uint32_t)strlen(p);
 
         if (seg_len > 0) {
-            push_entry(doc, data, delta_line, delta_start, seg_len, token_type, modifiers);
+            push_entry(buf, count, delta_line, delta_start, seg_len, token_type, modifiers);
             *prev_line = current_line;
             *prev_char = current_char;
         }
@@ -181,10 +181,23 @@ static void emit_token(yyjson_mut_doc *doc, yyjson_mut_val *data,
         uint32_t delta_start = (delta_line == 0)
                                ? current_char - *prev_char
                                : current_char;
-        push_entry(doc, data, delta_line, delta_start, end_char, token_type, modifiers);
+        push_entry(buf, count, delta_line, delta_start, end_char, token_type, modifiers);
         *prev_line = current_line;
         *prev_char = current_char;
     }
+}
+
+/* ── Integer serialization ───────────────────────────────────────────────── */
+
+/* Write the decimal representation of val into buf and return the number of
+ * bytes written.  Avoids sprintf overhead; val=0 emits a single '0'. */
+static int write_uint32(char *buf, uint32_t val) {
+    if (val == 0) { buf[0] = '0'; return 1; }
+    char tmp[10];
+    int n = 0;
+    while (val > 0) { tmp[n++] = (char)('0' + val % 10); val /= 10; }
+    for (int i = 0; i < n; i++) buf[i] = tmp[n - 1 - i];
+    return n;
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -192,13 +205,17 @@ static void emit_token(yyjson_mut_doc *doc, yyjson_mut_val *data,
 /* Build the {"data": [...]} response object for textDocument/semanticTokens/full.
  * Iterates tok_spans, classifies each token, and emits delta-encoded entries.
  *
- * doc       — the mutable JSON document that will own the returned value
- * spans     — token span array from the ParseResult
- * num_spans — number of entries in spans
+ * doc             — the mutable JSON document that will own the returned value
+ * spans           — token span array from the ParseResult
+ * num_spans       — number of entries in spans
+ * num_sem_entries — upper bound on push_entry calls (precomputed during lexing)
  */
 yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
-                                            const TokenSpan *spans, int num_spans) {
-    yyjson_mut_val *data = yyjson_mut_arr(doc);
+                                            const TokenSpan *spans, int num_spans,
+                                            int num_sem_entries) {
+    /* Allocate flat integer buffer sized during the lexer pass; no realloc needed. */
+    uint32_t *buf = malloc((size_t)num_sem_entries * 5 * sizeof(uint32_t));
+    int count = 0;
     uint32_t prev_line = 0, prev_char = 0;
 
     /* Emit one or more delta-encoded entries for each highlightable token */
@@ -207,7 +224,7 @@ yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
         int token_type, modifiers;
         if (!classify(s->token_kind, &token_type, &modifiers)) continue;
 
-        emit_token(doc, data,
+        emit_token(buf, &count,
                    s->start.line, s->start.character,
                    s->end.line,   s->end.character,
                    token_type, modifiers,
@@ -215,7 +232,26 @@ yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
                    &prev_line, &prev_char);
     }
 
+    /* Serialize the integer buffer to a JSON array string.
+     * Each uint32 fits in at most 10 digits; include a comma and the brackets. */
+    size_t json_cap = 2 + (size_t)count * 11;
+    char *json_str = malloc(json_cap);
+    char *p = json_str;
+    *p++ = '[';
+    for (int i = 0; i < count; i++) {
+        p += write_uint32(p, buf[i]);
+        if (i + 1 < count) *p++ = ',';
+    }
+    *p++ = ']';
+    free(buf);
+
+    /* rawncpy copies the string into the doc's memory pool so json_str can be
+     * freed immediately.  The raw value is emitted verbatim during serialization,
+     * bypassing any per-integer node traversal. */
+    yyjson_mut_val *raw_data = yyjson_mut_rawncpy(doc, json_str, (size_t)(p - json_str));
+    free(json_str);
+
     yyjson_mut_val *result = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_val(doc, result, "data", data);
+    yyjson_mut_obj_add_val(doc, result, "data", raw_data);
     return result;
 }

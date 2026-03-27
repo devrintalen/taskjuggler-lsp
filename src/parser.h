@@ -348,6 +348,7 @@ typedef struct {
     DepRef         *raw_dep_refs;     /* captured dep refs for cross-file revalidation */
     int             num_raw_dep_refs;
     int             raw_dep_ref_cap;
+    int             num_sem_entries;  /* upper bound on push_entry calls for semantic tokens */
 } ParseResult;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */

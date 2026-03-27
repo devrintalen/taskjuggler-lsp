@@ -37,10 +37,18 @@ extern int             yylineno; /* line counter managed by flex %option yylinen
 
 /* ── Shared globals (used by lexer.l and grammar.y via extern) ───────────── */
 
-ParseResult *g_result        = NULL;
-TokenSpan   *g_tok_spans     = NULL;
-int          g_num_tok_spans = 0;
-int          g_tok_span_cap  = 0;
+ParseResult *g_result          = NULL;
+TokenSpan   *g_tok_spans       = NULL;
+int          g_num_tok_spans   = 0;
+int          g_tok_span_cap    = 0;
+int          g_num_sem_entries = 0;
+
+/* Returns 1 if a token of the given kind will be emitted as a semantic token.
+ * Matches the skip set in classify() in semantic_tokens.c. */
+static int is_sem_highlighted(int kind) {
+    return kind != TK_LBRACE && kind != TK_RBRACE &&
+           kind != TK_BANG   && kind != TK_DOT    && kind != TK_COMMA;
+}
 
 /* Called from lexer.l for every token that callers may need to inspect. */
 void g_push_tok_span(int kind,
@@ -58,6 +66,8 @@ void g_push_tok_span(int kind,
         .end        = { el, ec },
         .text       = text ? strdup(text) : NULL,
     };
+    if (is_sem_highlighted(kind))
+        g_num_sem_entries += (int)(el - sl + 1);
 }
 
 /* ── Token helpers ───────────────────────────────────────────────────────── */
@@ -180,10 +190,11 @@ int symbol_kind_for(const char *kw) {
 ParseResult parse(const char *src) {
     /* Set up global state for lexer.l and grammar.y */
     ParseResult result = {0};
-    g_result        = &result;
-    g_tok_spans     = NULL;
-    g_num_tok_spans = 0;
-    g_tok_span_cap  = 0;
+    g_result          = &result;
+    g_tok_spans       = NULL;
+    g_num_tok_spans   = 0;
+    g_tok_span_cap    = 0;
+    g_num_sem_entries = 0;
     dep_refs_reset();
     yycolumn        = 0;
     yylineno        = 1;
@@ -202,14 +213,16 @@ ParseResult parse(const char *src) {
     dep_refs_transfer(&result);
 
     /* Transfer tok_spans array ownership to the ParseResult */
-    result.tok_spans     = g_tok_spans;
-    result.num_tok_spans = g_num_tok_spans;
+    result.tok_spans       = g_tok_spans;
+    result.num_tok_spans   = g_num_tok_spans;
+    result.num_sem_entries = g_num_sem_entries;
 
     /* Clear globals */
-    g_result        = NULL;
-    g_tok_spans     = NULL;
-    g_num_tok_spans = 0;
-    g_tok_span_cap  = 0;
+    g_result          = NULL;
+    g_tok_spans       = NULL;
+    g_num_tok_spans   = 0;
+    g_tok_span_cap    = 0;
+    g_num_sem_entries = 0;
 
     return result;
 }

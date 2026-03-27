@@ -728,7 +728,8 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
 
     yyjson_mut_val *result = build_semantic_tokens_json(doc,
                                                          d->parse.tok_spans,
-                                                         d->parse.num_tok_spans);
+                                                         d->parse.num_tok_spans,
+                                                         d->parse.num_sem_entries);
     return make_response(doc, id, result);
 }
 
