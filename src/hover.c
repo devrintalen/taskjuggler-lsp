@@ -25,11 +25,7 @@
 
 /* Returns 1 if position p falls within [start, end] (both endpoints inclusive). */
 static int pos_in(LspPos p, LspPos start, LspPos end) {
-    int after  = (p.line > start.line)
-              || (p.line == start.line && p.character >= start.character);
-    int before = (p.line < end.line)
-              || (p.line == end.line && p.character <= end.character);
-    return after && before;
+    return pos_cmp(start, p) <= 0 && pos_cmp(p, end) <= 0;
 }
 
 /* Return a copy of the token span that covers pos, or a sentinel TK_EOF span
@@ -41,20 +37,23 @@ static int pos_in(LspPos p, LspPos start, LspPos end) {
  * pos        — cursor position to look up
  */
 TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
-    for (int i = 0; i < num_tokens; i++) {
-        const TokenSpan *t = &tokens[i];
-        if (t->token_kind == TK_EOF) break;
+    int lo = 0, hi = num_tokens - 1, found = -1;
 
-        /* Stop once we've passed the requested position */
-        if (t->start.line > pos.line
-         || (t->start.line == pos.line && t->start.character > pos.character))
-            return (TokenSpan){ TK_EOF, pos, pos, strdup("") };
-
-        if (pos_in(pos, t->start, t->end)) {
-            TokenSpan copy = *t;
-            copy.text = strdup(t->text ? t->text : "");
-            return copy;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (tokens[mid].token_kind == TK_EOF) { hi = mid - 1; continue; }
+        if (pos_cmp(tokens[mid].start, pos) <= 0) {
+            found = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
         }
+    }
+
+    if (found >= 0 && pos_in(pos, tokens[found].start, tokens[found].end)) {
+        TokenSpan copy = tokens[found];
+        copy.text = strdup(tokens[found].text ? tokens[found].text : "");
+        return copy;
     }
     return (TokenSpan){ TK_EOF, pos, pos, strdup("") };
 }

@@ -115,6 +115,21 @@ entirely. Result: zero string comparisons in the scan hot path.
 array. Cost on flat 10k: 1.37M Ir; on heavy_deps: 2.01M Ir.
 Fix: binary search (tokens are stored in source order).
 
+**Fixed (2026-03-27):** Added `pos_cmp(LspPos a, LspPos b)` as a 3-way comparator to
+`hover.c` (reusing the identical `static inline` already in `parser.h`; the local copy
+was dropped as a duplicate). Rewrote `pos_in` as a one-liner wrapper around `pos_cmp`.
+Replaced the O(n) forward scan in `tok_span_at` with a binary search: find the
+rightmost token whose `start ≤ pos`, then verify containment with `pos_in`.
+`tok_span_at` is only called from `partial_word` in `completion.c`; the hover handler
+does not call it, so only completion benefits.
+
+| Scenario | Before | After | Δ |
+|---|---|---|---|
+| flat (10k) × completion | 10.9M Ir | 9.5M Ir | −1.4M (−13%) |
+| heavy_deps (2k, 8 deps) × completion | — | 13.5M Ir | — |
+| `tok_span_at` self (flat) | 1.37M Ir | <1K Ir | −99.9% |
+| `tok_span_at` self (heavy_deps) | 2.01M Ir | <1K Ir | −99.9% |
+
 **Bottleneck 3 — Semantic tokens JSON serialization (semantic_tokens.c)**
 `push_entry` (116,910 calls): 10.8M Ir. `yyjson_mut_write_opts` serializing the result:
 14.0M Ir. Together that is ~80% of the semantic-tokens handler cost — the token
