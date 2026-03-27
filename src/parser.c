@@ -62,6 +62,7 @@ void g_push_tok_span(int kind,
 
 /* ── Token helpers ───────────────────────────────────────────────────────── */
 
+/* Frees the heap-allocated text field of t and sets it to NULL. */
 void token_free(Token *t) {
     free(t->text);
     t->text = NULL;
@@ -69,6 +70,9 @@ void token_free(Token *t) {
 
 /* ── DocSymbol helpers ───────────────────────────────────────────────────── */
 
+/* Recursively frees all heap memory owned by s (name, detail, children array)
+ * but does not free s itself, as it is typically stored inline in an array.
+ */
 void doc_symbol_free(DocSymbol *s) {
     free(s->name);
     free(s->detail);
@@ -79,6 +83,9 @@ void doc_symbol_free(DocSymbol *s) {
 
 /* ── ParseResult helpers ─────────────────────────────────────────────────── */
 
+/* Releases all heap memory owned by r (diagnostics, symbols, token spans,
+ * definition links, raw dep refs), then zeroes the struct.
+ */
 void parse_result_free(ParseResult *r) {
     for (int i = 0; i < r->num_diagnostics; i++)
         free(r->diagnostics[i].message);
@@ -107,6 +114,9 @@ void parse_result_free(ParseResult *r) {
     memset(r, 0, sizeof(*r));
 }
 
+/* Appends s to r's doc_symbols array, growing it if needed.
+ * Ownership of all heap memory inside s transfers to r.
+ */
 void push_doc_symbol(ParseResult *r, DocSymbol s) {
     if (r->num_doc_symbols >= r->doc_sym_cap) {
         int nc = r->doc_sym_cap ? r->doc_sym_cap * 2 : 4;
@@ -118,6 +128,18 @@ void push_doc_symbol(ParseResult *r, DocSymbol s) {
 
 /* ── DocSymbol tree navigation ───────────────────────────────────────────── */
 
+/* Navigate the symbol tree following the path segments path[0..plen-1] and
+ * return the children array at that node.  Transparently descends into
+ * SK_MODULE (project) nodes when matching path segments against tasks.
+ *
+ * syms  — root-level symbols to start from
+ * n     — number of entries in syms
+ * path  — array of identifier strings to follow (task IDs)
+ * plen  — number of segments in path; 0 returns (syms, n) immediately
+ * out_n — set to the number of children at the matched node on success, 0 on failure
+ *
+ * Returns the children array at the matched node, or NULL if not found.
+ */
 const DocSymbol *doc_symbol_find_path(const DocSymbol *syms, int n,
                                       const char **path, int plen,
                                       int *out_n) {
@@ -140,6 +162,11 @@ const DocSymbol *doc_symbol_find_path(const DocSymbol *syms, int n,
 
 /* ── Keyword classification ──────────────────────────────────────────────── */
 
+/* Returns the LSP SymbolKind constant for a top-level declaration keyword.
+ * Defaults to SK_FUNCTION (task) for any keyword not explicitly listed.
+ *
+ * kw — keyword string (e.g. "project", "resource", "task")
+ */
 int symbol_kind_for(const char *kw) {
     if (strcmp(kw, "project")  == 0) return SK_MODULE;
     if (strcmp(kw, "resource") == 0) return SK_OBJECT;

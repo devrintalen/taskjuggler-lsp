@@ -157,6 +157,11 @@
 
 /* ── Diagnostic accumulation ─────────────────────────────────────────────── */
 
+/* Append a diagnostic to r's diagnostics array, growing it if needed.
+ * range    — source range to highlight in the editor
+ * severity — DIAG_ERROR or DIAG_WARNING
+ * msg      — human-readable message; a heap copy is made and owned by r
+ */
 void push_diagnostic(ParseResult *r, LspRange range, int severity,
                      const char *msg) {
     if (r->num_diagnostics >= r->diag_cap) {
@@ -175,12 +180,23 @@ static DepRef *g_dep_refs     = NULL;
 static int     g_num_dep_refs = 0;
 static int     g_dep_ref_cap  = 0;
 
+/* Reset the global dep-ref accumulator to an empty state.
+ * Called at the start of each parse() invocation before yyparse() runs.
+ */
 void dep_refs_reset(void) {
     g_dep_refs     = NULL;
     g_num_dep_refs = 0;
     g_dep_ref_cap  = 0;
 }
 
+/* Record one raw dependency reference encountered during parsing.
+ * r          — current ParseResult (unused directly; diagnostics deferred)
+ * bang_count — number of leading '!' characters in the reference
+ * path       — dot-separated task path after the bangs (e.g. "gui.engine")
+ * scope      — task ID path from root to the containing task at parse time
+ * scope_n    — number of segments in scope
+ * start/end  — source range of the full reference expression
+ */
 void push_dep_ref(ParseResult *r, int bang_count, const char *path,
                   const char **scope, int scope_n,
                   LspPos start, LspPos end) {
@@ -218,6 +234,10 @@ void push_dep_ref(ParseResult *r, int bang_count, const char *path,
     dr->range      = (LspRange){ start, end };
 }
 
+/* Transfer ownership of the global dep-ref accumulator into r.
+ * After this call the global state is reset to empty.
+ * Called at the end of parse() to move raw_dep_refs into the ParseResult.
+ */
 void dep_refs_transfer(ParseResult *r) {
     r->raw_dep_refs     = g_dep_refs;
     r->num_raw_dep_refs = g_num_dep_refs;
@@ -227,6 +247,9 @@ void dep_refs_transfer(ParseResult *r) {
     g_dep_ref_cap  = 0;
 }
 
+/* Free all memory in the global dep-ref accumulator and reset it.
+ * Used as a cleanup path if parsing is abandoned before dep_refs_transfer().
+ */
 void free_dep_refs(void) {
     for (int i = 0; i < g_num_dep_refs; i++) {
         DepRef *dr = &g_dep_refs[i];
@@ -250,24 +273,32 @@ void free_dep_refs(void) {
 typedef struct { const char *key; const DocSymbol *val; } SymMapEntry;
 typedef struct { SymMapEntry *entries; int cap; } SymMap;
 
+/* Allocate and zero-initialise a SymMap with the given capacity.
+ * cap must be a power of two and at least 2× the number of entries that
+ * will be inserted to keep the load factor below 0.5.
+ */
 static void symmap_init(SymMap *m, int cap) {
     m->cap     = cap;
     m->entries = calloc((size_t)cap, sizeof(SymMapEntry));
 }
 
+/* Release the entry array of m and reset its fields to zero. */
 static void symmap_free(SymMap *m) {
     free(m->entries);
     m->entries = NULL;
     m->cap     = 0;
 }
 
-/* FNV-1a hash */
+/* FNV-1a 32-bit hash of the NUL-terminated string s. */
 static uint32_t symmap_hash(const char *s) {
     uint32_t h = 2166136261u;
     while (*s) h = (h ^ (unsigned char)*s++) * 16777619u;
     return h;
 }
 
+/* Insert (key, val) into m using open addressing with linear probing.
+ * Duplicate keys are silently ignored; m must have spare capacity.
+ */
 static void symmap_insert(SymMap *m, const char *key, const DocSymbol *val) {
     uint32_t i = symmap_hash(key) & (uint32_t)(m->cap - 1);
     while (m->entries[i].key) {
@@ -277,6 +308,9 @@ static void symmap_insert(SymMap *m, const char *key, const DocSymbol *val) {
     m->entries[i] = (SymMapEntry){ key, val };
 }
 
+/* Look up key in m and return the associated DocSymbol pointer,
+ * or NULL if not found.
+ */
 static const DocSymbol *symmap_get(const SymMap *m, const char *key) {
     uint32_t i = symmap_hash(key) & (uint32_t)(m->cap - 1);
     while (m->entries[i].key) {
@@ -298,6 +332,14 @@ static void symmap_populate(SymMap *m, const DocSymbol *syms, int n) {
     }
 }
 
+/* Recursively resolve segs[0..nseg-1] starting from the syms[] array.
+ * Returns the matching DocSymbol leaf, or NULL if the path is not found.
+ * SK_MODULE (project) nodes are traversed transparently so that tasks
+ * inside a project body can be found without explicitly naming the project.
+ * syms/n — symbol array to search at the current depth
+ * segs   — remaining path segments to match
+ * nseg   — number of remaining segments
+ */
 static const DocSymbol *resolve_from(const DocSymbol *syms, int n,
                                      const char **segs, int nseg) {
     if (nseg == 0) return NULL;
@@ -333,6 +375,13 @@ static const DocSymbol *resolve_from_map(const SymMap *map,
     return resolve_from(first->children, first->num_children, segs + 1, nseg - 1);
 }
 
+/* Resolve a single raw dep ref against the symbol tree, applying bang
+ * navigation first.  Returns the matching DocSymbol on success, NULL on failure.
+ * syms/nsym        — root-level symbol array
+ * scope/scope_len  — task IDs from root to the containing task
+ * bang_count       — number of leading '!' characters in the reference
+ * segs/nseg        — dot-split path segments after the bangs
+ */
 static const DocSymbol *validate_ref(const DocSymbol *syms, int nsym,
                                      const char **scope, int scope_len,
                                      int bang_count, const char **segs,
@@ -351,6 +400,11 @@ static const DocSymbol *validate_ref(const DocSymbol *syms, int nsym,
     return resolve_from(ctx, nctx, segs, nseg);
 }
 
+/* Append a DefinitionLink to r's def_links array, growing it if needed.
+ * source     — range of the reference expression in the current document
+ * target     — selection range of the matching task symbol declaration
+ * target_uri — URI of the file containing the target (NULL = same file)
+ */
 static void push_def_link(ParseResult *r, LspRange source, LspRange target,
                           const char *target_uri) {
     if (r->num_def_links >= r->def_link_cap) {
@@ -364,6 +418,12 @@ static void push_def_link(ParseResult *r, LspRange source, LspRange target,
     };
 }
 
+/* Validate dep refs from the global accumulator against syms[].
+ * Emits diagnostics into r for invalid references and DefinitionLinks for
+ * valid ones.  Uses a linear scan.  Note: this function is not called in
+ * the normal server code path — see revalidate_dep_refs() for the live
+ * cross-file implementation.
+ */
 void validate_dep_refs(const DocSymbol *syms, int nsym, ParseResult *r) {
     for (int i = 0; i < g_num_dep_refs; i++) {
         const DepRef *dr = &g_dep_refs[i];
@@ -404,6 +464,20 @@ void validate_dep_refs(const DocSymbol *syms, int nsym, ParseResult *r) {
 
 /* ── Cross-file dependency revalidation ──────────────────────────────────── */
 
+/* Re-run dep-ref validation against the current document and extra symbol
+ * pools from all other open documents.  Called after every document change.
+ *
+ * r            — ParseResult for the document being validated; its diagnostics
+ *                from dep_diag_start onward and all def_links are replaced
+ * extra_pools  — doc_symbols arrays from other open documents
+ * extra_counts — corresponding num_doc_symbols counts
+ * extra_uris   — corresponding document URIs (used in cross-file DefinitionLinks)
+ * num_extra    — number of extra documents
+ *
+ * Uses a root-level SymMap (O(1) lookups) for absolute references and a
+ * linear scan of bounded child arrays for relative (bang-navigated) ones,
+ * giving O(n+m) overall instead of O(n×m).
+ */
 void revalidate_dep_refs(ParseResult *r,
                          const DocSymbol * const *extra_pools,
                          const int *extra_counts,
@@ -492,6 +566,13 @@ void revalidate_dep_refs(ParseResult *r,
 
 /* ── LSP publishDiagnostics notification ─────────────────────────────────── */
 
+/* Send a textDocument/publishDiagnostics notification to the editor.
+ * Serialises r->diagnostics[] as a JSON-RPC notification and writes it to
+ * stdout via lsp_send_message().  Passing a zeroed ParseResult (r->num_diagnostics=0)
+ * clears any editor-side errors for the document.
+ * uri — document URI to include in the notification params
+ * r   — ParseResult whose diagnostics[] to publish
+ */
 void publish_diagnostics(const char *uri, const ParseResult *r) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
 

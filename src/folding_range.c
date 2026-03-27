@@ -22,6 +22,14 @@
 /* Maximum nesting depth for brace matching. */
 #define MAX_BRACE_DEPTH 256
 
+/* Append one FoldingRange entry to arr.
+ *
+ * doc        — the mutable JSON document that will own new values
+ * arr        — the JSON array to append to
+ * start_line — first line of the range (0-based)
+ * end_line   — last line of the range (0-based)
+ * kind       — LSP FoldingRangeKind string: "region" or "comment"
+ */
 static void push_range(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                         uint32_t start_line, uint32_t end_line,
                         const char *kind) {
@@ -32,10 +40,19 @@ static void push_range(yyjson_mut_doc *doc, yyjson_mut_val *arr,
     yyjson_mut_arr_add_val(arr, obj);
 }
 
+/* Build the JSON array for a textDocument/foldingRange response.
+ * Scans the token stream for matching brace/bracket pairs and multi-line
+ * block comments, emitting one FoldingRange per spanning pair.
+ *
+ * doc       — the mutable JSON document that will own the returned value
+ * spans     — token span array from the ParseResult
+ * num_spans — number of entries in spans
+ */
 yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
                                            const TokenSpan *spans, int num_spans) {
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
 
+    /* Stacks of opening-line numbers for unmatched { and [ tokens */
     uint32_t brace_stack[MAX_BRACE_DEPTH];
     int brace_depth = 0;
 

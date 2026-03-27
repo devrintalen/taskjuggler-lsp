@@ -34,6 +34,10 @@
 
 /* ── block_stack ─────────────────────────────────────────────────────────── */
 
+/* Returns 1 if token kind k introduces a block whose body has a
+ * context-specific keyword set (i.e. keywords valid inside that block differ
+ * from the top-level set).
+ */
 static int is_block_opener_kind(int k) {
     return k == KW_PROJECT   || k == KW_TASK        || k == KW_RESOURCE
         || k == KW_ACCOUNT   || k == KW_SHIFT       || k == KW_SCENARIO
@@ -42,7 +46,16 @@ static int is_block_opener_kind(int k) {
         || k == KW_TEXTREPORT|| k == KW_RESOURCEREPORT;
 }
 
-/* Returns a NULL-terminated array of strings (heap-allocated copies). */
+/* Build the stack of block-opener keyword names enclosing cursor.
+ * Each entry is the keyword that opened the corresponding { block.
+ * Returns a heap-allocated array of heap-allocated strings; caller must free
+ * with free_block_stack().
+ *
+ * tokens     — token span array from the ParseResult
+ * num_tokens — number of entries in tokens
+ * cursor     — position used as the scan stop point
+ * out_n      — set to the number of entries returned
+ */
 static char **block_stack(const TokenSpan *tokens, int num_tokens,
                            LspPos cursor, int *out_n) {
     char **stack = NULL;
@@ -87,6 +100,7 @@ static char **block_stack(const TokenSpan *tokens, int num_tokens,
     return stack;
 }
 
+/* Free a block_stack result returned by block_stack(). */
 static void free_block_stack(char **stack, int n) {
     for (int i = 0; i < n; i++) free(stack[i]);
     free(stack);
@@ -197,6 +211,14 @@ static const KwEntry ACCOUNT_KWS[] = {
     {NULL, NULL}
 };
 
+/* Return the keyword table appropriate for the innermost recognized block type.
+ * Walks the stack from innermost outward, skipping structural-but-transparent
+ * blocks (limits, supplement, etc.) until a recognized type is found.
+ * Returns TOPLEVEL_KWS if no recognized block is found.
+ *
+ * stack — block-opener keyword name array from block_stack()
+ * n     — number of entries in stack
+ */
 static const KwEntry *kws_for_stack(char **stack, int n) {
     for (int i = n - 1; i >= 0; i--) {
         const char *kw = stack[i];
@@ -249,6 +271,13 @@ static int at_statement_start(const TokenSpan *tokens, int num_tokens, LspPos cu
 
 /* ── partial_word ────────────────────────────────────────────────────────── */
 
+/* Return the identifier text at cursor if cursor is on a TK_IDENT token,
+ * otherwise return an empty heap-allocated string.  Caller must free.
+ *
+ * tokens     — token span array from the ParseResult
+ * num_tokens — number of entries in tokens
+ * cursor     — cursor position
+ */
 static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     TokenSpan t = tok_span_at(tokens, num_tokens, cursor);
     if (t.token_kind == TK_IDENT) {
@@ -266,6 +295,7 @@ typedef struct { char *id; char *name; } IdEntry;
 
 typedef struct { IdEntry *items; int n, cap; } IdList;
 
+/* Append a heap-allocated copy of (id, name) to il, growing it if needed. */
 static void idlist_push(IdList *il, const char *id, const char *name) {
     if (il->n >= il->cap) {
         il->cap = il->cap ? il->cap * 2 : 16;
@@ -274,6 +304,7 @@ static void idlist_push(IdList *il, const char *id, const char *name) {
     il->items[il->n++] = (IdEntry){ strdup(id), strdup(name) };
 }
 
+/* Free all entries in il and the backing array. */
 static void idlist_free(IdList *il) {
     for (int i = 0; i < il->n; i++) {
         free(il->items[i].id);
@@ -282,6 +313,17 @@ static void idlist_free(IdList *il) {
     free(il->items);
 }
 
+/* Recursively collect all symbol IDs of the given kind from syms[], building
+ * dot-separated fully-qualified paths relative to prefix.  Symbols of other
+ * kinds are recursed into but not emitted (so task children of a project
+ * container are still collected).
+ *
+ * syms   — symbol array to search
+ * n      — number of entries in syms
+ * kind   — SK_FUNCTION, SK_OBJECT, etc. — only symbols of this kind are added
+ * prefix — dot-path prefix to prepend; "" for the root level
+ * out    — IdList to append results to
+ */
 static void collect_ids(const DocSymbol *syms, int n, int kind,
                          const char *prefix, IdList *out) {
     for (int i = 0; i < n; i++) {
@@ -303,6 +345,7 @@ static void collect_ids(const DocSymbol *syms, int n, int kind,
 
 typedef struct { char **ids; uint32_t *depths; int n, cap; } ScopeStack;
 
+/* Append (id, depth) to ss, growing it if needed. */
 static void ss_push(ScopeStack *ss, const char *id, uint32_t depth) {
     if (ss->n >= ss->cap) {
         ss->cap = ss->cap ? ss->cap * 2 : 8;
@@ -314,6 +357,17 @@ static void ss_push(ScopeStack *ss, const char *id, uint32_t depth) {
     ss->n++;
 }
 
+/* Walk tokens up to cursor and return the ordered list of task IDs enclosing
+ * the cursor position (outermost first).  Used to determine the bang-relative
+ * dep-ref scope for dependency completions.
+ * Returns a heap-allocated array of heap-allocated strings; caller must free
+ * each string and the array.
+ *
+ * tokens     — token span array from the ParseResult
+ * num_tokens — number of entries in tokens
+ * cursor     — position used as the scan stop point
+ * out_n      — set to the number of task IDs returned
+ */
 static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
                                   LspPos cursor, int *out_n) {
     typedef enum { SS_SCAN, SS_EXPECT_ID, SS_BEFORE_LBRACE } SState;
@@ -390,6 +444,14 @@ static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
     return result;
 }
 
+/* Count the number of consecutive `!` tokens immediately before the cursor,
+ * skipping any trailing partial identifier and any comments.
+ * Used to determine the bang depth for dep-ref scope navigation.
+ *
+ * tokens     — token span array from the ParseResult
+ * num_tokens — number of entries in tokens
+ * cursor     — position used as the scan stop point
+ */
 static int count_leading_bangs(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     /* Find index past the last non-comment token before (or at) cursor */
     int last = -1;
@@ -416,6 +478,7 @@ static int count_leading_bangs(const TokenSpan *tokens, int num_tokens, LspPos c
 
 /* ── Helper: check if needle is a case-insensitive substring of haystack ── */
 
+/* Returns 1 if needle is a case-insensitive substring of haystack. */
 static int icontains(const char *haystack, const char *needle) {
     if (!haystack || !needle) return 0;
     size_t hn = strlen(haystack), nn = strlen(needle);
@@ -433,6 +496,7 @@ static int icontains(const char *haystack, const char *needle) {
     return 0;
 }
 
+/* Returns 1 if s begins with prefix (case-insensitive). */
 static int istarts(const char *s, const char *prefix) {
     if (!s || !prefix) return 0;
     size_t pn = strlen(prefix);
@@ -443,6 +507,7 @@ static int istarts(const char *s, const char *prefix) {
     return 1;
 }
 
+/* Map a SymbolKind constant to the corresponding CompletionItemKind value. */
 static int completion_kind_for(int sym_kind) {
     if (sym_kind == SK_FUNCTION) return CIK_FUNCTION;
     if (sym_kind == SK_OBJECT)   return CIK_CLASS;
@@ -452,6 +517,19 @@ static int completion_kind_for(int sym_kind) {
 
 /* ── build_completions_json ──────────────────────────────────────────────── */
 
+/* Build the CompletionList JSON response for textDocument/completion.
+ * Returns null if there are no applicable completions at cursor.
+ * Completions are returned in two mutually exclusive modes:
+ *   — ID completions when inside a depends/precedes/allocate/etc. argument
+ *   — Keyword completions when at a statement-start position
+ *
+ * doc         — the mutable JSON document that will own the returned value
+ * tokens      — token span array from the ParseResult
+ * num_tokens  — number of entries in tokens
+ * cursor      — cursor position from the textDocument/completion request
+ * symbols     — root-level symbol array for ID completions
+ * num_symbols — number of entries in symbols
+ */
 yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const TokenSpan *tokens, int num_tokens,
                                         LspPos cursor,
@@ -566,7 +644,8 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
         free(ac.keyword);
     }
 
-    /* Keyword completions */
+    /* Keyword completions: offer context-sensitive keywords when typing at
+     * the start of a statement or when the partial word prefix has no ID match */
     {
         int typing = (partial[0] != '\0') || at_statement_start(tokens, num_tokens, cursor);
         if (typing) {

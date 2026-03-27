@@ -50,6 +50,7 @@
 #include "references.h"
 #include "document_symbol.h"
 
+/* Returns 1 if position p falls within range r (both endpoints inclusive). */
 static int pos_in_range(LspPos p, LspRange r) {
     int after  = (p.line > r.start.line)
               || (p.line == r.start.line && p.character >= r.start.character);
@@ -58,6 +59,7 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
+/* Returns 1 if ranges a and b have identical start and end positions. */
 static int range_eq(LspRange a, LspRange b) {
     return pos_cmp(a.start, b.start) == 0 && pos_cmp(a.end, b.end) == 0;
 }
@@ -76,6 +78,19 @@ static const DocSymbol *find_task_at(const DocSymbol *syms, int n, LspPos pos) {
     return NULL;
 }
 
+/* Build the JSON array for a textDocument/references response.
+ * Finds the task declaration at cursor, then collects all dep_ref links that
+ * point to it.  Returns an empty array if no references exist, or NULL if the
+ * cursor is not on a task declaration identifier.
+ *
+ * doc         — the mutable JSON document that will own the returned value
+ * links       — resolved definition links from the ParseResult
+ * num_links   — number of entries in links
+ * symbols     — root-level symbol array from the ParseResult
+ * num_symbols — number of entries in symbols
+ * cursor      — cursor position from the textDocument/references request
+ * uri         — URI of the requesting document, embedded in Location results
+ */
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
                                        const DefinitionLink *links, int num_links,
                                        const DocSymbol *symbols, int num_symbols,

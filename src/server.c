@@ -140,6 +140,7 @@ typedef struct {
 
 static Document docs[MAX_DOCS];
 
+/* Find the open document with the given URI, or return NULL if not found. */
 static Document *doc_find(const char *uri) {
     for (int i = 0; i < MAX_DOCS; i++)
         if (docs[i].in_use && strcmp(docs[i].uri, uri) == 0)
@@ -147,6 +148,10 @@ static Document *doc_find(const char *uri) {
     return NULL;
 }
 
+/* Claim a free Document slot for uri and return it, or NULL if the store
+ * is full.  The returned slot has in_use=1 and uri set; all other fields
+ * are zeroed.
+ */
 static Document *doc_alloc(const char *uri) {
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) {
@@ -160,6 +165,9 @@ static Document *doc_alloc(const char *uri) {
     return NULL; /* shouldn't happen in practice */
 }
 
+/* Release all heap memory owned by d and zero its fields, returning the
+ * slot to the pool.
+ */
 static void doc_free(Document *d) {
     free(d->uri);
     free(d->text);
@@ -171,6 +179,9 @@ static void doc_free(Document *d) {
    Server-to-client messaging
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Write msg to stdout with the required LSP Content-Length header.
+ * Flushes stdout after writing so the editor receives the message promptly.
+ */
 void lsp_send_message(const char *msg) {
     printf("Content-Length: %zu\r\n\r\n%s", strlen(msg), msg);
     fflush(stdout);
@@ -213,6 +224,9 @@ static char *read_file(const char *path) {
    JSON helpers
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Extract an LspPos from a JSON object with "line" and "character" fields.
+ * Returns a zeroed LspPos if obj is NULL or the fields are absent.
+ */
 static LspPos json_to_pos(yyjson_val *obj) {
     LspPos p = {0};
     if (!obj) return p;
@@ -223,6 +237,7 @@ static LspPos json_to_pos(yyjson_val *obj) {
     return p;
 }
 
+/* Return the string value of obj[key], or NULL if missing or not a string. */
 static const char *json_str(yyjson_val *obj, const char *key) {
     if (!obj) return NULL;
     yyjson_val *item = yyjson_obj_get(obj, key);
@@ -288,6 +303,12 @@ static void revalidate_all_docs(void) {
    Handlers
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Handle the initialize request.
+ * Responds with the server's capabilities and registers all supported
+ * language features.  Client capabilities in params are not yet inspected.
+ * id     — request id to echo back in the response
+ * params — initialize parameters (currently unused)
+ */
 static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
     (void)params;
@@ -354,6 +375,10 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
+/* Handle the shutdown request.
+ * Returns a null result as required by the LSP spec; the server process
+ * exits on the subsequent exit notification.
+ */
 static yyjson_mut_val *handle_shutdown(yyjson_mut_doc *doc, yyjson_val *id) {
     return make_response(doc, id, yyjson_mut_null(doc));
 }
@@ -459,6 +484,11 @@ static void handle_did_change_watched_files(yyjson_val *params) {
     if (changed) revalidate_all_docs();
 }
 
+/* Handle textDocument/didOpen.
+ * Stores the document text, parses it, and triggers cross-file
+ * revalidation so that references to symbols in this file resolve.
+ * params — notification params containing textDocument.uri and textDocument.text
+ */
 static void handle_didopen(yyjson_val *params) {
     if (!params) return;
     yyjson_val *tdi = yyjson_obj_get(params, "textDocument");
@@ -494,6 +524,11 @@ static void handle_didopen(yyjson_val *params) {
     revalidate_all_docs();
 }
 
+/* Handle textDocument/didChange.
+ * Replaces the stored document text with the last full-sync content change,
+ * re-parses, and revalidates all open documents.
+ * params — notification params containing textDocument.uri and contentChanges[]
+ */
 static void handle_didchange(yyjson_val *params) {
     if (!params) return;
     yyjson_val *tdi     = yyjson_obj_get(params, "textDocument");
@@ -521,6 +556,12 @@ static void handle_didchange(yyjson_val *params) {
     revalidate_all_docs();
 }
 
+/* Handle textDocument/didClose.
+ * Clears the document from the store, publishes empty diagnostics to remove
+ * any editor-side errors, and revalidates remaining documents so that
+ * cross-file references to this file's symbols are re-checked.
+ * params — notification params containing textDocument.uri
+ */
 static void handle_didclose(yyjson_val *params) {
     if (!params) return;
     yyjson_val *tdi = yyjson_obj_get(params, "textDocument");
@@ -541,6 +582,10 @@ static void handle_didclose(yyjson_val *params) {
     revalidate_all_docs();
 }
 
+/* Handle textDocument/documentSymbol.
+ * Returns the doc_symbols[] tree for the requested document as a hierarchical
+ * symbol list, or null if the document is not open.
+ */
 static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
                                                yyjson_val *params) {
     const char *uri = NULL;
@@ -559,6 +604,9 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
     return make_response(doc, id, arr);
 }
 
+/* Handle textDocument/foldingRange.
+ * Returns folding ranges derived from the brace token spans of the document.
+ */
 static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
                                              yyjson_val *params) {
     const char *uri = NULL;
@@ -577,6 +625,11 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, arr);
 }
 
+/* Handle textDocument/hover.
+ * Determines the active keyword at the cursor position and returns its
+ * documentation as a Markdown hover card.  Returns null if the cursor is
+ * not over a keyword that has documentation.
+ */
 static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
                                      yyjson_val *params) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
@@ -620,6 +673,11 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, hover);
 }
 
+/* Handle textDocument/signatureHelp.
+ * Determines the active keyword context at the cursor and returns a
+ * SignatureHelp object with the keyword's argument signature.
+ * Returns null if the cursor is not in a recognised keyword context.
+ */
 static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id,
                                               yyjson_val *params) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
@@ -653,6 +711,9 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
     return make_response(doc, id, sig);
 }
 
+/* Handle textDocument/semanticTokens/full.
+ * Returns the full delta-encoded semantic token list for the document.
+ */
 static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
                                                     yyjson_val *params) {
     const char *uri = NULL;
@@ -671,6 +732,10 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
     return make_response(doc, id, result);
 }
 
+/* Handle textDocument/references.
+ * Returns all locations that reference the symbol under the cursor, using
+ * the precomputed def_links[] and doc_symbols[] from the parsed document.
+ */
 static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
@@ -696,6 +761,10 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
+/* Handle textDocument/definition.
+ * Returns the definition location for the dep-ref expression under the cursor,
+ * looked up from the precomputed def_links[] in the parsed document.
+ */
 static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
@@ -719,6 +788,10 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
+/* Handle textDocument/completion.
+ * Returns a completion list appropriate for the cursor context, including
+ * keyword suggestions and task-identifier completions from the symbol tree.
+ */
 static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
@@ -751,6 +824,9 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
+/* Handle workspace/symbol.
+ * Returns all task symbols across all open documents whose names contain query.
+ */
 static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
                                                 yyjson_val *params) {
     const char *query = params ? json_str(params, "query") : NULL;
@@ -771,6 +847,11 @@ static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *
    Main dispatch
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Parse and dispatch one JSON-RPC message.
+ * json_text — NUL-terminated JSON-RPC message body (no Content-Length header)
+ * Returns a heap-allocated JSON response string for request messages, or
+ * NULL for notifications (which have no response).  Caller must free.
+ */
 char *server_process(const char *json_text) {
     yyjson_doc *in_doc = yyjson_read(json_text, strlen(json_text), 0);
     if (!in_doc) return NULL;
@@ -867,6 +948,9 @@ char *server_process(const char *json_text) {
     return text;
 }
 
+/* Initialise the document store.
+ * Must be called once before server_process() is invoked for the first time.
+ */
 void server_init() {
      // Initialize array of Document objects
      for (int i=0; i<MAX_DOCS; i++) {

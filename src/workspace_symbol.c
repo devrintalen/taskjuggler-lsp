@@ -22,6 +22,17 @@
 #include <string.h>
 #include <strings.h>
 
+/* Recursively walk syms[], appending matching SymbolInformation entries to arr.
+ * Recurses into every node's children regardless of whether the node matched.
+ *
+ * doc       — the mutable JSON document that will own new values
+ * query     — case-insensitive substring filter; "" matches everything
+ * syms      — array of symbols to search
+ * n         — number of entries in syms
+ * uri       — document URI to embed in each Location result
+ * container — name of the parent symbol, or NULL at the top level
+ * arr       — JSON array to append matching entries to
+ */
 static void collect_recursive(yyjson_mut_doc *doc, const char *query,
                                const DocSymbol *syms, int n,
                                const char *uri, const char *container,
@@ -56,6 +67,16 @@ static void collect_recursive(yyjson_mut_doc *doc, const char *query,
     }
 }
 
+/* Append all symbols from syms[] that match query to the JSON array arr.
+ * Entry point called by the server for each open document.
+ *
+ * doc   — the mutable JSON document that will own new values
+ * query — case-insensitive substring filter; "" matches everything
+ * syms  — root-level symbol array for this document
+ * n     — number of entries in syms
+ * uri   — document URI used in Location results
+ * arr   — shared JSON array to append results to (across all documents)
+ */
 void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
                                 const DocSymbol *syms, int n,
                                 const char *uri, yyjson_mut_val *arr)

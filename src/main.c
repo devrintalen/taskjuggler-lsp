@@ -61,6 +61,10 @@ static char *read_message(void) {
     return buf;
 }
 
+/* Entry point.  Initializes the server, then reads LSP messages from stdin
+ * in a loop, dispatches each to the server, and writes any response to stdout.
+ * Returns 0 when stdin closes (normal client shutdown).
+ */
 int main(void) {
     server_init();
     for (;;) {

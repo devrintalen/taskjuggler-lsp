@@ -18,6 +18,11 @@
 
 #include "document_symbol.h"
 
+/* Serialize an LspRange into a {"start": {...}, "end": {...}} JSON object.
+ *
+ * doc — the mutable JSON document that will own the returned value
+ * r   — the range to serialize
+ */
 yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r) {
     yyjson_mut_val *s  = yyjson_mut_obj(doc);
     yyjson_mut_val *st = yyjson_mut_obj(doc);
@@ -31,6 +36,12 @@ yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r) {
     return s;
 }
 
+/* Recursively convert a DocSymbol to a DocumentSymbol JSON object.
+ * Children are nested under the "children" key if present.
+ *
+ * doc — the mutable JSON document that will own the returned value
+ * sym — the symbol to serialize
+ */
 static yyjson_mut_val *doc_symbol_to_json(yyjson_mut_doc *doc,
                                            const DocSymbol *sym) {
     yyjson_mut_val *obj = yyjson_mut_obj(doc);
@@ -48,6 +59,12 @@ static yyjson_mut_val *doc_symbol_to_json(yyjson_mut_doc *doc,
     return obj;
 }
 
+/* Build the JSON array for a textDocument/documentSymbol response.
+ *
+ * doc  — the mutable JSON document that will own the returned value
+ * syms — root-level symbol array
+ * n    — number of entries in syms
+ */
 yyjson_mut_val *build_document_symbols_json(yyjson_mut_doc *doc,
                                              const DocSymbol *syms, int n) {
     yyjson_mut_val *arr = yyjson_mut_arr(doc);

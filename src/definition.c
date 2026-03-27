@@ -45,6 +45,7 @@
 #include "definition.h"
 #include "document_symbol.h"
 
+/* Returns 1 if position p falls within range r (both endpoints inclusive). */
 static int pos_in_range(LspPos p, LspRange r) {
     int after  = (p.line > r.start.line)
               || (p.line == r.start.line && p.character >= r.start.character);
@@ -53,6 +54,16 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
+/* Build a Location JSON object for the go-to-definition response.
+ * Scans links[] for one whose source range contains cursor.
+ * Returns NULL if no matching link is found (server will return null to editor).
+ *
+ * doc       — the mutable JSON document that will own the returned value
+ * links     — array of resolved definition links from the ParseResult
+ * num_links — number of entries in links
+ * cursor    — cursor position from the textDocument/definition request
+ * uri       — URI of the requesting document, used as fallback target URI
+ */
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
                                        const DefinitionLink *links, int num_links,
                                        LspPos cursor, const char *uri) {

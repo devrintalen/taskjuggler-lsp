@@ -189,11 +189,19 @@ static void emit_token(yyjson_mut_doc *doc, yyjson_mut_val *data,
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
+/* Build the {"data": [...]} response object for textDocument/semanticTokens/full.
+ * Iterates tok_spans, classifies each token, and emits delta-encoded entries.
+ *
+ * doc       — the mutable JSON document that will own the returned value
+ * spans     — token span array from the ParseResult
+ * num_spans — number of entries in spans
+ */
 yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
                                             const TokenSpan *spans, int num_spans) {
     yyjson_mut_val *data = yyjson_mut_arr(doc);
     uint32_t prev_line = 0, prev_char = 0;
 
+    /* Emit one or more delta-encoded entries for each highlightable token */
     for (int i = 0; i < num_spans; i++) {
         const TokenSpan *s = &spans[i];
         int token_type, modifiers;
