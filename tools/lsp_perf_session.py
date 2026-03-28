@@ -39,14 +39,15 @@ Request types (--requests):
 
 import argparse
 import json
-import queue
+import os
 import random
 import re
 import statistics
-import subprocess
 import sys
-import threading
-import time
+
+# Allow importing from the same tools/ directory
+sys.path.insert(0, os.path.dirname(__file__))
+from lsp_framing import run_scenario
 
 
 DEFAULT_REQUESTS = (
@@ -62,47 +63,6 @@ ALL_REQUEST_TYPES = POSITION_REQUESTS | {
     'document-symbol', 'folding-range', 'semantic-tokens',
     'workspace-symbol', 'didchange',
 }
-
-
-# ── LSP framing ───────────────────────────────────────────────────────────────
-
-def frame_message(message):
-    """Encode a dict as a Content-Length-framed LSP message (bytes)."""
-    body = json.dumps(message, separators=(',', ':')).encode('utf-8')
-    header = f"Content-Length: {len(body)}\r\n\r\n".encode('ascii')
-    return header + body
-
-
-def read_message(stream):
-    """Read one LSP-framed message from a binary stream.
-
-    Returns the parsed dict, or None on EOF/error.
-    """
-    content_length = None
-
-    while True:
-        raw_line = stream.readline()
-        if not raw_line:
-            return None
-        line = raw_line.rstrip(b'\r\n')
-        if not line:
-            break
-        if line.lower().startswith(b'content-length:'):
-            content_length = int(line.split(b':', 1)[1].strip())
-
-    if content_length is None or content_length <= 0:
-        return None
-
-    body = b''
-    remaining = content_length
-    while remaining > 0:
-        chunk = stream.read(remaining)
-        if not chunk:
-            return None
-        body += chunk
-        remaining -= len(chunk)
-
-    return json.loads(body)
 
 
 # ── Position samplers ─────────────────────────────────────────────────────────
@@ -416,94 +376,6 @@ def build_session(tjp_text, uri, request_types, position_sets, repeat):
     messages.append(req('shutdown', {}))
 
     return messages
-
-
-# ── Server runner (for --run mode) ────────────────────────────────────────────
-
-def _reader_thread(stdout, q):
-    """Background thread: push every server message onto q, then push None at EOF."""
-    while True:
-        msg = read_message(stdout)
-        q.put(msg)
-        if msg is None:
-            break
-
-
-def run_scenario(server_binary, messages, response_timeout=60.0):
-    """Start the server, replay messages, and return timing data.
-
-    Returns a list of (method, elapsed_ms) for every request that received
-    a response.
-    """
-    process = subprocess.Popen(
-        [server_binary],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-    )
-
-    response_queue = queue.Queue()
-    reader = threading.Thread(
-        target=_reader_thread,
-        args=(process.stdout, response_queue),
-        daemon=True,
-    )
-    reader.start()
-
-    timings = []
-
-    try:
-        for msg in messages:
-            is_request = 'id' in msg
-
-            if not is_request:
-                process.stdin.write(frame_message(msg))
-                process.stdin.flush()
-                continue
-
-            msg_id = msg['id']
-            method = msg['method']
-
-            start = time.perf_counter()
-            process.stdin.write(frame_message(msg))
-            process.stdin.flush()
-
-            deadline = time.monotonic() + response_timeout
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        f"No response for '{method}' (id={msg_id}) "
-                        f"within {response_timeout}s"
-                    )
-                try:
-                    response = response_queue.get(timeout=max(0.001, remaining))
-                except queue.Empty:
-                    raise TimeoutError(
-                        f"No response for '{method}' (id={msg_id}) "
-                        f"within {response_timeout}s"
-                    )
-                if response is None:
-                    raise EOFError(
-                        f"Server closed connection while waiting for "
-                        f"'{method}' (id={msg_id})"
-                    )
-                if response.get('id') == msg_id:
-                    elapsed_ms = (time.perf_counter() - start) * 1000
-                    timings.append((method, elapsed_ms))
-                    break
-
-    finally:
-        try:
-            process.stdin.close()
-        except OSError:
-            pass
-        reader.join(timeout=5.0)
-        try:
-            process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            process.kill()
-
-    return timings
 
 
 # ── Statistics & display ──────────────────────────────────────────────────────

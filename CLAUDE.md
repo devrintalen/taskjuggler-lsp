@@ -42,8 +42,12 @@ Tools in `tools/`:
 - `generate_large_tjp.py` — generates large `.tjp` files for stress testing
 - `lsp_perf_session.py` — builds a JSON message sequence from a `.tjp` file; can run it directly against the server and print per-method timings
 - `lsp_bench.py` — replays a session JSON against the server with repeated iterations and p95 stats
-- `lsp_callgrind.py` — profiles a single LSP request under Valgrind Callgrind; outputs `callgrind.out` + `calltree.txt`
-- `callgrind_parse.py` — parses callgrind output; prints flat top-N by instruction count or a call tree rooted at a named function
+- `lsp_record_bench.py` — runs all fixtures and appends a record to `benchmarks.jsonl`
+- `lsp_check_perf.py` — compares the last two records in `benchmarks.jsonl` and flags regressions
+- `callgrind.py` — profile mode: runs a scenario under Valgrind Callgrind; parse mode: reads an existing `callgrind.out` — both modes print flat top-N and a call tree
+- `lsp_framing.py` — shared LSP transport helpers (not run directly; imported by bench/perf/callgrind tools)
+- `lsp_log_parse.py` — parses Emacs lsp-mode trace logs into session JSON
+- `lsp_test.py` — golden-file test harness
 
 ### TJP fixture files (`test/perf_*.tjp`)
 
@@ -65,14 +69,14 @@ python3 tools/lsp_perf_session.py test/perf_flat.tjp \
     --requests completion --positions 1 --repeat 1 \
     --output test/scenarios/flat_completion.json
 
-# Profile it:
-python3 tools/lsp_callgrind.py ./taskjuggler-lsp-debug \
+# Profile and analyse in one step:
+python3 tools/callgrind.py ./taskjuggler-lsp-debug \
     test/scenarios/flat_completion.json \
     -o test/callgrind/flat_completion/
 
-# Analyse results:
-python3 tools/callgrind_parse.py test/callgrind/flat_completion/callgrind.out --top 30
-python3 tools/callgrind_parse.py test/callgrind/flat_completion/callgrind.out \
+# Or analyse an existing output file:
+python3 tools/callgrind.py test/callgrind/flat_completion/callgrind.out --top 30
+python3 tools/callgrind.py test/callgrind/flat_completion/callgrind.out \
     --tree handle_completion
 ```
 

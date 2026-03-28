@@ -73,11 +73,139 @@ python3 tools/lsp_test.py --all test/cases ./taskjuggler-lsp
 
 ### Python tools
 
-- **`tools/lsp_test.py`** — Golden-file test harness. Replays a JSON array of LSP messages against the server and compares output to `expected.json`. Pass `--record` to write a new golden file instead of comparing.
-- **`tools/lsp_bench.py`** — Benchmarks the server by replaying a message sequence and reporting per-method round-trip times. Accepts `--iterations`, `--warmup`, and `--methods` options; supports `perf record` via `--perf`.
-- **`tools/lsp_callgrind.py`** — Profiles a single LSP request under Valgrind Callgrind and produces an annotated call tree with inclusive/exclusive instruction counts.
-- **`tools/lsp_log_parse.py`** — Converts an Emacs `lsp-mode` trace log into a JSON message sequence compatible with `lsp_test.py` and `lsp_bench.py`.
-- **`tools/callgrind_parse.py`** — Parses a raw `callgrind.out` file and prints a flat profile and call tree without requiring `callgrind_annotate`.
+All tools live in `tools/`. They share a common session file format: a JSON array of LSP message objects that is replayed against the server. This format is produced by `lsp_perf_session.py` and `lsp_log_parse.py`, and consumed by `lsp_test.py`, `lsp_bench.py`, and `callgrind.py`.
+
+#### Testing
+
+**`lsp_test.py`** — Golden-file test harness.
+
+Replays a JSON message sequence against the server and diffs the output against a recorded `expected.json`. Use `--record` to capture a new golden file.
+
+```sh
+# Run all test cases:
+python3 tools/lsp_test.py ./taskjuggler-lsp --all test/cases
+
+# Record a new golden file for a single case:
+python3 tools/lsp_test.py ./taskjuggler-lsp --record test/cases/hover_keyword
+```
+
+Test cases live under `test/cases/`. Each is a directory containing `input.json` (the message sequence to send) and `expected.json` (the golden output).
+
+#### Benchmarking
+
+The benchmarking tools form a pipeline:
+
+```
+generate_large_tjp.py           # (one-time) create fixture .tjp files
+    ↓
+lsp_perf_session.py             # build session JSON from a .tjp file
+    ↓
+lsp_bench.py / lsp_record_bench.py   # replay session, collect timings
+    ↓
+lsp_check_perf.py               # compare records, flag regressions
+```
+
+**`lsp_perf_session.py`** — Build a session JSON file from a `.tjp` fixture.
+
+Generates a realistic LSP message sequence (initialize, didOpen, a mix of requests, shutdown) with cursor positions sampled to exercise each handler's interesting code paths: hover lands on documented keyword tokens, completion samples a weighted mix of keyword/dep-ref/resource-ref/account-ref positions, definition and references land on positions that return non-null results.
+
+```sh
+# Build a session file for all default request types:
+python3 tools/lsp_perf_session.py test/perf_flat.tjp \
+    --output test/session_flat.json
+
+# Quick single-shot run with timing output (no file written):
+python3 tools/lsp_perf_session.py test/perf_flat.tjp \
+    --run ./taskjuggler-lsp
+
+# Profile a specific method with more positions:
+python3 tools/lsp_perf_session.py test/perf_flat.tjp \
+    --requests completion --positions 10 --run ./taskjuggler-lsp
+```
+
+Available request types: `hover`, `completion`, `signature`, `definition`, `references`, `document-symbol`, `folding-range`, `semantic-tokens`, `workspace-symbol`, `didchange`.
+
+**`lsp_bench.py`** — Replay a session file with multiple iterations and report statistics.
+
+```sh
+python3 tools/lsp_bench.py ./taskjuggler-lsp test/session_flat.json \
+    --iterations 7 --warmup 2
+
+# Profile with Linux perf:
+python3 tools/lsp_bench.py ./taskjuggler-lsp test/session_flat.json \
+    --perf perf.data
+```
+
+Reports `n`, mean, median, min, max, and p95 (when ≥20 samples) per method.
+
+**`lsp_record_bench.py`** — Run all fixtures and append a timestamped record to `benchmarks.jsonl`.
+
+Runs `lsp_bench.py`'s core against every `test/session_*.json` (and `test/session_*_warm.json` for warm-cache measurements), then appends a single JSON line containing the git commit hash, timestamp, hostname, and per-method stats to `benchmarks.jsonl`.
+
+```sh
+python3 tools/lsp_record_bench.py
+python3 tools/lsp_record_bench.py --iterations 10 --warmup 3
+python3 tools/lsp_record_bench.py --dry-run   # print without writing
+```
+
+**`lsp_check_perf.py`** — Compare the last two records in `benchmarks.jsonl` and flag regressions.
+
+```sh
+python3 tools/lsp_check_perf.py                        # default 10% threshold
+python3 tools/lsp_check_perf.py --threshold 5          # stricter
+python3 tools/lsp_check_perf.py --method documentSymbol --fixture flat
+python3 tools/lsp_check_perf.py --threshold 999        # print table, never fail
+```
+
+Exits 0 if no regressions, 1 if any method/fixture combination regressed beyond the threshold.
+
+**`generate_large_tjp.py`** — Generate large valid `.tjp` files for stress testing.
+
+```sh
+python3 tools/generate_large_tjp.py --tasks 10000 --depth 1 --deps-per-task 2 \
+    --output test/perf_flat.tjp
+python3 tools/generate_large_tjp.py --tasks 2000 --depth 3 --deps-per-task 8 \
+    --output test/perf_highdeps.tjp
+```
+
+The committed fixture files under `test/perf_*.tjp` were generated with this tool and cover different structural stress profiles (flat, wide, deep, high-dependency-density).
+
+#### Profiling with Callgrind
+
+**`callgrind.py`** — Profile a scenario under Valgrind Callgrind, or analyse an existing output file.
+
+Requires a debug build (`make debug`) so that function names resolve correctly.
+
+```sh
+# Generate a focused single-request scenario:
+python3 tools/lsp_perf_session.py test/perf_flat.tjp \
+    --requests completion --positions 1 --repeat 1 \
+    --output test/scenarios/flat_completion.json
+
+# Profile it (slow — Callgrind runs ~20x slower than normal):
+python3 tools/callgrind.py ./taskjuggler-lsp-debug \
+    test/scenarios/flat_completion.json \
+    -o test/callgrind/flat_completion/
+
+# Analyse a previously recorded output file:
+python3 tools/callgrind.py test/callgrind/flat_completion/callgrind.out --top 30
+python3 tools/callgrind.py test/callgrind/flat_completion/callgrind.out \
+    --tree handle_completion
+```
+
+Profile mode writes `callgrind.out` and `calltree.txt` to the output directory, then prints a flat profile (top N functions by exclusive instruction count) and a call tree. Parse mode reads an existing `callgrind.out` directly and prints the same analysis. The output directory can also be opened in KCachegrind for interactive exploration.
+
+#### Capturing real sessions
+
+**`lsp_log_parse.py`** — Convert an Emacs `lsp-mode` trace log into a session JSON file.
+
+Enable `lsp-log-io` in Emacs (`M-x lsp-workspace-set-log-level RET io`), reproduce the scenario, then export the log buffer and parse it:
+
+```sh
+python3 tools/lsp_log_parse.py /path/to/lsp-log.txt -o session.json
+```
+
+The output is compatible with `lsp_test.py`, `lsp_bench.py`, and `callgrind.py`.
 
 
 ## Usage

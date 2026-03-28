@@ -1,20 +1,61 @@
 #!/usr/bin/env python3
 """
-Parse a callgrind.out file and print a readable flat profile + call tree.
+Profile and analyze LSP requests using Valgrind Callgrind.
+
+Two modes, selected by the input file extension:
+
+  Profile mode (.json input):
+    Run the server under Callgrind with a scenario file, write callgrind.out
+    and calltree.txt to an output directory, then print a flat profile and
+    call tree.
+
+  Parse mode (.out input):
+    Parse an existing callgrind.out file and print a flat profile and/or
+    call tree.  No server execution.
 
 Usage:
-  callgrind_parse.py <callgrind.out> [--top N] [--tree FUNCNAME]
+  # Profile a scenario and print analysis:
+  callgrind.py <server> <scenario.json> [-o output_dir] [--top N] [--tree FUNC]
 
---top N      Print the top N functions by self instruction count (default: 40)
---tree FUNC  Print the call tree rooted at FUNC (partial name match)
+  # Analyse an existing callgrind output file:
+  callgrind.py <callgrind.out> [--top N] [--tree FUNC]
+
+Options (both modes):
+  --top N       Print the top N functions by self instruction count (default: 40)
+  --tree FUNC   Print the call tree rooted at this function (partial name match)
+
+Profile-mode options:
+  -o DIR        Directory for callgrind.out and calltree.txt (default: .)
+
+Examples:
+  # Generate a scenario then profile it:
+  python3 tools/lsp_perf_session.py test/perf_flat.tjp \\
+      --requests completion --positions 1 --repeat 1 \\
+      --output test/scenarios/flat_completion.json
+
+  python3 tools/callgrind.py ./taskjuggler-lsp-debug \\
+      test/scenarios/flat_completion.json \\
+      -o test/callgrind/flat_completion/
+
+  # Analyse a previously recorded file:
+  python3 tools/callgrind.py test/callgrind/flat_completion/callgrind.out --top 30
+  python3 tools/callgrind.py test/callgrind/flat_completion/callgrind.out \\
+      --tree handle_completion
 """
 
 import argparse
 import os
 import re
+import subprocess
 import sys
 from collections import defaultdict
 
+# Allow importing from the same tools/ directory
+sys.path.insert(0, os.path.dirname(__file__))
+from lsp_framing import run_scenario
+
+
+# ── Callgrind output parser ───────────────────────────────────────────────────
 
 def parse_callgrind(path):
     """
@@ -116,14 +157,6 @@ def parse_callgrind(path):
     return files, funcs, self_ir, call_ir, call_cnt
 
 
-def func_label(fid, funcs, files, func_file=None):
-    name = funcs.get(fid, f'<fn#{fid}>')
-    if func_file and fid in func_file and func_file[fid] in files:
-        short = os.path.basename(files[func_file[fid]])
-        return f'{name}  [{short}]'
-    return name
-
-
 def compute_inclusive(func_ids, self_ir, call_ir):
     """
     Compute inclusive cost for every function using the call graph.
@@ -190,28 +223,20 @@ def find_func(name_fragment, funcs):
     return [(fid, name) for fid, name in funcs.items() if frag in name.lower()]
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Parse callgrind.out and print flat profile + call tree.',
-    )
-    parser.add_argument('callgrind_out', help='callgrind.out file')
-    parser.add_argument('--top', type=int, default=40,
-                        help='Number of functions in flat profile (default: 40)')
-    parser.add_argument('--tree', metavar='FUNC',
-                        help='Print call tree rooted at this function (partial name match)')
-    args = parser.parse_args()
-
-    files, funcs, self_ir, call_ir, call_cnt = parse_callgrind(args.callgrind_out)
+def analyse(callgrind_out, top_n, tree_func):
+    """Parse callgrind_out and print flat profile and/or call tree."""
+    import json as _json  # only used for total formatting
+    files, funcs, self_ir, call_ir, call_cnt = parse_callgrind(callgrind_out)
 
     total = sum(self_ir.values())
     print(f"\nTotal instructions: {total:,}\n")
-    print(f"Flat profile — top {args.top} by self (exclusive) instruction count\n")
-    print_flat(funcs, files, self_ir, call_ir, args.top)
+    print(f"Flat profile — top {top_n} by self (exclusive) instruction count\n")
+    print_flat(funcs, files, self_ir, call_ir, top_n)
 
-    if args.tree:
-        matches = find_func(args.tree, funcs)
+    if tree_func:
+        matches = find_func(tree_func, funcs)
         if not matches:
-            print(f"No function matching '{args.tree}' found.", file=sys.stderr)
+            print(f"No function matching '{tree_func}' found.", file=sys.stderr)
             print("Named functions:", file=sys.stderr)
             for fid, name in sorted(funcs.items(), key=lambda x: x[1])[:40]:
                 if not name.startswith('0x'):
@@ -222,7 +247,7 @@ def main():
         print(f"Call tree: {root_name}\n")
         print_call_tree(root_id, funcs, self_ir, call_ir, call_cnt)
     else:
-        # Default: show tree for the server_process entry point or top handler
+        # Default: show tree for the top server handler
         for target in ('server_process', 'handle_completion', 'handle_hover',
                        'handle_didchange', 'handle_didopen'):
             matches = find_func(target, funcs)
@@ -232,6 +257,117 @@ def main():
                 print_call_tree(root_id, funcs, self_ir, call_ir, call_cnt)
                 break
     print()
+
+
+# ── Profile mode ──────────────────────────────────────────────────────────────
+
+def profile(server, scenario_json, output_dir, top_n, tree_func):
+    """Run the server under Callgrind, write output files, then analyse."""
+    import json
+
+    os.makedirs(output_dir, exist_ok=True)
+    callgrind_out = os.path.join(output_dir, 'callgrind.out')
+    calltree_out  = os.path.join(output_dir, 'calltree.txt')
+
+    with open(scenario_json) as f:
+        messages = json.load(f)
+
+    method = next(
+        (m.get('method') for m in messages if 'id' in m and m.get('method') != 'initialize'),
+        'unknown'
+    )
+    print(f"Profiling: {method}")
+    print(f"Scenario:  {scenario_json} ({len(messages)} messages)")
+    print(f"Output:    {output_dir}/")
+    print()
+
+    callgrind_cmd = [
+        'valgrind',
+        '--tool=callgrind',
+        f'--callgrind-out-file={callgrind_out}',
+        '--cache-sim=yes',
+        '--branch-sim=yes',
+        '--collect-atstart=yes',
+        '--instr-atstart=yes',
+        server,
+    ]
+
+    print("Running callgrind (this will be slow — ~20x slower than normal)...")
+    try:
+        run_scenario(callgrind_cmd, messages, response_timeout=600.0)
+    except (TimeoutError, EOFError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Callgrind data written to: {callgrind_out}")
+    print()
+
+    # Also run callgrind_annotate to produce a human-readable call tree file.
+    print("Generating annotated call tree...")
+    annotate_cmd = [
+        'callgrind_annotate',
+        '--tree=both',
+        '--inclusive=yes',
+        '--threshold=0',
+        '--auto=yes',
+        callgrind_out,
+    ]
+    result = subprocess.run(annotate_cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        with open(calltree_out, 'w') as f:
+            f.write(result.stdout)
+        print(f"Annotated tree written to:  {calltree_out}")
+    else:
+        print(f"callgrind_annotate failed (non-fatal):\n{result.stderr}", file=sys.stderr)
+    print()
+    print("To browse interactively:  kcachegrind " + callgrind_out)
+    print()
+
+    analyse(callgrind_out, top_n, tree_func)
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Profile and analyze LSP requests using Valgrind Callgrind.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Profile a scenario:
+  callgrind.py ./taskjuggler-lsp-debug test/scenarios/flat_completion.json \\
+      -o test/callgrind/flat_completion/ --top 30 --tree handle_completion
+
+  # Analyse an existing output:
+  callgrind.py test/callgrind/flat_completion/callgrind.out --top 30
+  callgrind.py test/callgrind/flat_completion/callgrind.out --tree handle_completion
+""",
+    )
+
+    # Positional args vary by mode; detect by checking the first non-option arg.
+    parser.add_argument('args', nargs='+',
+                        help='[server scenario.json] OR [callgrind.out]')
+    parser.add_argument('-o', '--output-dir', default='.',
+                        help='Output directory for profile mode (default: .)')
+    parser.add_argument('--top', type=int, default=40,
+                        help='Number of functions in flat profile (default: 40)')
+    parser.add_argument('--tree', metavar='FUNC',
+                        help='Print call tree rooted at this function (partial name match)')
+
+    args = parser.parse_args()
+
+    positional = args.args
+
+    # Detect mode: parse mode if single .out file, profile mode if server + .json
+    if len(positional) == 1 and positional[0].endswith('.out'):
+        analyse(positional[0], args.top, args.tree)
+    elif len(positional) >= 2 and positional[1].endswith('.json'):
+        profile(positional[0], positional[1], args.output_dir, args.top, args.tree)
+    else:
+        parser.error(
+            "Provide either:\n"
+            "  callgrind.py <server> <scenario.json> [-o dir]\n"
+            "  callgrind.py <callgrind.out>"
+        )
 
 
 if __name__ == '__main__':
