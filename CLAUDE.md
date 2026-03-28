@@ -136,6 +136,19 @@ does not call it, so only completion benefits.
 classification logic itself is cheap. Fix: build the LSP integer array directly into a
 flat buffer rather than via a yyjson object tree, then emit it once.
 
+**Fixed (2026-03-27):** Replaced the `push_entry` / yyjson array tree approach with a
+flat `uint32_t` buffer. `build_semantic_tokens_json` now writes five integers per token
+directly into a `realloc`-grown buffer, then passes the raw byte span to the JSON
+encoder as a pre-formatted string. `push_entry` and the yyjson array mutation calls are
+gone entirely; `yyjson_mut_write_opts` no longer traverses the token array.
+
+| Scenario                     | Before (handler) | Before (serialization) | After (total) | Δ               |
+|------------------------------|------------------|------------------------|---------------|-----------------|
+| flat (10k) × semantic-tokens | 13.8M Ir         | +14.0M Ir (yyjson)     | 12.2M Ir      | −56% end-to-end |
+| `push_entry` self            | 10.7M Ir         | —                      | 0             | −100%           |
+| `yyjson_mut_write_opts` self | 14.0M Ir         | —                      | <1K Ir        | −99.9%          |
+| wall-clock (flat, median)    | 54.2ms           | —                      | 49.2ms        | −9%             |
+
 **Bottleneck 4 — `build_completions_json` dep-ref traversal (completion.c)**
 With 0 deps: `build_completions_json` self cost is 1.3M Ir.
 With 8 deps/task: self cost jumps to 7.76M Ir despite 2.5× fewer tasks.
