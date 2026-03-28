@@ -155,6 +155,45 @@ With 8 deps/task: self cost jumps to 7.76M Ir despite 2.5× fewer tasks.
 The identifier-collection loop visits dep references every request.
 Fix: cache the candidate identifier list per document; invalidate on didChange.
 
+### Callgrind findings (2026-03-27, second pass — intentional position sampling)
+
+Re-profiled after the position sampler was rewritten to target meaningful cursor
+positions per handler. Scenarios use the deepest positions in the file for
+scan-sensitive handlers (completion).
+
+Handler-inclusive instruction counts (excluding one-time parse cost on didOpen):
+
+| Scenario | Handler Ir | Key costs |
+|---|---|---|
+| flat (10k tasks) × semantic-tokens | 12.2M | `build_semantic_tokens_json` self 11.6M |
+| flat (10k tasks) × hover (line 7590) | 1.05M | `scan_kw_stack` 3,649 tokens |
+| flat (10k tasks) × signatureHelp (line 7590) | 1.28M | `scan_kw_stack` 3,649 tokens |
+| flat (10k tasks) × completion (line 31098) | 28.1M | `collect_ids` 7.0M; `scan_kw_stack` 5.2M |
+| flat (10k tasks) × definition | 42.6K | O(depth) hash lookup |
+| flat (10k tasks) × references | 341.5K | linear scan + `find_task_at` |
+| flat (10k tasks) × documentSymbol | ~30.5M | 7.4M handler + 23.1M `yyjson_mut_write_opts` |
+| flat (10k tasks) × foldingRange | 2.87M | `push_range` called 20,004× |
+| highdeps (2k tasks, 8 deps) × semantic-tokens | 57.9M | dense token array; `build_semantic_tokens_json` self 57.6M |
+| highdeps (2k tasks, 8 deps) × completion (line 30042) | 81.2M | `scan_kw_stack` 29.7M; `build_completions_json` self 47.1M |
+| highdeps (2k tasks, 8 deps) × documentSymbol | 7.9M | 2k symbols × range_json |
+
+**New bottleneck A — `documentSymbol` yyjson serialization**
+`build_document_symbols_json` builds a full yyjson object tree: `doc_symbol_to_json`
+calls `range_json` 40,004× (4 ranges × 10k symbols = 40k yyjson objects), then
+`yyjson_mut_write_opts` traverses the entire tree — 23.1M Ir just for serialization,
+dwarfing the 7.4M Ir tree-building cost. Total effective handler cost ≈ 30.5M Ir.
+Fix: pre-serialize the symbol tree to a flat JSON string once and cache it;
+invalidate on didChange. (Same pattern as Bottleneck 3 fix for semantic tokens.)
+
+**New bottleneck B — `scan_kw_stack` on dense dep files (completion.c)**
+In `highdeps × completion`, `scan_kw_stack` costs 29.7M Ir (27.1M self) scanning
+19,848 tokens — roughly 3× more tokens per task than the flat file due to 8 dep-ref
+tokens per task. The backward linear scan is O(all_tokens_before_cursor), which scales
+with both file size and dep density. `build_completions_json` self is also 47.1M Ir,
+partly from string filtering across the collected identifier list.
+Fix: build a sorted keyword-token index at parse time so `scan_kw_stack` can
+binary-search to the first relevant token, skipping non-keyword tokens.
+
 ### Wall-clock baseline (2026-03-27)
 
 Measured with `lsp_bench.py --iterations 7 --warmup 2` after all 2026-03-27
