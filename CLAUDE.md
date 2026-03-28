@@ -155,3 +155,35 @@ With 8 deps/task: self cost jumps to 7.76M Ir despite 2.5× fewer tasks.
 The identifier-collection loop visits dep references every request.
 Fix: cache the candidate identifier list per document; invalidate on didChange.
 
+### Wall-clock baseline (2026-03-27)
+
+Measured with `lsp_bench.py --iterations 7 --warmup 2` after all 2026-03-27
+optimisations. Session files generated with the intentional per-handler position
+sampler (hover on keyword tokens, completion weighted across all branches,
+definition/references on positions that produce non-null results).
+
+All times are **median ms** across 7 runs × 5 positions (35 samples) for
+position-based handlers, or 7 runs × 1 for whole-document handlers.
+
+| Method | flat (10k, d=1) | wide (5k, d=2) | balanced (5k, d=3) | highdeps (2k, 8dep) | deep (500, d=5) |
+|---|---|---|---|---|---|
+| semanticTokens/full | 53.6 | 79.1 | 101.5 | 295.9 | 164.8 |
+| documentSymbol | 63.5 | 60.4 | 62.7 | 69.0 | 90.4 |
+| foldingRange | 15.9 | 17.0 | 17.9 | 18.6 | 23.2 |
+| completion (median) | 2.5 | 0.7 | 0.7 | 2.5 | 1.6 |
+| completion (p95) | 11.1 | 4.4 | 7.6 | 30.3 | 15.0 |
+| hover (median) | 0.8 | 0.8 | 1.0 | 1.7 | 0.9 |
+| signatureHelp (median) | 1.2 | 1.4 | 1.9 | 2.3 | 2.2 |
+| definition (median) | 0.1 | 0.1 | 0.1 | 0.2 | 0.1 |
+| references (median) | 0.1 | 0.1 | 0.2 | 0.4 | 0.4 |
+
+**Observations:**
+- `semanticTokens/full` is the dominant cost for whole-document requests; scales
+  steeply with dep count (highdeps 296ms vs. flat 54ms) due to token array size.
+- `documentSymbol` is surprisingly expensive (63–90ms) relative to its O(n) tree
+  walk; likely dominated by JSON serialization of the symbol tree.
+- `completion` p95 on highdeps (30ms) confirms Bottleneck 4 is unresolved: the
+  8-deps/task file causes the identifier-collection loop to visit far more nodes.
+- Position-based handlers (hover, signature, definition, references) are all
+  sub-5ms median across all fixtures; no action needed.
+
