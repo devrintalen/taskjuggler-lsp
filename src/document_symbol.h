@@ -25,8 +25,9 @@
 yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r);
 
 /*
- * Build the JSON array of DocumentSymbol objects for
- * textDocument/documentSymbol responses.
+ * Serialize the documentSymbol tree to a heap-allocated, NUL-terminated JSON
+ * array string.  Sets *out_len to the byte length (excluding NUL).
+ * Caller owns the returned memory and must free() it.
+ * Intended to be cached and embedded via yyjson_mut_rawncpy.
  */
-yyjson_mut_val *build_document_symbols_json(yyjson_mut_doc *doc,
-                                             const DocSymbol *syms, int n);
+char *build_document_symbols_json(const DocSymbol *syms, int n, size_t *out_len);

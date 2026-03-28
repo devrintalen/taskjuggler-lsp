@@ -136,6 +136,8 @@ typedef struct {
     char       *uri;
     char       *text;
     ParseResult parse;
+    char       *doc_symbols_json; /* cached documentSymbol JSON array; NULL = invalid */
+    size_t      doc_symbols_json_len; /* byte length of doc_symbols_json (excluding NUL) */
     int         in_use;
 } Document;
 
@@ -172,6 +174,7 @@ static Document *doc_alloc(const char *uri) {
 static void doc_free(Document *d) {
     free(d->uri);
     free(d->text);
+    free(d->doc_symbols_json);
     parse_result_free(&d->parse);
     memset(d, 0, sizeof(*d));
 }
@@ -561,6 +564,8 @@ static void handle_didchange(yyjson_val *params) {
     if (!d) return;
 
     free(d->text);
+    free(d->doc_symbols_json);
+    d->doc_symbols_json = NULL;
     d->text = strdup(text);
     parse_result_free(&d->parse);
     d->parse = parse(text);
@@ -609,10 +614,14 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    yyjson_mut_val *arr = build_document_symbols_json(doc,
-                                                       d->parse.doc_symbols,
-                                                       d->parse.num_doc_symbols);
-    return make_response(doc, id, arr);
+    if (!d->doc_symbols_json)
+        d->doc_symbols_json = build_document_symbols_json(d->parse.doc_symbols,
+                                                           d->parse.num_doc_symbols,
+                                                           &d->doc_symbols_json_len);
+    yyjson_mut_val *raw = yyjson_mut_rawncpy(doc,
+                                              d->doc_symbols_json,
+                                              d->doc_symbols_json_len);
+    return make_response(doc, id, raw);
 }
 
 /* Handle textDocument/foldingRange.

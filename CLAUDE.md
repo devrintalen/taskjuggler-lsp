@@ -185,6 +185,21 @@ dwarfing the 7.4M Ir tree-building cost. Total effective handler cost ≈ 30.5M 
 Fix: pre-serialize the symbol tree to a flat JSON string once and cache it;
 invalidate on didChange. (Same pattern as Bottleneck 3 fix for semantic tokens.)
 
+**Fixed (2026-03-28):** Replaced `doc_symbol_to_json` (yyjson tree) with a flat
+`Buf`-based serializer in `document_symbol.c`. Key optimizations: hand-written
+`write_uint()` (avoids `sprintf`), bulk `memcpy` runs in `buf_push_json_str` (avoids
+per-byte `buf_push`), and compile-time `PUSH_LIT()` macro (avoids `strlen` for
+literal strings). The resulting JSON string is cached in `Document.doc_symbols_json`
+(freed on `doc_free` / `handle_didchange`). Subsequent requests skip the build step
+entirely; `yyjson_mut_rawncpy` embeds the cached bytes verbatim.
+
+| Scenario | Before | After (cold cache) | Δ |
+|---|---|---|---|
+| flat (10k) × documentSymbol | 63.5ms | 55.2ms | −13% |
+| deep (500, d=5) × documentSymbol | 90.4ms | 84.6ms | −6.4% |
+| `yyjson_mut_write_opts` self (flat) | 23.1M Ir | ~0 | −100% |
+| `build_document_symbols_json` Ir (flat) | 7.4M Ir | 25.0M Ir (first call) | cache miss worse, but one-time |
+
 **New bottleneck B — `scan_kw_stack` on dense dep files (completion.c)**
 In `highdeps × completion`, `scan_kw_stack` costs 29.7M Ir (27.1M self) scanning
 19,848 tokens — roughly 3× more tokens per task than the flat file due to 8 dep-ref
@@ -225,4 +240,30 @@ position-based handlers, or 7 runs × 1 for whole-document handlers.
   8-deps/task file causes the identifier-collection loop to visit far more nodes.
 - Position-based handlers (hover, signature, definition, references) are all
   sub-5ms median across all fixtures; no action needed.
+
+### Wall-clock baseline (2026-03-28, after documentSymbol optimization)
+
+Same measurement methodology as 2026-03-27. Same session files (`test/session_*.json`)
+and same `.tjp` fixtures. The benchmark restarts the server for each run (7 measured
+runs per fixture), so `documentSymbol` timings reflect the cold-cache cost (first
+request after didOpen).
+
+| Method | flat (10k, d=1) | wide (5k, d=2) | balanced (5k, d=3) | highdeps (2k, 8dep) | deep (500, d=5) |
+|---|---|---|---|---|---|
+| semanticTokens/full | 55.5 | 84.6 | 97.8 | 307.8 | 162.4 |
+| documentSymbol | 55.2 | 59.6 | 62.1 | 68.2 | 84.6 |
+| foldingRange | 16.2 | 16.8 | 19.2 | 19.8 | 24.2 |
+| completion (median) | 2.2 | 0.9 | 0.7 | 2.7 | 1.4 |
+| completion (p95) | 4.9 | 5.6 | 6.2 | 17.1 | 7.7 |
+| hover (median) | 0.8 | 1.0 | 1.0 | 1.9 | 1.0 |
+| signatureHelp (median) | 1.1 | 2.0 | 1.9 | 2.2 | 2.1 |
+| definition (median) | 0.1 | 0.2 | 0.1 | 0.2 | 0.1 |
+| references (median) | 0.1 | 0.2 | 0.2 | 0.4 | 0.4 |
+
+**Changes vs 2026-03-27:**
+- `documentSymbol` improved 13% on flat (63.5→55.2ms) and 6.4% on deep (90.4→84.6ms).
+  Remaining cost is dominated by I/O (writing ~2MB JSON per request).
+- Warm-cache requests (after first call on a live server) are much faster: the build
+  step is skipped, only `rawncpy` + response I/O remain (~few ms).
+- All other handlers are essentially unchanged.
 
