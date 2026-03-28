@@ -87,7 +87,9 @@ static void dep_scope_pop(void) {
 static void symarr_push(SymArr *a, DocSymbol s) {
     if (a->n >= a->cap) {
         a->cap = a->cap ? a->cap * 2 : 4;
-        a->arr = realloc(a->arr, (size_t)a->cap * sizeof(DocSymbol));
+        DocSymbol *tmp = realloc(a->arr, (size_t)a->cap * sizeof(DocSymbol));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        a->arr = tmp;
     }
     a->arr[a->n++] = s;
 }
@@ -1342,11 +1344,16 @@ dep_path
           $$.start = $1.start; $$.end = $1.end;
           token_free(&$1); }
     | dep_path TK_DOT dep_path_seg
-        { char buf[512];
-          snprintf(buf, sizeof(buf), "%s.%s", $1.path, $3.text);
+        { size_t plen = strlen($1.path);
+          size_t slen = strlen($3.text);
+          char *buf = malloc(plen + 1 + slen + 1);
+          if (!buf) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+          memcpy(buf, $1.path, plen);
+          buf[plen] = '.';
+          memcpy(buf + plen + 1, $3.text, slen + 1);
           free($1.path);
           $$.bang_count = 0;
-          $$.path  = strdup(buf);
+          $$.path  = buf;
           $$.start = $1.start;
           $$.end   = $3.end;
           token_free(&$2); token_free(&$3); }

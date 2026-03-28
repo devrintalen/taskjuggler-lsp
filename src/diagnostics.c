@@ -166,8 +166,10 @@ void push_diagnostic(ParseResult *r, LspRange range, int severity,
                      const char *msg) {
     if (r->num_diagnostics >= r->diag_cap) {
         int nc = r->diag_cap ? r->diag_cap * 2 : 4;
-        r->diagnostics = realloc(r->diagnostics,
-                                 (size_t)nc * sizeof(Diagnostic));
+        Diagnostic *tmp = realloc(r->diagnostics,
+                                  (size_t)nc * sizeof(Diagnostic));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        r->diagnostics = tmp;
         r->diag_cap = nc;
     }
     r->diagnostics[r->num_diagnostics++] =
@@ -181,12 +183,11 @@ static int     g_num_dep_refs = 0;
 static int     g_dep_ref_cap  = 0;
 
 /* Reset the global dep-ref accumulator to an empty state.
+ * Frees any existing buffer before resetting.
  * Called at the start of each parse() invocation before yyparse() runs.
  */
 void dep_refs_reset(void) {
-    g_dep_refs     = NULL;
-    g_num_dep_refs = 0;
-    g_dep_ref_cap  = 0;
+    free_dep_refs();
 }
 
 /* Record one raw dependency reference encountered during parsing.
@@ -203,7 +204,9 @@ void push_dep_ref(ParseResult *r, int bang_count, const char *path,
     (void)r; /* not used directly; diagnostics emitted in revalidate_dep_refs */
     if (g_dep_ref_cap <= g_num_dep_refs) {
         g_dep_ref_cap = g_dep_ref_cap ? g_dep_ref_cap * 2 : 8;
-        g_dep_refs = realloc(g_dep_refs, (size_t)g_dep_ref_cap * sizeof(DepRef));
+        DepRef *tmp = realloc(g_dep_refs, (size_t)g_dep_ref_cap * sizeof(DepRef));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        g_dep_refs = tmp;
     }
     DepRef *dr = &g_dep_refs[g_num_dep_refs++];
 
@@ -301,11 +304,14 @@ static uint32_t symmap_hash(const char *s) {
  */
 static void symmap_insert(SymMap *m, const char *key, const DocSymbol *val) {
     uint32_t i = symmap_hash(key) & (uint32_t)(m->cap - 1);
-    while (m->entries[i].key) {
+    int probes = 0;
+    while (m->entries[i].key && probes < m->cap) {
         if (strcmp(m->entries[i].key, key) == 0) return;
         i = (i + 1) & (uint32_t)(m->cap - 1);
+        probes++;
     }
-    m->entries[i] = (SymMapEntry){ key, val };
+    if (probes < m->cap)
+        m->entries[i] = (SymMapEntry){ key, val };
 }
 
 /* Look up key in m and return the associated DocSymbol pointer,
@@ -313,9 +319,11 @@ static void symmap_insert(SymMap *m, const char *key, const DocSymbol *val) {
  */
 static const DocSymbol *symmap_get(const SymMap *m, const char *key) {
     uint32_t i = symmap_hash(key) & (uint32_t)(m->cap - 1);
-    while (m->entries[i].key) {
+    int probes = 0;
+    while (m->entries[i].key && probes < m->cap) {
         if (strcmp(m->entries[i].key, key) == 0) return m->entries[i].val;
         i = (i + 1) & (uint32_t)(m->cap - 1);
+        probes++;
     }
     return NULL;
 }
@@ -409,8 +417,10 @@ static void push_def_link(ParseResult *r, LspRange source, LspRange target,
                           const char *target_uri) {
     if (r->num_def_links >= r->def_link_cap) {
         int nc = r->def_link_cap ? r->def_link_cap * 2 : 4;
-        r->def_links = realloc(r->def_links,
-                               (size_t)nc * sizeof(DefinitionLink));
+        DefinitionLink *tmp = realloc(r->def_links,
+                                      (size_t)nc * sizeof(DefinitionLink));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        r->def_links = tmp;
         r->def_link_cap = nc;
     }
     r->def_links[r->num_def_links++] = (DefinitionLink){

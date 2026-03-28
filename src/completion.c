@@ -74,7 +74,9 @@ static char **block_stack(const TokenSpan *tokens, int num_tokens,
         case TK_LBRACE:
             if (n >= cap) {
                 cap = cap ? cap * 2 : 8;
-                stack = realloc(stack, cap * sizeof(char *));
+                char **tmp = realloc(stack, cap * sizeof(char *));
+                if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+                stack = tmp;
             }
             stack[n++] = pending ? pending : strdup("");
             pending = NULL;
@@ -299,7 +301,9 @@ typedef struct { IdEntry *items; int n, cap; } IdList;
 static void idlist_push(IdList *il, const char *id, const char *name) {
     if (il->n >= il->cap) {
         il->cap = il->cap ? il->cap * 2 : 16;
-        il->items = realloc(il->items, il->cap * sizeof(IdEntry));
+        IdEntry *tmp = realloc(il->items, il->cap * sizeof(IdEntry));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        il->items = tmp;
     }
     il->items[il->n++] = (IdEntry){ strdup(id), strdup(name) };
 }
@@ -328,13 +332,21 @@ static void collect_ids(const DocSymbol *syms, int n, int kind,
                          const char *prefix, IdList *out) {
     for (int i = 0; i < n; i++) {
         if (syms[i].kind == kind && syms[i].detail && syms[i].detail[0]) {
-            char qid[1024];
-            if (!prefix || !prefix[0])
-                snprintf(qid, sizeof(qid), "%s", syms[i].detail);
-            else
-                snprintf(qid, sizeof(qid), "%s.%s", prefix, syms[i].detail);
+            size_t plen = prefix ? strlen(prefix) : 0;
+            size_t dlen = strlen(syms[i].detail);
+            size_t qlen = plen ? plen + 1 + dlen : dlen;
+            char *qid = malloc(qlen + 1);
+            if (!qid) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+            if (!prefix || !prefix[0]) {
+                memcpy(qid, syms[i].detail, dlen + 1);
+            } else {
+                memcpy(qid, prefix, plen);
+                qid[plen] = '.';
+                memcpy(qid + plen + 1, syms[i].detail, dlen + 1);
+            }
             idlist_push(out, qid, syms[i].name ? syms[i].name : "");
             collect_ids(syms[i].children, syms[i].num_children, kind, qid, out);
+            free(qid);
         } else {
             collect_ids(syms[i].children, syms[i].num_children, kind, prefix, out);
         }
@@ -349,8 +361,11 @@ typedef struct { char **ids; uint32_t *depths; int n, cap; } ScopeStack;
 static void ss_push(ScopeStack *ss, const char *id, uint32_t depth) {
     if (ss->n >= ss->cap) {
         ss->cap = ss->cap ? ss->cap * 2 : 8;
-        ss->ids    = realloc(ss->ids,    ss->cap * sizeof(char *));
-        ss->depths = realloc(ss->depths, ss->cap * sizeof(uint32_t));
+        char    **ti = realloc(ss->ids,    ss->cap * sizeof(char *));
+        uint32_t *td = realloc(ss->depths, ss->cap * sizeof(uint32_t));
+        if (!ti || !td) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        ss->ids    = ti;
+        ss->depths = td;
     }
     ss->ids[ss->n]    = strdup(id);
     ss->depths[ss->n] = depth;

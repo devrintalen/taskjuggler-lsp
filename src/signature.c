@@ -34,10 +34,10 @@
  * cursor     — cursor position from the textDocument/signatureHelp request
  */
 ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
-    KwStackEntry stack[128];
+    KwStackEntry stack[512];
     uint32_t brace_depth;
     int stack_n = scan_kw_stack(tokens, num_tokens, cursor,
-                                KW_SIG_END, 1, stack, 128, &brace_depth);
+                                KW_SIG_END, 1, stack, 512, &brace_depth);
 
     for (int i = stack_n - 1; i >= 0; i--) {
         if (stack[i].depth == brace_depth) {

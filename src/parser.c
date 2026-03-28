@@ -57,8 +57,10 @@ void g_push_tok_span(int kind,
                      const char *text) {
     if (g_num_tok_spans >= g_tok_span_cap) {
         g_tok_span_cap = g_tok_span_cap ? g_tok_span_cap * 2 : 64;
-        g_tok_spans    = realloc(g_tok_spans,
+        TokenSpan *tmp = realloc(g_tok_spans,
                                  (size_t)g_tok_span_cap * sizeof(TokenSpan));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        g_tok_spans = tmp;
     }
     g_tok_spans[g_num_tok_spans++] = (TokenSpan){
         .token_kind = kind,
@@ -130,7 +132,9 @@ void parse_result_free(ParseResult *r) {
 void push_doc_symbol(ParseResult *r, DocSymbol s) {
     if (r->num_doc_symbols >= r->doc_sym_cap) {
         int nc = r->doc_sym_cap ? r->doc_sym_cap * 2 : 4;
-        r->doc_symbols = realloc(r->doc_symbols, (size_t)nc * sizeof(DocSymbol));
+        DocSymbol *tmp = realloc(r->doc_symbols, (size_t)nc * sizeof(DocSymbol));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        r->doc_symbols = tmp;
         r->doc_sym_cap = nc;
     }
     r->doc_symbols[r->num_doc_symbols++] = s;

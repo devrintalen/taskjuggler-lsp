@@ -155,10 +155,10 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
  * cursor     — cursor position from the textDocument/hover request
  */
 ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
-    KwStackEntry stack[128];
+    KwStackEntry stack[512];
     uint32_t brace_depth;
     int stack_n = scan_kw_stack(tokens, num_tokens, cursor,
-                                KW_DOCS_END, 0, stack, 128, &brace_depth);
+                                KW_DOCS_END, 0, stack, 512, &brace_depth);
 
     for (int i = stack_n - 1; i >= 0; i--) {
         if (stack[i].depth == brace_depth) {

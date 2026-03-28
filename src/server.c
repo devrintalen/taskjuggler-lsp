@@ -30,6 +30,7 @@
 #include "workspace_symbol.h"
 
 #include <yyjson.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -192,13 +193,37 @@ void lsp_send_message(const char *msg) {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /*
- * Convert a file:// URI to a filesystem path.  Returns a heap-allocated
- * copy of the path portion (after "file://"), or NULL if the URI does not
- * use the file scheme.  Caller must free.
+ * Decode a percent-encoded string (e.g. from a URI path component).
+ * Returns a heap-allocated NUL-terminated string; caller must free.
+ */
+static char *percent_decode(const char *src) {
+    size_t len = strlen(src);
+    char *dst = malloc(len + 1);
+    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    size_t wi = 0;
+    for (size_t ri = 0; ri < len; ri++) {
+        if (src[ri] == '%' && ri + 2 < len
+                && isxdigit((unsigned char)src[ri + 1])
+                && isxdigit((unsigned char)src[ri + 2])) {
+            char hex[3] = { src[ri + 1], src[ri + 2], '\0' };
+            dst[wi++] = (char)strtol(hex, NULL, 16);
+            ri += 2;
+        } else {
+            dst[wi++] = src[ri];
+        }
+    }
+    dst[wi] = '\0';
+    return dst;
+}
+
+/*
+ * Convert a file:// URI to a filesystem path.  Returns a heap-allocated,
+ * percent-decoded copy of the path portion (after "file://"), or NULL if
+ * the URI does not use the file scheme.  Caller must free.
  */
 static char *uri_to_path(const char *uri) {
     if (!uri || strncmp(uri, "file://", 7) != 0) return NULL;
-    return strdup(uri + 7);
+    return percent_decode(uri + 7);
 }
 
 /*
@@ -498,28 +523,14 @@ static void handle_didopen(yyjson_val *params) {
     const char *text = json_str(tdi, "text");
     if (!uri || !text) return;
 
-    int i = 0;
+    /* Ignore duplicate opens (LSP spec: client error) */
+    if (doc_find(uri)) return;
 
-    /* Check each open document */
-    for (i = 0; i < MAX_DOCS; i++) {
-        if (docs[i].in_use && strcmp(docs[i].uri, uri) == 0) {
-            /* The document is already opened, signal an error */
-            return;
-        } else if (!docs[i].in_use) {
-            /* Found a free document slot, use it */
-            break;
-        }
-    }
+    Document *d = doc_alloc(uri);
+    if (!d) return; /* document store full */
 
-    if (i == MAX_DOCS && docs[i - 1].in_use) {
-        /* No free document slots */
-        return;
-    }
-
-    docs[i].in_use = 1;
-    docs[i].uri    = strdup(uri);
-    docs[i].text   = strdup(text);
-    docs[i].parse  = parse(text);
+    d->text  = strdup(text);
+    d->parse = parse(text);
 
     revalidate_all_docs();
 }
