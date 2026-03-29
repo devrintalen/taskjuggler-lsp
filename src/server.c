@@ -265,6 +265,54 @@ static LspPos json_to_pos(yyjson_val *obj) {
     return p;
 }
 
+/* Apply a single incremental text edit described by range/new_text to src.
+ * Returns a newly heap-allocated NUL-terminated string; caller must free it.
+ * src may be NULL (treated as empty string).
+ * range.end is exclusive — text[start_byte..end_byte) is replaced by new_text.
+ * character offsets are treated as byte offsets within a line, consistent with
+ * how the lexer tracks columns.
+ */
+static char *apply_incremental_change(const char *src,
+                                      LspRange range,
+                                      const char *new_text)
+{
+    if (!src) src = "";
+    size_t src_len     = strlen(src);
+    size_t new_len     = strlen(new_text);
+
+    /* Find byte offset of range.start */
+    size_t start_byte = 0;
+    uint32_t cur_line = 0, cur_char = 0;
+    while (start_byte < src_len) {
+        if (cur_line == range.start.line && cur_char == range.start.character)
+            break;
+        if (src[start_byte] == '\n') { cur_line++; cur_char = 0; }
+        else                         { cur_char++; }
+        start_byte++;
+    }
+
+    /* Find byte offset of range.end, continuing from start */
+    size_t end_byte = start_byte;
+    cur_line = range.start.line;
+    cur_char = range.start.character;
+    while (end_byte < src_len) {
+        if (cur_line == range.end.line && cur_char == range.end.character)
+            break;
+        if (src[end_byte] == '\n') { cur_line++; cur_char = 0; }
+        else                       { cur_char++; }
+        end_byte++;
+    }
+
+    size_t suffix_len = src_len - end_byte;
+    char *result = malloc(start_byte + new_len + suffix_len + 1);
+    if (!result) return NULL;
+    memcpy(result,                       src,      start_byte);
+    memcpy(result + start_byte,          new_text, new_len);
+    memcpy(result + start_byte + new_len, src + end_byte, suffix_len);
+    result[start_byte + new_len + suffix_len] = '\0';
+    return result;
+}
+
 /* Return the string value of obj[key], or NULL if missing or not a string. */
 static const char *json_str(yyjson_val *obj, const char *key) {
     if (!obj) return NULL;
@@ -368,7 +416,7 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     /* Capabilities */
     yyjson_mut_val *caps = yyjson_mut_obj(doc);
     yyjson_mut_val *tds = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_uint(doc, tds, "change", 1); /* TextDocumentSyncKind.Full */
+    yyjson_mut_obj_add_uint(doc, tds, "change", 2); /* TextDocumentSyncKind.Incremental */
     yyjson_mut_obj_add_bool(doc, tds, "openClose", true);
     /* Semantic tokens */
     yyjson_mut_val *sem_types = yyjson_mut_arr(doc);
@@ -539,8 +587,11 @@ static void handle_didopen(yyjson_val *params) {
 }
 
 /* Handle textDocument/didChange.
- * Replaces the stored document text with the last full-sync content change,
+ * Applies each content change in order to the stored document text,
  * re-parses, and revalidates all open documents.
+ * Each change may be a full replacement (no "range" field) or an incremental
+ * edit (has "range" and "text" fields).  Changes are applied sequentially;
+ * each change's range is relative to the text produced by the previous one.
  * params — notification params containing textDocument.uri and contentChanges[]
  */
 static void handle_didchange(yyjson_val *params) {
@@ -554,21 +605,44 @@ static void handle_didchange(yyjson_val *params) {
 
     if (yyjson_arr_size(changes) == 0) return;
 
-    /* Use the last change (full sync) */
-    yyjson_val *last = yyjson_arr_get_last(changes);
-    const char *text = json_str(last, "text");
-    if (!text) return;
-
     Document *d = doc_find(uri);
     if (!d) d = doc_alloc(uri);
     if (!d) return;
 
+    /* Start with the current document text (may be NULL for a fresh slot). */
+    char *current = d->text ? strdup(d->text) : strdup("");
+    if (!current) return;
+
+    size_t idx, max;
+    yyjson_val *change;
+    yyjson_arr_foreach(changes, idx, max, change) {
+        yyjson_val *range_obj = yyjson_obj_get(change, "range");
+        const char *new_text  = yyjson_get_str(yyjson_obj_get(change, "text"));
+        if (!new_text) { free(current); return; }
+
+        if (range_obj) {
+            /* Incremental edit: apply the range-based replacement. */
+            LspRange range;
+            range.start = json_to_pos(yyjson_obj_get(range_obj, "start"));
+            range.end   = json_to_pos(yyjson_obj_get(range_obj, "end"));
+            char *next = apply_incremental_change(current, range, new_text);
+            free(current);
+            if (!next) return;
+            current = next;
+        } else {
+            /* Full replacement. */
+            free(current);
+            current = strdup(new_text);
+            if (!current) return;
+        }
+    }
+
     free(d->text);
     free(d->doc_symbols_json);
     d->doc_symbols_json = NULL;
-    d->text = strdup(text);
+    d->text = current;
     parse_result_free(&d->parse);
-    d->parse = parse(text);
+    d->parse = parse(d->text);
     revalidate_all_docs();
 }
 
