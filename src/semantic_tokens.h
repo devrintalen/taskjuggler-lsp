@@ -32,6 +32,7 @@
 #define SEMTOK_TYPE_STRING   2
 #define SEMTOK_TYPE_NUMBER   3
 #define SEMTOK_TYPE_VARIABLE 4
+#define SEMTOK_TYPE_FUNCTION 5
 
 /* ── Semantic token modifier bitmasks ────────────────────────────────────── *
  *

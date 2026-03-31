@@ -22,7 +22,24 @@
 #include <stdint.h>
 #include <string.h>
 
-/* ── Legend ──────────────────────────────────────────────────────────────── */
+/* ── Legend ──────────────────────────────────────────────────────────────── *
+ *
+ * During initialize the server advertises a legend:
+ *
+ *   { "tokenTypes": [...], "tokenModifiers": [...] }
+ *
+ * semantic_token_type_names[] becomes the tokenTypes array.  The array
+ * position of each string (0, 1, 2 …) is what gets encoded in the fifth
+ * field of each delta-encoded token entry sent to the client.  The client
+ * looks up that index in the legend it received during initialize to recover
+ * the type name string (e.g. "function"), then applies whatever face it
+ * associates with that string.  The mapping from name string to face is
+ * entirely the client's choice; the server only controls which strings appear
+ * in the legend and at which indices.
+ *
+ * Consequence: the order of entries below is significant and must stay in
+ * sync with the SEMTOK_TYPE_* defines in semantic_tokens.h.
+ */
 
 const char * const semantic_token_type_names[] = {
     "keyword",   /* SEMTOK_TYPE_KEYWORD  = 0 */
@@ -30,6 +47,7 @@ const char * const semantic_token_type_names[] = {
     "string",    /* SEMTOK_TYPE_STRING   = 2 */
     "number",    /* SEMTOK_TYPE_NUMBER   = 3 */
     "variable",  /* SEMTOK_TYPE_VARIABLE = 4 */
+    "function",  /* SEMTOK_TYPE_FUNCTION = 5 */
 };
 const int num_semantic_token_types =
     (int)(sizeof(semantic_token_type_names) / sizeof(semantic_token_type_names[0]));
@@ -67,11 +85,9 @@ static int classify(int kind, int *out_type, int *out_modifiers) {
     case TK_MULTI_LINE_STR:
         *out_type = SEMTOK_TYPE_STRING;
         return 1;
-    /* Date literals: structured literal values, styled as strings. */
+    /* Date literals and duration literals: numeric/quantitative
+     * values. */
     case TK_DATE:
-        *out_type = SEMTOK_TYPE_STRING;
-        return 1;
-    /* Duration literals: numeric/quantitative values. */
     case TK_DURATION:
         *out_type = SEMTOK_TYPE_NUMBER;
         return 1;
@@ -87,8 +103,7 @@ static int classify(int kind, int *out_type, int *out_modifiers) {
     case KW_RESOURCE:
     case KW_ACCOUNT:
     case KW_SHIFT:
-        *out_type      = SEMTOK_TYPE_KEYWORD;
-        *out_modifiers = SEMTOK_MOD_DECLARATION;
+        *out_type = SEMTOK_TYPE_KEYWORD;
         return 1;
     default:
         break;
@@ -96,7 +111,7 @@ static int classify(int kind, int *out_type, int *out_modifiers) {
 
     /* All remaining KW_* property/attribute keywords. */
     if (kind >= KW_PROJECT && kind <= KW_YEARLYWORKINGDAYS) {
-        *out_type = SEMTOK_TYPE_KEYWORD;
+        *out_type = SEMTOK_TYPE_FUNCTION;
         return 1;
     }
 
