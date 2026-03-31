@@ -13,6 +13,7 @@
         "hoverProvider": true,
         "definitionProvider": true,
         "referencesProvider": true,
+        "documentHighlightProvider": true,
         "signatureHelpProvider": {
           "triggerCharacters": [
             " "
@@ -33,7 +34,8 @@
               "comment",
               "string",
               "number",
-              "variable"
+              "variable",
+              "function"
             ],
             "tokenModifiers": [
               "declaration"
@@ -90,7 +92,7 @@
         0,
         7,
         0,
-        1,
+        0,
         0,
         8,
         4,
@@ -104,7 +106,7 @@
         0,
         22,
         10,
-        2,
+        3,
         0,
         0,
         11,
@@ -115,7 +117,7 @@
         2,
         4,
         0,
-        1,
+        0,
         0,
         5,
         2,

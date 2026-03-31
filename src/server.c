@@ -21,6 +21,7 @@
 #include "diagnostics.h"
 #include "definition.h"
 #include "references.h"
+#include "document_highlight.h"
 #include "document_symbol.h"
 #include "folding_range.h"
 #include "hover.h"
@@ -439,6 +440,7 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_obj_add_bool(doc, caps, "hoverProvider",             true);
     yyjson_mut_obj_add_bool(doc, caps, "definitionProvider",        true);
     yyjson_mut_obj_add_bool(doc, caps, "referencesProvider",        true);
+    yyjson_mut_obj_add_bool(doc, caps, "documentHighlightProvider", true);
     yyjson_mut_obj_add_val(doc,  caps, "signatureHelpProvider",     sig_opts);
     yyjson_mut_obj_add_val(doc,  caps, "completionProvider",        comp_opts);
     yyjson_mut_obj_add_val(doc,  caps, "semanticTokensProvider",    sem_opts);
@@ -856,6 +858,38 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
+/* Handle textDocument/documentHighlight.
+ * Returns all occurrences of the symbol under the cursor within the same
+ * document, using def_links[], doc_symbols[], and tok_spans[].
+ */
+static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
+                                                  yyjson_val *id,
+                                                  yyjson_val *params) {
+    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
+    const char *uri = NULL;
+    yyjson_val *td = yyjson_obj_get(params, "textDocument");
+    if (td) uri = json_str(td, "uri");
+
+    yyjson_val *pos_obj = yyjson_obj_get(params, "position");
+
+    if (!uri || !pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
+
+    Document *d = doc_find(uri);
+    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
+
+    LspPos pos = json_to_pos(pos_obj);
+    yyjson_mut_val *result = build_document_highlight_json(doc,
+                                                            d->parse.def_links,
+                                                            d->parse.num_def_links,
+                                                            d->parse.doc_symbols,
+                                                            d->parse.num_doc_symbols,
+                                                            d->parse.tok_spans,
+                                                            d->parse.num_tok_spans,
+                                                            pos);
+    if (!result) return make_response(doc, id, yyjson_mut_null(doc));
+    return make_response(doc, id, result);
+}
+
 /* Handle textDocument/definition.
  * Returns the definition location for the dep-ref expression under the cursor,
  * looked up from the precomputed def_links[] in the parsed document.
@@ -1000,6 +1034,9 @@ char *server_process(const char *json_text) {
 
     } else if (strcmp(m, "textDocument/references") == 0) {
         resp = handle_references(out_doc, id_item, params);
+
+    } else if (strcmp(m, "textDocument/documentHighlight") == 0) {
+        resp = handle_document_highlight(out_doc, id_item, params);
 
     } else if (strcmp(m, "textDocument/definition") == 0) {
         resp = handle_definition(out_doc, id_item, params);
