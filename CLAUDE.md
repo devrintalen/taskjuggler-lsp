@@ -1,12 +1,15 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when
+working with code in this repository.
 
 ## Project
 
-A Language Server Protocol (LSP) implementation for [TaskJuggler](https://taskjuggler.org/), written in C.
+A Language Server Protocol (LSP) implementation for
+[TaskJuggler](https://taskjuggler.org/), written in C.
 
-The project supports TaskJuggler v3 and does not support earlier versions.
+The project supports TaskJuggler v3 and does not support earlier
+versions.
 
 ## Dependencies
 
@@ -30,9 +33,13 @@ Use K&R C style for code.
 
 Use spaces instead of tabs, and use four spaces per indent.
 
-Prefer full words rather than abbreviations for naming. For example, "token_end_line" rather than "tok_el".
+Prefer full words rather than abbreviations for naming. For example,
+"token_end_line" rather than "tok_el".
 
 ## TaskJuggler Reference
 
-Use the command "tj3man" to get definitive syntax and usage information for TaskJuggler. The command "tj3man <keyword>" will return detailed information on keywords and concepts. "tj3man" without any arguments will return a full list of available pages.
+Use the command "tj3man" to get definitive syntax and usage
+information for TaskJuggler. The command "tj3man <keyword>" will
+return detailed information on keywords and concepts. "tj3man" without
+any arguments will return a full list of available pages.
 
