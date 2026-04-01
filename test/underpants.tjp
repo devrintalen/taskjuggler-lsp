@@ -1,0 +1,5 @@
+project underpants "Business plan" 1998-12-16 +3m { }
+
+task phase1 "Collect underpants" { }
+task phase2 "?" { }
+task phase3 "Profit" { }

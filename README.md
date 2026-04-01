@@ -2,9 +2,7 @@
 
 A [Language Server Protocol][] (LSP) server for [TaskJuggler][], written in C.
 
-This is an independent implementation that provides editor tooling for
-TaskJuggler's `.tjp`/`.tji` file format. It is not a modified version
-of TaskJuggler and does not include any TaskJuggler source code.
+![A video showing some of the basic features of taskjuggler-lsp in Emacs lsp-mode](screenshots/overview.gif)
 
 ## Features
 
@@ -148,9 +146,10 @@ the Free Software Foundation; version 2 of the License. See
 ### Relationship to TaskJuggler
 
 [TaskJuggler][] is copyright Chris Schlaeger and others, licensed
-under GPLv2. This project is a separate tool that supports the
-TaskJuggler file format; it is not a derivative work of the
-TaskJuggler source code.
+under GPLv2. This project is an independent implementation that
+provides editor tooling for TaskJuggler's `.tjp`/`.tji` file
+format. It is not a modified version of TaskJuggler and does not
+include any TaskJuggler source code.
 
 The file `test/tutorial.tjp` is an example project from the
 TaskJuggler tutorial, copyright Chris Schlaeger, included here as a
