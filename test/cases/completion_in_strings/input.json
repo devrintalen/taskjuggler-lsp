@@ -19,10 +19,10 @@
     "method": "textDocument/didOpen",
     "params": {
       "textDocument": {
-        "uri": "file:///test/dquote_terminated.tjp",
+        "uri": "file:///test/strings.tjp",
         "languageId": "taskjuggler",
         "version": 1,
-        "text": "project p \"Project Name\" 2024-01-01 +3m\n"
+        "text": "project p \"Project Name\" 2024-01-01 +3m {\n  journalentry 2024-02-01 \"J\" {\n    summary -8<-\n      hello world\n    ->8-\n  }\n  sce\n}\n"
       }
     }
   },
@@ -31,34 +31,10 @@
     "method": "textDocument/didOpen",
     "params": {
       "textDocument": {
-        "uri": "file:///test/dquote_unterminated.tjp",
+        "uri": "file:///test/unterminated.tjp",
         "languageId": "taskjuggler",
         "version": 1,
         "text": "project p \"Project Name\n"
-      }
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/didOpen",
-    "params": {
-      "textDocument": {
-        "uri": "file:///test/scissors_terminated.tjp",
-        "languageId": "taskjuggler",
-        "version": 1,
-        "text": "project p \"P\" 2024-01-01 +3m {\n  journalentry 2024-02-01 \"J\" {\n    summary -8<-\n      hello world\n    ->8-\n  }\n}\n"
-      }
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/didOpen",
-    "params": {
-      "textDocument": {
-        "uri": "file:///test/scissors_unterminated.tjp",
-        "languageId": "taskjuggler",
-        "version": 1,
-        "text": "project p \"P\" 2024-01-01 +3m {\n  journalentry 2024-02-01 \"J\" {\n    summary -8<-\n      hello world\n"
       }
     }
   },
@@ -68,7 +44,7 @@
     "method": "textDocument/completion",
     "params": {
       "textDocument": {
-        "uri": "file:///test/dquote_terminated.tjp"
+        "uri": "file:///test/strings.tjp"
       },
       "position": {
         "line": 0,
@@ -82,11 +58,11 @@
     "method": "textDocument/completion",
     "params": {
       "textDocument": {
-        "uri": "file:///test/dquote_unterminated.tjp"
+        "uri": "file:///test/strings.tjp"
       },
       "position": {
-        "line": 0,
-        "character": 15
+        "line": 3,
+        "character": 10
       }
     }
   },
@@ -96,11 +72,11 @@
     "method": "textDocument/completion",
     "params": {
       "textDocument": {
-        "uri": "file:///test/scissors_terminated.tjp"
+        "uri": "file:///test/unterminated.tjp"
       },
       "position": {
-        "line": 3,
-        "character": 10
+        "line": 0,
+        "character": 15
       }
     }
   },
@@ -110,11 +86,11 @@
     "method": "textDocument/completion",
     "params": {
       "textDocument": {
-        "uri": "file:///test/scissors_unterminated.tjp"
+        "uri": "file:///test/strings.tjp"
       },
       "position": {
-        "line": 3,
-        "character": 10
+        "line": 6,
+        "character": 4
       }
     }
   },
