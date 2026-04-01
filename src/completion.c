@@ -47,12 +47,26 @@ static const char *find_line_start(const char *text, uint32_t target_line) {
     return p;
 }
 
-/* Check whether cursor is inside a double-quoted string on its line.
+/* Check whether cursor is inside a double-quoted string.
+ *
+ * First checks the token spans: if tok_span_at() returns TK_STR the
+ * cursor is inside a terminated string and we return immediately.
+ *
+ * Otherwise, falls back to scanning the cursor's line in the raw text.
  * Double-quoted strings in TaskJuggler cannot span newlines, so we only
- * need to scan the cursor's line from the beginning up to the cursor
+ * need to scan from the start of the cursor's line up to the cursor
  * column.  Handles escaped quotes and unterminated strings.
  */
-static int cursor_in_dquote(const char *text, LspPos cursor) {
+static int cursor_in_dquote(const char *text, LspPos cursor,
+                            const TokenSpan *tokens, int num_tokens) {
+    /* Fast path: token spans already cover terminated strings. */
+    TokenSpan ts = tok_span_at(tokens, num_tokens, cursor);
+    int kind = ts.token_kind;
+    free(ts.text);
+    if (kind == TK_STR)
+        return 1;
+
+    /* Slow path for unterminated strings: scan just the cursor's line. */
     const char *line_start = find_line_start(text, cursor.line);
     int in_string = 0;
     uint32_t col = 0;
@@ -74,12 +88,33 @@ static int cursor_in_dquote(const char *text, LspPos cursor) {
 }
 
 /* Check whether cursor is inside a scissors block (-8<- ... ->8-).
- * Scissors blocks can span multiple lines, so we scan backwards from the
- * cursor position looking for the nearest -8<- or ->8- delimiter.  If the
- * nearest one is an opener, the cursor is inside a scissors block.
+ *
+ * First checks the token spans: if tok_span_at() returns
+ * TK_MULTI_LINE_STR the cursor is inside a terminated scissors block.
+ * If it returns any other real token, the cursor cannot be inside an
+ * unterminated scissors block either (the lexer's SCISSORS state
+ * consumes everything from -8<- to EOF, so no tokens would exist at the
+ * cursor position if it were inside one).
+ *
+ * Only when tok_span_at() returns TK_EOF (cursor is in a tokenless
+ * region) do we fall back to a backward scan through the raw text.
+ * Because the unterminated scissors block has already consumed every
+ * character from its opener to EOF, the -8<- delimiter is necessarily
+ * between the last real token and the cursor — a bounded distance.
  */
-static int cursor_in_scissors(const char *text, LspPos cursor) {
-    /* Find the byte offset of the cursor position. */
+static int cursor_in_scissors(const char *text, LspPos cursor,
+                              const TokenSpan *tokens, int num_tokens) {
+    /* Fast path: check token spans. */
+    TokenSpan ts = tok_span_at(tokens, num_tokens, cursor);
+    int kind = ts.token_kind;
+    free(ts.text);
+    if (kind == TK_MULTI_LINE_STR)
+        return 1;
+    if (kind != TK_EOF)
+        return 0;   /* cursor is on a real token — not inside scissors */
+
+    /* Slow path: cursor is in a tokenless gap.  Scan backwards through
+     * the raw text for the nearest scissors delimiter. */
     const char *line_start = find_line_start(text, cursor.line);
     const char *cursor_ptr = line_start;
     uint32_t col = 0;
@@ -88,7 +123,6 @@ static int cursor_in_scissors(const char *text, LspPos cursor) {
         col++;
     }
 
-    /* Scan backwards for the nearest scissors delimiter. */
     for (const char *p = cursor_ptr - 1; p >= text + 3; p--) {
         if (p[-3] == '-' && p[-2] == '>' && p[-1] == '8' && p[0] == '-')
             return 0;   /* found a close delimiter first — not inside */
@@ -617,7 +651,8 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const DocSymbol *symbols, int num_symbols,
                                         const char *text) {
     /* Suppress completions when the cursor is inside a string or scissors block */
-    if (cursor_in_dquote(text, cursor) || cursor_in_scissors(text, cursor))
+    if (cursor_in_dquote(text, cursor, tokens, num_tokens)
+        || cursor_in_scissors(text, cursor, tokens, num_tokens))
         return yyjson_mut_null(doc);
 
     int    stack_n = 0;
