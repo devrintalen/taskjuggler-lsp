@@ -32,6 +32,72 @@
 #define CIK_KEYWORD   14
 #define CIK_REFERENCE 18
 
+/* ── cursor_in_string_or_scissors ────────────────────────────────────────── */
+
+/* Find the start of the line containing cursor in text.  Returns a pointer
+ * into text at the first character of that line.
+ */
+static const char *find_line_start(const char *text, uint32_t target_line) {
+    const char *p = text;
+    uint32_t line = 0;
+    while (*p && line < target_line) {
+        if (*p == '\n') line++;
+        p++;
+    }
+    return p;
+}
+
+/* Check whether cursor is inside a double-quoted string on its line.
+ * Double-quoted strings in TaskJuggler cannot span newlines, so we only
+ * need to scan the cursor's line from the beginning up to the cursor
+ * column.  Handles escaped quotes and unterminated strings.
+ */
+static int cursor_in_dquote(const char *text, LspPos cursor) {
+    const char *line_start = find_line_start(text, cursor.line);
+    int in_string = 0;
+    uint32_t col = 0;
+
+    for (const char *p = line_start; *p && *p != '\n' && col < cursor.character; p++) {
+        if (in_string) {
+            if (*p == '\\' && p[1] && p[1] != '\n') {
+                p++;    /* skip escaped character */
+                col++;
+            } else if (*p == '"') {
+                in_string = 0;
+            }
+        } else if (*p == '"') {
+            in_string = 1;
+        }
+        col++;
+    }
+    return in_string;
+}
+
+/* Check whether cursor is inside a scissors block (-8<- ... ->8-).
+ * Scissors blocks can span multiple lines, so we scan backwards from the
+ * cursor position looking for the nearest -8<- or ->8- delimiter.  If the
+ * nearest one is an opener, the cursor is inside a scissors block.
+ */
+static int cursor_in_scissors(const char *text, LspPos cursor) {
+    /* Find the byte offset of the cursor position. */
+    const char *line_start = find_line_start(text, cursor.line);
+    const char *cursor_ptr = line_start;
+    uint32_t col = 0;
+    while (*cursor_ptr && *cursor_ptr != '\n' && col < cursor.character) {
+        cursor_ptr++;
+        col++;
+    }
+
+    /* Scan backwards for the nearest scissors delimiter. */
+    for (const char *p = cursor_ptr - 1; p >= text + 3; p--) {
+        if (p[-3] == '-' && p[-2] == '>' && p[-1] == '8' && p[0] == '-')
+            return 0;   /* found a close delimiter first — not inside */
+        if (p[-3] == '-' && p[-2] == '8' && p[-1] == '<' && p[0] == '-')
+            return 1;   /* found an open delimiter first — inside */
+    }
+    return 0;
+}
+
 /* ── block_stack ─────────────────────────────────────────────────────────── */
 
 /* Returns 1 if token kind k introduces a block whose body has a
@@ -548,7 +614,12 @@ static int completion_kind_for(int sym_kind) {
 yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const TokenSpan *tokens, int num_tokens,
                                         LspPos cursor,
-                                        const DocSymbol *symbols, int num_symbols) {
+                                        const DocSymbol *symbols, int num_symbols,
+                                        const char *text) {
+    /* Suppress completions when the cursor is inside a string or scissors block */
+    if (cursor_in_dquote(text, cursor) || cursor_in_scissors(text, cursor))
+        return yyjson_mut_null(doc);
+
     int    stack_n = 0;
     char **stack   = block_stack(tokens, num_tokens, cursor, &stack_n);
     char  *partial = partial_word(tokens, num_tokens, cursor);
