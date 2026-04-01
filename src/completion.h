@@ -29,4 +29,5 @@
 yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const TokenSpan *tokens, int num_tokens,
                                         LspPos cursor,
-                                        const DocSymbol *symbols, int num_symbols);
+                                        const DocSymbol *symbols, int num_symbols,
+                                        const char *text);

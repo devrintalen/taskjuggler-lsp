@@ -949,7 +949,8 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
                                                      d->parse.num_tok_spans,
                                                      pos,
                                                      d->parse.doc_symbols,
-                                                     d->parse.num_doc_symbols);
+                                                     d->parse.num_doc_symbols,
+                                                     d->text);
     return make_response(doc, id, result);
 }
 
