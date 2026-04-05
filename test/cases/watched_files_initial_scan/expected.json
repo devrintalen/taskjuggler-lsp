@@ -113,6 +113,14 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
+      "uri": "file://${CASE_DIR}/workspace/project.tjp",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
       "uri": "file://${CASE_DIR}/workspace/resources.tji",
       "diagnostics": []
     }

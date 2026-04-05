@@ -142,6 +142,7 @@ typedef struct {
     char       *doc_symbols_json; /* cached documentSymbol JSON array; NULL = invalid */
     size_t      doc_symbols_json_len; /* byte length of doc_symbols_json (excluding NUL) */
     int         in_use;
+    int         disk_only; /* 1 = loaded from disk/watcher, not opened by editor */
 } Document;
 
 static Document docs[MAX_DOCS];
@@ -557,8 +558,9 @@ static void load_file_from_disk(const char *path) {
     free(uri);
     if (!document) { free(text); return; }
 
-    document->text  = text;
-    document->parse = parse(text);
+    document->text      = text;
+    document->disk_only = 1;
+    document->parse     = parse(text);
     follow_includes(path, &document->parse);
 }
 
@@ -609,10 +611,9 @@ static void follow_includes(const char *file_path, const ParseResult *result) {
 
 /*
  * Recursively walk dir_path and call load_file_from_disk() for every
- * regular file whose name ends in ".tji".  Silently skips unreadable
- * directories.
+ * regular .tjp or .tji file found.  Silently skips unreadable directories.
  */
-static void load_tji_files_recursive(const char *dir_path) {
+static void load_tj_files_recursive(const char *dir_path) {
     DIR *dir = opendir(dir_path);
     if (!dir) return;
 
@@ -633,11 +634,12 @@ static void load_tji_files_recursive(const char *dir_path) {
         if (stat(full_path, &st) != 0) { free(full_path); continue; }
 
         if (S_ISDIR(st.st_mode)) {
-            load_tji_files_recursive(full_path);
+            load_tj_files_recursive(full_path);
         } else if (S_ISREG(st.st_mode)) {
-            /* Check for .tji suffix */
-            if (name_len >= 4
-                    && strcmp(entry->d_name + name_len - 4, ".tji") == 0) {
+            if ((name_len >= 4
+                     && strcmp(entry->d_name + name_len - 4, ".tji") == 0)
+                 || (name_len >= 4
+                     && strcmp(entry->d_name + name_len - 4, ".tjp") == 0)) {
                 load_file_from_disk(full_path);
             }
         }
@@ -695,7 +697,7 @@ static void handle_initialized(void) {
      * server would never learn about .tji files that already exist on disk
      * when the session starts. */
     for (int i = 0; i < g_num_workspace_roots; i++)
-        load_tji_files_recursive(g_workspace_roots[i]);
+        load_tj_files_recursive(g_workspace_roots[i]);
     if (g_num_workspace_roots > 0)
         revalidate_all_docs();
 }
@@ -736,13 +738,17 @@ static void handle_did_change_watched_files(yyjson_val *params) {
                 changed = 1;
             }
         } else {
-            /* Created (1) or Changed (2) — read from disk and (re-)parse */
+            /* Created (1) or Changed (2) — read from disk and (re-)parse.
+             * Skip if the editor has the file open: the editor's in-memory
+             * version is authoritative and it will send didChange itself. */
+            Document *document = doc_find(uri);
+            if (document && !document->disk_only) continue;
+
             char *path = uri_to_path(uri);
             if (!path) continue;
             char *text = read_file(path);
             if (!text) { free(path); continue; }
 
-            Document *document = doc_find(uri);
             if (!document) document = doc_alloc(uri);
             if (!document) { free(text); free(path); continue; }
 
@@ -750,7 +756,8 @@ static void handle_did_change_watched_files(yyjson_val *params) {
             free(document->doc_symbols_json);
             document->doc_symbols_json     = NULL;
             document->doc_symbols_json_len = 0;
-            document->text  = text;
+            document->text      = text;
+            document->disk_only = 1;
             parse_result_free(&document->parse);
             document->parse = parse(text);
             follow_includes(path, &document->parse);
@@ -825,12 +832,20 @@ static void handle_didopen(yyjson_val *params) {
     const char *text = json_str(tdi, "text");
     if (!uri || !text) return;
 
-    /* Ignore duplicate opens (LSP spec: client error) */
-    if (doc_find(uri)) return;
-
-    Document *d = doc_alloc(uri);
-    if (!d) return; /* document store full */
-
+    Document *d = doc_find(uri);
+    if (d) {
+        if (!d->disk_only) return; /* duplicate open: LSP spec client error */
+        /* File was pre-loaded from disk; replace with authoritative editor content */
+        free(d->text);
+        free(d->doc_symbols_json);
+        d->doc_symbols_json     = NULL;
+        d->doc_symbols_json_len = 0;
+        parse_result_free(&d->parse);
+    } else {
+        d = doc_alloc(uri);
+        if (!d) return; /* document store full */
+    }
+    d->disk_only = 0;
     d->text  = strdup(text);
     d->parse = parse(text);
 
@@ -904,9 +919,10 @@ static void handle_didchange(yyjson_val *params) {
 }
 
 /* Handle textDocument/didClose.
- * Clears the document from the store, publishes empty diagnostics to remove
- * any editor-side errors, and revalidates remaining documents so that
- * cross-file references to this file's symbols are re-checked.
+ * When the editor closes a file, attempt to reload it from disk so that
+ * cross-file features (completions, definition, references) keep working
+ * even when the file is not open in the editor.  If the file cannot be
+ * read, remove it from the store and clear client-side diagnostics.
  * params — notification params containing textDocument.uri
  */
 static void handle_didclose(yyjson_val *params) {
@@ -920,10 +936,27 @@ static void handle_didclose(yyjson_val *params) {
     Document *d = doc_find(uri);
     if (!d) return;
 
-    /* Publish empty diagnostics to clear client-side errors for the closed file */
-    ParseResult empty = {0};
-    publish_diagnostics(uri, &empty);
-    doc_free(d);
+    char *path = uri_to_path(uri);
+    char *text  = path ? read_file(path) : NULL;
+
+    if (text) {
+        /* Reload from disk — keep the document as a background (disk-only) entry */
+        free(d->text);
+        free(d->doc_symbols_json);
+        d->doc_symbols_json     = NULL;
+        d->doc_symbols_json_len = 0;
+        d->text      = text;
+        d->disk_only = 1;
+        parse_result_free(&d->parse);
+        d->parse = parse(text);
+        follow_includes(path, &d->parse);
+    } else {
+        /* File gone from disk — remove and clear client-side diagnostics */
+        ParseResult empty = {0};
+        publish_diagnostics(uri, &empty);
+        doc_free(d);
+    }
+    free(path);
 
     /* Revalidate remaining docs — the closed file's symbols are no longer available */
     revalidate_all_docs();
@@ -976,10 +1009,36 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, arr);
 }
 
+/* Recursively search syms[n] for a DocSymbol whose selection_range.start
+ * matches pos.  Returns a pointer into the array (not a copy); NULL if not found.
+ */
+static const DocSymbol *find_sym_at_pos(const DocSymbol *syms, int n, LspPos pos) {
+    for (int i = 0; i < n; i++) {
+        if (pos_cmp(syms[i].selection_range.start, pos) == 0)
+            return &syms[i];
+        const DocSymbol *child = find_sym_at_pos(syms[i].children,
+                                                  syms[i].num_children, pos);
+        if (child) return child;
+    }
+    return NULL;
+}
+
+/* Return a human-readable label for a DocSymbol kind. */
+static const char *sym_kind_label(int kind) {
+    switch (kind) {
+    case SK_FUNCTION: return "Task";
+    case SK_OBJECT:   return "Resource";
+    case SK_VARIABLE: return "Account";
+    case SK_EVENT:    return "Shift";
+    case SK_MODULE:   return "Project";
+    default:          return "Symbol";
+    }
+}
+
 /* Handle textDocument/hover.
- * Determines the active keyword at the cursor position and returns its
- * documentation as a Markdown hover card.  Returns null if the cursor is
- * not over a keyword that has documentation.
+ * First checks whether the cursor lands on a resolved dependency reference;
+ * if so, returns the target symbol's name and kind as a hover card.  Falls
+ * back to keyword documentation if no definition link matches.
  */
 static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
                                      yyjson_val *params) {
@@ -1006,6 +1065,45 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
     LspPos pos = json_to_pos(pos_obj);
 
+    /* Check whether the cursor is on a resolved dependency/allocation reference.
+     * If so, show the target symbol's kind, id, and name instead of keyword docs. */
+    for (int i = 0; i < d->parse.num_def_links; i++) {
+        DefinitionLink *link = &d->parse.def_links[i];
+        if (pos_cmp(link->source.start, pos) > 0) continue;
+        if (pos_cmp(pos, link->source.end)   > 0) continue;
+
+        /* Cursor is within this definition link's source range */
+        const char *target_uri = link->target_uri ? link->target_uri : uri;
+        Document   *tgt        = doc_find(target_uri);
+        if (!tgt) break;
+
+        const DocSymbol *sym = find_sym_at_pos(tgt->parse.doc_symbols,
+                                               tgt->parse.num_doc_symbols,
+                                               link->target.start);
+        if (!sym) break;
+
+        /* Build: "**<Kind> `<id>`** — <name>" */
+        const char *label = sym_kind_label(sym->kind);
+        const char *sym_id   = sym->detail ? sym->detail : "";
+        const char *sym_name = sym->name   ? sym->name   : "";
+        /* 32 bytes overhead + label + id + name is always enough */
+        size_t buf_len = 32 + strlen(label) + strlen(sym_id) + strlen(sym_name);
+        char *hover_text = malloc(buf_len);
+        if (!hover_text) break;
+        snprintf(hover_text, buf_len, "**%s `%s`** — %s", label, sym_id, sym_name);
+
+        yyjson_mut_val *contents = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc, contents, "kind",  "markdown");
+        yyjson_mut_obj_add_str(doc, contents, "value", hover_text);
+        free(hover_text);
+
+        yyjson_mut_val *hover = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, hover, "contents", contents);
+        yyjson_mut_obj_add_val(doc, hover, "range",    range_json(doc, link->source));
+        return make_response(doc, id, hover);
+    }
+
+    /* Fall back to keyword documentation */
     ActiveKeyword ak = active_keyword_at(d->parse.tok_spans, d->parse.num_tok_spans, pos);
     if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
