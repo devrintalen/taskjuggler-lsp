@@ -349,6 +349,9 @@ typedef struct {
     int             num_raw_dep_refs;
     int             raw_dep_ref_cap;
     int             num_sem_entries;  /* upper bound on push_entry calls for semantic tokens */
+    char          **included_files;   /* unquoted filenames from include statements */
+    int             num_included_files;
+    int             included_files_cap;
 } ParseResult;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -356,6 +359,7 @@ typedef struct {
 ParseResult parse(const char *src);
 void        parse_result_free(ParseResult *r);
 void        doc_symbol_free(DocSymbol *s);
+void        push_included_file(ParseResult *r, const char *quoted_text);
 
 /*
  * Navigate the DocSymbol tree by following `path` (an array of `plen`

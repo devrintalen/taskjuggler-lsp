@@ -146,9 +146,12 @@ typedef struct {
 
 static Document docs[MAX_DOCS];
 
-/* Workspace root filesystem path extracted from the initialize params.
- * NULL if not provided by the client. Heap-allocated; never freed. */
-static char *g_workspace_root_path = NULL;
+/* Workspace root filesystem paths extracted from the initialize params.
+ * Populated from rootUri and/or workspaceFolders.  Heap-allocated entries;
+ * never freed (server lifetime). */
+#define MAX_WORKSPACE_ROOTS 16
+static char *g_workspace_roots[MAX_WORKSPACE_ROOTS];
+static int   g_num_workspace_roots = 0;
 
 /* Find the open document with the given URI, or return NULL if not found. */
 static Document *doc_find(const char *uri) {
@@ -396,20 +399,36 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
     // TODO none of the client capabilities are checked here.
 
-    /* Extract workspace root path for use in handle_initialized(). Prefer
-     * rootUri; fall back to the first entry in workspaceFolders. */
-    if (params && !g_workspace_root_path) {
+    /* Extract workspace root paths for use in handle_initialized().
+     * Collect rootUri first, then all workspaceFolders entries, deduplicating
+     * by URI string so a client that sends both doesn't double-scan. */
+    if (params) {
         yyjson_val *root_uri_val = yyjson_obj_get(params, "rootUri");
-        if (root_uri_val && yyjson_is_str(root_uri_val))
-            g_workspace_root_path = uri_to_path(yyjson_get_str(root_uri_val));
+        if (root_uri_val && yyjson_is_str(root_uri_val)
+                && g_num_workspace_roots < MAX_WORKSPACE_ROOTS) {
+            char *path = uri_to_path(yyjson_get_str(root_uri_val));
+            if (path) g_workspace_roots[g_num_workspace_roots++] = path;
+        }
 
-        if (!g_workspace_root_path) {
-            yyjson_val *folders = yyjson_obj_get(params, "workspaceFolders");
-            if (folders && yyjson_is_arr(folders)
-                    && yyjson_arr_size(folders) > 0) {
-                yyjson_val *first = yyjson_arr_get_first(folders);
-                const char *uri = json_str(first, "uri");
-                if (uri) g_workspace_root_path = uri_to_path(uri);
+        yyjson_val *folders = yyjson_obj_get(params, "workspaceFolders");
+        if (folders && yyjson_is_arr(folders)) {
+            size_t idx, max;
+            yyjson_val *folder;
+            yyjson_arr_foreach(folders, idx, max, folder) {
+                if (g_num_workspace_roots >= MAX_WORKSPACE_ROOTS) break;
+                const char *uri = json_str(folder, "uri");
+                if (!uri) continue;
+                char *path = uri_to_path(uri);
+                if (!path) continue;
+                /* Skip if already present (rootUri == workspaceFolders[0]) */
+                int duplicate = 0;
+                for (int k = 0; k < g_num_workspace_roots; k++) {
+                    if (strcmp(g_workspace_roots[k], path) == 0) {
+                        duplicate = 1; break;
+                    }
+                }
+                if (duplicate) { free(path); continue; }
+                g_workspace_roots[g_num_workspace_roots++] = path;
             }
         }
     }
@@ -468,6 +487,27 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_obj_add_val(doc,  caps, "semanticTokensProvider",    sem_opts);
     yyjson_mut_obj_add_bool(doc, caps, "workspaceSymbolProvider",   true);
 
+    /* workspace.fileOperations.didRename — server wants rename notifications
+     * for .tjp and .tji files so it can update the document store. */
+    yyjson_mut_val *rename_filter_tjp = yyjson_mut_obj(doc);
+    yyjson_mut_val *pattern_tjp = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, pattern_tjp, "glob", "**/*.tjp");
+    yyjson_mut_obj_add_val(doc, rename_filter_tjp, "pattern", pattern_tjp);
+    yyjson_mut_val *rename_filter_tji = yyjson_mut_obj(doc);
+    yyjson_mut_val *pattern_tji = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, pattern_tji, "glob", "**/*.tji");
+    yyjson_mut_obj_add_val(doc, rename_filter_tji, "pattern", pattern_tji);
+    yyjson_mut_val *rename_filters = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_val(rename_filters, rename_filter_tjp);
+    yyjson_mut_arr_add_val(rename_filters, rename_filter_tji);
+    yyjson_mut_val *did_rename_opts = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, did_rename_opts, "filters", rename_filters);
+    yyjson_mut_val *file_ops = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, file_ops, "didRename", did_rename_opts);
+    yyjson_mut_val *workspace_caps = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, workspace_caps, "fileOperations", file_ops);
+    yyjson_mut_obj_add_val(doc, caps, "workspace", workspace_caps);
+
     yyjson_mut_val *result = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, result, "capabilities", caps);
     yyjson_mut_obj_add_val(doc, result, "serverInfo",   server_info);
@@ -502,6 +542,10 @@ static char *path_to_uri(const char *path) {
  * If the URI is already present, it is skipped (does not overwrite
  * editor-managed documents with stale disk content).
  */
+/* Forward declaration — follow_includes() and load_file_from_disk() are
+ * mutually recursive: loading a file may trigger following its includes. */
+static void follow_includes(const char *file_path, const ParseResult *parse);
+
 static void load_file_from_disk(const char *path) {
     char *uri = path_to_uri(path);
     if (doc_find(uri)) { free(uri); return; }
@@ -515,6 +559,52 @@ static void load_file_from_disk(const char *path) {
 
     document->text  = text;
     document->parse = parse(text);
+    follow_includes(path, &document->parse);
+}
+
+/*
+ * For each filename listed in parse->included_files, resolve it relative to
+ * the directory containing file_path and load it into the document store if
+ * not already present.  Cycle-safe: load_file_from_disk() skips URIs that are
+ * already in the store.
+ */
+static void follow_includes(const char *file_path, const ParseResult *result) {
+    if (!result->num_included_files) return;
+
+    /* Compute the directory portion of file_path */
+    size_t path_len = strlen(file_path);
+    const char *last_slash = NULL;
+    for (size_t i = path_len; i-- > 0; ) {
+        if (file_path[i] == '/') { last_slash = file_path + i; break; }
+    }
+    size_t dir_len = last_slash ? (size_t)(last_slash - file_path) : 0;
+
+    for (int i = 0; i < result->num_included_files; i++) {
+        const char *filename = result->included_files[i];
+        size_t fname_len = strlen(filename);
+
+        char *full_path;
+        if (filename[0] == '/') {
+            /* Absolute path — use as-is */
+            full_path = malloc(fname_len + 1);
+            if (!full_path) continue;
+            memcpy(full_path, filename, fname_len + 1);
+        } else {
+            /* Relative path — resolve against parent directory */
+            full_path = malloc(dir_len + 1 + fname_len + 1);
+            if (!full_path) continue;
+            if (dir_len > 0) {
+                memcpy(full_path, file_path, dir_len);
+                full_path[dir_len] = '/';
+                memcpy(full_path + dir_len + 1, filename, fname_len + 1);
+            } else {
+                memcpy(full_path, filename, fname_len + 1);
+            }
+        }
+
+        load_file_from_disk(full_path);
+        free(full_path);
+    }
 }
 
 /*
@@ -604,10 +694,10 @@ static void handle_initialized(void) {
      * File watchers only fire on future changes, so without this scan the
      * server would never learn about .tji files that already exist on disk
      * when the session starts. */
-    if (g_workspace_root_path) {
-        load_tji_files_recursive(g_workspace_root_path);
+    for (int i = 0; i < g_num_workspace_roots; i++)
+        load_tji_files_recursive(g_workspace_roots[i]);
+    if (g_num_workspace_roots > 0)
         revalidate_all_docs();
-    }
 }
 
 /*
@@ -650,12 +740,11 @@ static void handle_did_change_watched_files(yyjson_val *params) {
             char *path = uri_to_path(uri);
             if (!path) continue;
             char *text = read_file(path);
-            free(path);
-            if (!text) continue;
+            if (!text) { free(path); continue; }
 
             Document *document = doc_find(uri);
             if (!document) document = doc_alloc(uri);
-            if (!document) { free(text); continue; }
+            if (!document) { free(text); free(path); continue; }
 
             free(document->text);
             free(document->doc_symbols_json);
@@ -664,8 +753,59 @@ static void handle_did_change_watched_files(yyjson_val *params) {
             document->text  = text;
             parse_result_free(&document->parse);
             document->parse = parse(text);
+            follow_includes(path, &document->parse);
+            free(path);
             changed = 1;
         }
+    }
+
+    if (changed) revalidate_all_docs();
+}
+
+/*
+ * Handle workspace/didRenameFiles.
+ *
+ * For each renamed file: remove the old URI from the document store (clearing
+ * its diagnostics), then read the new URI from disk and add it.  Revalidates
+ * all documents once at the end so that cross-file references are updated.
+ */
+static void handle_did_rename_files(yyjson_val *params) {
+    if (!params) return;
+    yyjson_val *files = yyjson_obj_get(params, "files");
+    if (!files || !yyjson_is_arr(files)) return;
+
+    int changed = 0;
+
+    size_t idx, max;
+    yyjson_val *file_item;
+    yyjson_arr_foreach(files, idx, max, file_item) {
+        const char *old_uri = json_str(file_item, "oldUri");
+        const char *new_uri = json_str(file_item, "newUri");
+        if (!old_uri || !new_uri) continue;
+
+        /* Remove old URI */
+        Document *old_doc = doc_find(old_uri);
+        if (old_doc) {
+            ParseResult empty = {0};
+            publish_diagnostics(old_uri, &empty);
+            doc_free(old_doc);
+            changed = 1;
+        }
+
+        /* Load new URI from disk */
+        char *path = uri_to_path(new_uri);
+        if (!path) continue;
+        char *text = read_file(path);
+        if (!text) { free(path); continue; }
+
+        Document *new_doc = doc_alloc(new_uri);
+        if (!new_doc) { free(text); free(path); continue; }
+
+        new_doc->text  = text;
+        new_doc->parse = parse(text);
+        follow_includes(path, &new_doc->parse);
+        free(path);
+        changed = 1;
     }
 
     if (changed) revalidate_all_docs();
@@ -693,6 +833,12 @@ static void handle_didopen(yyjson_val *params) {
 
     d->text  = strdup(text);
     d->parse = parse(text);
+
+    char *path = uri_to_path(uri);
+    if (path) {
+        follow_includes(path, &d->parse);
+        free(path);
+    }
 
     revalidate_all_docs();
 }
@@ -1170,6 +1316,9 @@ char *server_process(const char *json_text) {
 
     } else if (strcmp(m, "workspace/didChangeWatchedFiles") == 0) {
         handle_did_change_watched_files(params);
+
+    } else if (strcmp(m, "workspace/didRenameFiles") == 0) {
+        handle_did_rename_files(params);
 
     } else if (strcmp(m, "workspace/symbol") == 0) {
         resp = handle_workspace_symbol(out_doc, id_item, params);
