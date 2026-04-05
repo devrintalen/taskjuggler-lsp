@@ -805,11 +805,18 @@ static void handle_did_rename_files(yyjson_val *params) {
         char *text = read_file(path);
         if (!text) { free(path); continue; }
 
-        Document *new_doc = doc_alloc(new_uri);
+        Document *new_doc = doc_find(new_uri);
+        if (!new_doc) new_doc = doc_alloc(new_uri);
         if (!new_doc) { free(text); free(path); continue; }
 
-        new_doc->text  = text;
-        new_doc->parse = parse(text);
+        free(new_doc->text);
+        free(new_doc->doc_symbols_json);
+        new_doc->doc_symbols_json     = NULL;
+        new_doc->doc_symbols_json_len = 0;
+        parse_result_free(&new_doc->parse);
+        new_doc->text      = text;
+        new_doc->disk_only = 1;
+        new_doc->parse     = parse(text);
         follow_includes(path, &new_doc->parse);
         free(path);
         changed = 1;
