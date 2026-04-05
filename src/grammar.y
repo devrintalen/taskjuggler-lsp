@@ -58,6 +58,7 @@ void yyerror(const char *msg);
 /* ── Helpers (declared/defined in parser.c) ─────────────────────────────── */
 
 extern void push_doc_symbol    (ParseResult *r, DocSymbol s);
+extern void push_included_file (ParseResult *r, const char *quoted_text);
 extern void push_diagnostic(ParseResult *r, LspRange range, int severity,
                              const char *msg);
 extern int  symbol_kind_for(const char *kw);
@@ -1198,6 +1199,7 @@ macro_stmt
 include_stmt
     : KW_INCLUDE string_val opt_body
         {
+            push_included_file(g_result, $2.text);
             token_free(&$1); token_free(&$2);
             for (int i = 0; i < $3.syms.n; i++) doc_symbol_free(&$3.syms.arr[i]);
             free($3.syms.arr);

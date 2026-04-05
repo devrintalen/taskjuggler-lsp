@@ -123,6 +123,10 @@ void parse_result_free(ParseResult *r) {
     }
     free(r->raw_dep_refs);
 
+    for (int i = 0; i < r->num_included_files; i++)
+        free(r->included_files[i]);
+    free(r->included_files);
+
     memset(r, 0, sizeof(*r));
 }
 
@@ -138,6 +142,35 @@ void push_doc_symbol(ParseResult *r, DocSymbol s) {
         r->doc_sym_cap = nc;
     }
     r->doc_symbols[r->num_doc_symbols++] = s;
+}
+
+/* Append a heap-allocated copy of the unquoted filename from an include
+ * statement.  quoted_text is the raw TK_STR token text (e.g. "\"foo.tji\"");
+ * the surrounding quotes are stripped before storing.
+ */
+void push_included_file(ParseResult *r, const char *quoted_text) {
+    if (!quoted_text) return;
+    size_t len = strlen(quoted_text);
+    /* Strip surrounding quotes if present */
+    const char *inner = quoted_text;
+    size_t inner_len  = len;
+    if (len >= 2 && (quoted_text[0] == '"' || quoted_text[0] == '\'')) {
+        inner     = quoted_text + 1;
+        inner_len = len - 2;
+    }
+    char *copy = malloc(inner_len + 1);
+    if (!copy) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    memcpy(copy, inner, inner_len);
+    copy[inner_len] = '\0';
+
+    if (r->num_included_files >= r->included_files_cap) {
+        int nc = r->included_files_cap ? r->included_files_cap * 2 : 4;
+        char **tmp = realloc(r->included_files, (size_t)nc * sizeof(char *));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        r->included_files     = tmp;
+        r->included_files_cap = nc;
+    }
+    r->included_files[r->num_included_files++] = copy;
 }
 
 /* ── DocSymbol tree navigation ───────────────────────────────────────────── */
