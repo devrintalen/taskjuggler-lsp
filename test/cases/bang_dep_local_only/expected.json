@@ -97,15 +97,7 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file:///test/project.tjp",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/project.tjp",
+      "uri": "file:///test/tasks.tji",
       "diagnostics": []
     }
   },
@@ -119,44 +111,30 @@
   },
   {
     "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/project.tjp",
+      "diagnostics": [
+        {
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 13
+            },
+            "end": {
+              "line": 3,
+              "character": 20
+            }
+          },
+          "severity": 1,
+          "message": "unresolved task: `sibling`"
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
     "id": 2,
-    "result": [
-      {
-        "uri": "file:///test/project.tjp",
-        "range": {
-          "start": {
-            "line": 5,
-            "character": 10
-          },
-          "end": {
-            "line": 5,
-            "character": 17
-          }
-        }
-      },
-      {
-        "uri": "file:///test/tasks.tji",
-        "range": {
-          "start": {
-            "line": 1,
-            "character": 10
-          },
-          "end": {
-            "line": 1,
-            "character": 17
-          }
-        }
-      }
-    ]
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 3,
-    "result": []
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 4,
     "result": null
   }
 ]

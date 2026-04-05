@@ -22,21 +22,38 @@
 #include <yyjson.h>
 
 /*
+ * One document's contribution to a cross-file references search.
+ * uri      — the URI of the document (used as the Location uri in results)
+ * links    — resolved definition links from the document's ParseResult
+ * num_links — number of entries in links
+ */
+typedef struct {
+    const char           *uri;
+    const DefinitionLink *links;
+    int                   num_links;
+} RefDocLinks;
+
+/*
  * Build a Location[] JSON array for textDocument/references.
  *
  * Returns NULL when the cursor is not on a task declaration identifier.
  * Returns an empty array when the cursor is on a task declaration that
- * no dependency reference points to.
+ * no dependency reference points to anywhere in the workspace.
  * Otherwise returns an array of Location objects, one per dependency
- * reference that resolves to the task under the cursor.
+ * reference that resolves to the task under the cursor, across all supplied
+ * documents.
  *
- * Only task declarations (SK_FUNCTION) are recognised as trigger points.
- * Only dependency references recorded as DefinitionLinks are returned;
- * resource references (allocate, responsible, booking) are not included.
+ * cursor_uri   — URI of the document the cursor is in
+ * symbols/num_symbols — symbol tree of the cursor document (used to locate
+ *                       the declaration under the cursor)
+ * all_docs/num_docs   — one RefDocLinks entry per open document; all of these
+ *                       are scanned for def_links that point to the target task
+ * cursor       — the cursor position
  *
  * Values are allocated in doc; caller owns doc.
  */
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
-                                       const DefinitionLink *links, int num_links,
+                                       const char *cursor_uri,
                                        const DocSymbol *symbols, int num_symbols,
-                                       LspPos cursor, const char *uri);
+                                       const RefDocLinks *all_docs, int num_docs,
+                                       LspPos cursor);
