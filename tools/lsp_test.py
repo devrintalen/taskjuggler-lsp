@@ -146,6 +146,32 @@ def diff_output(expected, actual):
     return ''.join(result)
 
 
+def apply_substitutions(obj, case_dir):
+    """Recursively replace ${CASE_DIR} in all string values with case_dir."""
+    if isinstance(obj, str):
+        return obj.replace('${CASE_DIR}', case_dir)
+    if isinstance(obj, list):
+        return [apply_substitutions(item, case_dir) for item in obj]
+    if isinstance(obj, dict):
+        return {k: apply_substitutions(v, case_dir) for k, v in obj.items()}
+    return obj
+
+
+def apply_redactions(obj, case_dir):
+    """Recursively replace case_dir with ${CASE_DIR} in all string values.
+
+    Used when recording expected output so that expected.json stays portable
+    across machines.
+    """
+    if isinstance(obj, str):
+        return obj.replace(case_dir, '${CASE_DIR}')
+    if isinstance(obj, list):
+        return [apply_redactions(item, case_dir) for item in obj]
+    if isinstance(obj, dict):
+        return {k: apply_redactions(v, case_dir) for k, v in obj.items()}
+    return obj
+
+
 def run_test_case(server_binary, case_dir, record):
     """Run a single test case. Returns True on pass (or record), False on fail."""
     input_path = os.path.join(case_dir, 'input.json')
@@ -156,14 +182,16 @@ def run_test_case(server_binary, case_dir, record):
         print(f"  {yellow('SKIP')}  {case_name}  {dim('no input.json')}")
         return True
 
+    abs_case_dir = os.path.abspath(case_dir)
     with open(input_path, 'r') as input_file:
-        input_messages = json.load(input_file)
+        input_messages = apply_substitutions(json.load(input_file), abs_case_dir)
 
     actual = run_server(server_binary, input_messages)
 
     if record:
+        redacted = apply_redactions(actual, abs_case_dir)
         with open(expected_path, 'w') as expected_file:
-            json.dump(actual, expected_file, indent=2)
+            json.dump(redacted, expected_file, indent=2)
             expected_file.write('\n')
         print(f"  {yellow('RECORDED')}  {case_name}  {dim(f'({len(actual)} message(s))')}")
         return True
@@ -173,7 +201,7 @@ def run_test_case(server_binary, case_dir, record):
         return False
 
     with open(expected_path, 'r') as expected_file:
-        expected = json.load(expected_file)
+        expected = apply_substitutions(json.load(expected_file), abs_case_dir)
 
     diff = diff_output(expected, actual)
     if not diff:

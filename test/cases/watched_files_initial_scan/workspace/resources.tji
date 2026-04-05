@@ -1,0 +1,2 @@
+resource alice "Alice" {}
+resource bob "Bob" {}

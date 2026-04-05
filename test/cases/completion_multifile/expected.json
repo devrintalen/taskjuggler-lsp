@@ -102,7 +102,17 @@
   {
     "jsonrpc": "2.0",
     "id": 2,
-    "result": null
+    "result": {
+      "isIncomplete": true,
+      "items": [
+        {
+          "label": "doc",
+          "kind": 3,
+          "detail": "\"Documentation\"",
+          "sortText": "0"
+        }
+      ]
+    }
   },
   {
     "jsonrpc": "2.0",
