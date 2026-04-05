@@ -1,0 +1,165 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "capabilities": {
+        "textDocumentSync": {
+          "change": 2,
+          "openClose": true
+        },
+        "documentSymbolProvider": true,
+        "foldingRangeProvider": true,
+        "hoverProvider": true,
+        "definitionProvider": true,
+        "referencesProvider": true,
+        "documentHighlightProvider": true,
+        "signatureHelpProvider": {
+          "triggerCharacters": [
+            " "
+          ]
+        },
+        "completionProvider": {
+          "triggerCharacters": [
+            ",",
+            " ",
+            "!"
+          ],
+          "resolveProvider": false
+        },
+        "semanticTokensProvider": {
+          "legend": {
+            "tokenTypes": [
+              "keyword",
+              "comment",
+              "string",
+              "number",
+              "variable",
+              "function"
+            ],
+            "tokenModifiers": [
+              "declaration"
+            ]
+          },
+          "full": true
+        },
+        "workspaceSymbolProvider": true,
+        "workspace": {
+          "fileOperations": {
+            "didRename": {
+              "filters": [
+                {
+                  "pattern": {
+                    "glob": "**/*.tjp"
+                  }
+                },
+                {
+                  "pattern": {
+                    "glob": "**/*.tji"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "serverInfo": {
+        "name": [
+          "taskjuggler-lsp"
+        ]
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": "watcher-reg",
+    "method": "client/registerCapability",
+    "params": {
+      "registrations": [
+        {
+          "id": "file-watcher",
+          "method": "workspace/didChangeWatchedFiles",
+          "registerOptions": {
+            "watchers": [
+              {
+                "globPattern": "**/*.tjp"
+              },
+              {
+                "globPattern": "**/*.tji"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/tasks.tji",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/tasks.tji",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/project.tjp",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": {
+      "contents": {
+        "kind": "markdown",
+        "value": "**Task `spec`** \u2014 \"Spec Phase\""
+      },
+      "range": {
+        "start": {
+          "line": 2,
+          "character": 10
+        },
+        "end": {
+          "line": 2,
+          "character": 14
+        }
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": {
+      "contents": {
+        "kind": "markdown",
+        "value": "**`task`** *(declaration)*\n\nDefines a work package, summary task, or milestone. Tasks may be nested to form a work-breakdown structure.\n\n**Syntax:** `task <id> \"<name>\" { \u2026 }`\n\n**Common body attributes:** `effort`, `duration`, `depends`, `allocate`, `milestone`, `start`, `end`, `priority`, `complete`"
+      },
+      "range": {
+        "start": {
+          "line": 1,
+          "character": 0
+        },
+        "end": {
+          "line": 1,
+          "character": 4
+        }
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "result": null
+  }
+]

@@ -1,0 +1,50 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file://${CASE_DIR}/workspace/project.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "project p \"Project\" 2026-01-01 +3m {}\ninclude \"tasks.tji\"\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "workspace/symbol",
+    "params": { "query": "" }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "textDocument/completion",
+    "params": {
+      "textDocument": { "uri": "file://${CASE_DIR}/workspace/project.tjp" },
+      "position": { "line": 2, "character": 0 }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "shutdown",
+    "params": {}
+  }
+]

@@ -1,0 +1,65 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/tasks.tji",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "task spec \"Spec Phase\" {}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/project.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "project p \"Project\" 2026-01-01 +3m {}\ntask build \"Build\" {\n  depends spec\n}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "textDocument/hover",
+    "params": {
+      "textDocument": { "uri": "file:///test/project.tjp" },
+      "position": { "line": 2, "character": 10 }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "textDocument/hover",
+    "params": {
+      "textDocument": { "uri": "file:///test/project.tjp" },
+      "position": { "line": 1, "character": 5 }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "shutdown",
+    "params": {}
+  }
+]
