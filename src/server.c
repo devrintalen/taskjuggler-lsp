@@ -334,7 +334,7 @@ static const char *json_str(yyjson_val *obj, const char *key) {
 /* Copy an immutable id value into doc as a mutable value. */
 static yyjson_mut_val *copy_id(yyjson_mut_doc *doc, yyjson_val *id) {
     if (!id || yyjson_is_null(id)) return yyjson_mut_null(doc);
-    if (yyjson_is_str(id))  return yyjson_mut_str(doc, yyjson_get_str(id));
+    if (yyjson_is_str(id))  return yyjson_mut_strcpy(doc, yyjson_get_str(id));
     if (yyjson_is_uint(id)) return yyjson_mut_uint(doc, yyjson_get_uint(id));
     if (yyjson_is_sint(id)) return yyjson_mut_int(doc, yyjson_get_int(id));
     if (yyjson_is_real(id)) return yyjson_mut_real(doc, yyjson_get_real(id));
