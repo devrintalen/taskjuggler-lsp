@@ -1090,19 +1090,17 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
         if (!sym) break;
 
         /* Build: "**<Kind> `<id>`** — <name>" */
-        const char *label = sym_kind_label(sym->kind);
+        const char *label    = sym_kind_label(sym->kind);
         const char *sym_id   = sym->detail ? sym->detail : "";
         const char *sym_name = sym->name   ? sym->name   : "";
-        /* 32 bytes overhead + label + id + name is always enough */
-        size_t buf_len = 32 + strlen(label) + strlen(sym_id) + strlen(sym_name);
-        char *hover_text = malloc(buf_len);
-        if (!hover_text) break;
-        snprintf(hover_text, buf_len, "**%s `%s`** — %s", label, sym_id, sym_name);
+        /* Stack buffer — label(≤8) + id + name + 32 bytes punctuation */
+        char hover_text[512];
+        snprintf(hover_text, sizeof(hover_text),
+                 "**%s `%s`** \xe2\x80\x94 %s", label, sym_id, sym_name);
 
         yyjson_mut_val *contents = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_str(doc, contents, "kind",  "markdown");
-        yyjson_mut_obj_add_str(doc, contents, "value", hover_text);
-        free(hover_text);
+        yyjson_mut_obj_add_strcpy(doc, contents, "value", hover_text);
 
         yyjson_mut_val *hover = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_val(doc, hover, "contents", contents);

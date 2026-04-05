@@ -1,0 +1,333 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "capabilities": {
+        "textDocumentSync": {
+          "change": 2,
+          "openClose": true
+        },
+        "documentSymbolProvider": true,
+        "foldingRangeProvider": true,
+        "hoverProvider": true,
+        "definitionProvider": true,
+        "referencesProvider": true,
+        "documentHighlightProvider": true,
+        "signatureHelpProvider": {
+          "triggerCharacters": [
+            " "
+          ]
+        },
+        "completionProvider": {
+          "triggerCharacters": [
+            ",",
+            " ",
+            "!"
+          ],
+          "resolveProvider": false
+        },
+        "semanticTokensProvider": {
+          "legend": {
+            "tokenTypes": [
+              "keyword",
+              "comment",
+              "string",
+              "number",
+              "variable",
+              "function"
+            ],
+            "tokenModifiers": [
+              "declaration"
+            ]
+          },
+          "full": true
+        },
+        "workspaceSymbolProvider": true,
+        "workspace": {
+          "fileOperations": {
+            "didRename": {
+              "filters": [
+                {
+                  "pattern": {
+                    "glob": "**/*.tjp"
+                  }
+                },
+                {
+                  "pattern": {
+                    "glob": "**/*.tji"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "serverInfo": {
+        "name": [
+          "taskjuggler-lsp"
+        ]
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": "watcher-reg",
+    "method": "client/registerCapability",
+    "params": {
+      "registrations": [
+        {
+          "id": "file-watcher",
+          "method": "workspace/didChangeWatchedFiles",
+          "registerOptions": {
+            "watchers": [
+              {
+                "globPattern": "**/*.tjp"
+              },
+              {
+                "globPattern": "**/*.tji"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file://${CASE_DIR}/workspace/project.tjp",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": [
+      {
+        "name": "\"Project\"",
+        "kind": 2,
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/project.tjp",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 8
+            },
+            "end": {
+              "line": 0,
+              "character": 9
+            }
+          }
+        }
+      },
+      {
+        "name": "\"Design\"",
+        "kind": 12,
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/tasks.tji",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 5
+            },
+            "end": {
+              "line": 0,
+              "character": 11
+            }
+          }
+        }
+      },
+      {
+        "name": "\"Review\"",
+        "kind": 12,
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/tasks.tji",
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 5
+            },
+            "end": {
+              "line": 1,
+              "character": 11
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": {
+      "isIncomplete": true,
+      "items": [
+        {
+          "label": "project",
+          "kind": 14,
+          "detail": "Project header (required once per file)",
+          "sortText": "1"
+        },
+        {
+          "label": "task",
+          "kind": 14,
+          "detail": "Work package, summary task, or milestone",
+          "sortText": "1"
+        },
+        {
+          "label": "resource",
+          "kind": 14,
+          "detail": "Person, team, or equipment",
+          "sortText": "1"
+        },
+        {
+          "label": "account",
+          "kind": 14,
+          "detail": "Cost/revenue account",
+          "sortText": "1"
+        },
+        {
+          "label": "shift",
+          "kind": 14,
+          "detail": "Named working-hours shift",
+          "sortText": "1"
+        },
+        {
+          "label": "scenario",
+          "kind": 14,
+          "detail": "Alternative scheduling scenario",
+          "sortText": "1"
+        },
+        {
+          "label": "macro",
+          "kind": 14,
+          "detail": "Reusable text macro",
+          "sortText": "1"
+        },
+        {
+          "label": "include",
+          "kind": 14,
+          "detail": "Include another .tjp/.tji file",
+          "sortText": "1"
+        },
+        {
+          "label": "flags",
+          "kind": 14,
+          "detail": "Declare flag identifiers",
+          "sortText": "1"
+        },
+        {
+          "label": "supplement",
+          "kind": 14,
+          "detail": "Add attributes to an existing declaration",
+          "sortText": "1"
+        },
+        {
+          "label": "rate",
+          "kind": 14,
+          "detail": "Default daily cost rate for all resources",
+          "sortText": "1"
+        },
+        {
+          "label": "leaves",
+          "kind": 14,
+          "detail": "Global leave block",
+          "sortText": "1"
+        },
+        {
+          "label": "vacation",
+          "kind": 14,
+          "detail": "Global vacation / unavailability period",
+          "sortText": "1"
+        },
+        {
+          "label": "now",
+          "kind": 14,
+          "detail": "Reference date for reports",
+          "sortText": "1"
+        },
+        {
+          "label": "currency",
+          "kind": 14,
+          "detail": "Currency symbol",
+          "sortText": "1"
+        },
+        {
+          "label": "timeformat",
+          "kind": 14,
+          "detail": "Date/time display format string",
+          "sortText": "1"
+        },
+        {
+          "label": "timezone",
+          "kind": 14,
+          "detail": "IANA timezone identifier",
+          "sortText": "1"
+        },
+        {
+          "label": "workinghours",
+          "kind": 14,
+          "detail": "Working hours definition",
+          "sortText": "1"
+        },
+        {
+          "label": "timingresolution",
+          "kind": 14,
+          "detail": "Scheduling granularity in minutes",
+          "sortText": "1"
+        },
+        {
+          "label": "balance",
+          "kind": 14,
+          "detail": "Profit/loss account pair",
+          "sortText": "1"
+        },
+        {
+          "label": "extend",
+          "kind": 14,
+          "detail": "Add custom attributes to a built-in type",
+          "sortText": "1"
+        },
+        {
+          "label": "navigator",
+          "kind": 14,
+          "detail": "Navigation bar for HTML reports",
+          "sortText": "1"
+        },
+        {
+          "label": "taskreport",
+          "kind": 14,
+          "detail": "Task-based report definition",
+          "sortText": "1"
+        },
+        {
+          "label": "textreport",
+          "kind": 14,
+          "detail": "HTML/text report definition",
+          "sortText": "1"
+        },
+        {
+          "label": "resourcereport",
+          "kind": 14,
+          "detail": "Resource-based report definition",
+          "sortText": "1"
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "result": null
+  }
+]
