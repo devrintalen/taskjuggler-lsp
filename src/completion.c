@@ -649,6 +649,9 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const TokenSpan *tokens, int num_tokens,
                                         LspPos cursor,
                                         const DocSymbol *symbols, int num_symbols,
+                                        const DocSymbol **extra_pools,
+                                        const int *extra_counts,
+                                        int num_extra,
                                         const char *text) {
     /* Suppress completions when the cursor is inside a string or scissors block */
     if (cursor_in_dquote(text, cursor, tokens, num_tokens)
@@ -704,14 +707,23 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                     strncat(bang_prefix, "!", sizeof(bang_prefix) - strlen(bang_prefix) - 1);
 
                 if (scope_n == 0) {
+                    /* Global level: absolute references can target any file */
                     collect_ids(symbols, num_symbols, id_kind, "", &ids);
+                    for (int e = 0; e < num_extra; e++)
+                        collect_ids(extra_pools[e], extra_counts[e], id_kind, "", &ids);
                 } else if (bang_count == 0) {
+                    /* Scoped (no bangs): collect siblings from current file.
+                     * Also include top-level IDs from other files since
+                     * absolute references are always valid. */
                     const DocSymbol *ch;
                     int           ch_n;
                     ch = doc_symbol_find_path(symbols, num_symbols,
                                              (const char **)scope, scope_n, &ch_n);
                     if (ch) collect_ids(ch, ch_n, id_kind, "", &ids);
+                    for (int e = 0; e < num_extra; e++)
+                        collect_ids(extra_pools[e], extra_counts[e], id_kind, "", &ids);
                 } else if (bang_count <= scope_n) {
+                    /* Bang navigation: relative to current scope, file-local only */
                     const DocSymbol *ch;
                     int           ch_n;
                     ch = doc_symbol_find_path(symbols, num_symbols,
@@ -724,7 +736,10 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                 for (int i = 0; i < scope_n; i++) free(scope[i]);
                 free(scope);
             } else {
+                /* allocate, responsible, chargeset, etc.: flat lookup across all files */
                 collect_ids(symbols, num_symbols, id_kind, "", &ids);
+                for (int e = 0; e < num_extra; e++)
+                    collect_ids(extra_pools[e], extra_counts[e], id_kind, "", &ids);
             }
 
             for (int i = 0; i < ids.n; i++) {

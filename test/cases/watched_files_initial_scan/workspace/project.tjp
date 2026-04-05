@@ -1,0 +1,4 @@
+project acme "ACME Corp" 2026-01-01 +6m {
+  include "resources.tji"
+  include "tasks.tji"
+}

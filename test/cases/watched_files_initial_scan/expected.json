@@ -1,0 +1,215 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "capabilities": {
+        "textDocumentSync": {
+          "change": 2,
+          "openClose": true
+        },
+        "documentSymbolProvider": true,
+        "foldingRangeProvider": true,
+        "hoverProvider": true,
+        "definitionProvider": true,
+        "referencesProvider": true,
+        "documentHighlightProvider": true,
+        "signatureHelpProvider": {
+          "triggerCharacters": [
+            " "
+          ]
+        },
+        "completionProvider": {
+          "triggerCharacters": [
+            ",",
+            " ",
+            "!"
+          ],
+          "resolveProvider": false
+        },
+        "semanticTokensProvider": {
+          "legend": {
+            "tokenTypes": [
+              "keyword",
+              "comment",
+              "string",
+              "number",
+              "variable",
+              "function"
+            ],
+            "tokenModifiers": [
+              "declaration"
+            ]
+          },
+          "full": true
+        },
+        "workspaceSymbolProvider": true
+      },
+      "serverInfo": {
+        "name": [
+          "taskjuggler-lsp"
+        ]
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": "watcher-reg",
+    "method": "client/registerCapability",
+    "params": {
+      "registrations": [
+        {
+          "id": "file-watcher",
+          "method": "workspace/didChangeWatchedFiles",
+          "registerOptions": {
+            "watchers": [
+              {
+                "globPattern": "**/*.tjp"
+              },
+              {
+                "globPattern": "**/*.tji"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file://${CASE_DIR}/workspace/resources.tji",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file://${CASE_DIR}/workspace/resources.tji",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file://${CASE_DIR}/workspace/project.tjp",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": [
+      {
+        "name": "\"Alice\"",
+        "kind": 19,
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/resources.tji",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 9
+            },
+            "end": {
+              "line": 0,
+              "character": 14
+            }
+          }
+        }
+      },
+      {
+        "name": "\"Bob\"",
+        "kind": 19,
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/resources.tji",
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 9
+            },
+            "end": {
+              "line": 1,
+              "character": 12
+            }
+          }
+        }
+      },
+      {
+        "name": "\"Backend\"",
+        "kind": 12,
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/tasks.tji",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 5
+            },
+            "end": {
+              "line": 0,
+              "character": 12
+            }
+          }
+        }
+      },
+      {
+        "name": "\"API\"",
+        "kind": 12,
+        "containerName": "\"Backend\"",
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/tasks.tji",
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 7
+            },
+            "end": {
+              "line": 1,
+              "character": 10
+            }
+          }
+        }
+      },
+      {
+        "name": "\"ACME Corp\"",
+        "kind": 2,
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/project.tjp",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 8
+            },
+            "end": {
+              "line": 0,
+              "character": 12
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": null
+  }
+]

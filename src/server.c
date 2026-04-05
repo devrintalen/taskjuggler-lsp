@@ -32,9 +32,11 @@
 
 #include <yyjson.h>
 #include <ctype.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Data flow overview
@@ -143,6 +145,10 @@ typedef struct {
 } Document;
 
 static Document docs[MAX_DOCS];
+
+/* Workspace root filesystem path extracted from the initialize params.
+ * NULL if not provided by the client. Heap-allocated; never freed. */
+static char *g_workspace_root_path = NULL;
 
 /* Find the open document with the given URI, or return NULL if not found. */
 static Document *doc_find(const char *uri) {
@@ -388,9 +394,25 @@ static void revalidate_all_docs(void) {
  */
 static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
-    (void)params;
-
     // TODO none of the client capabilities are checked here.
+
+    /* Extract workspace root path for use in handle_initialized(). Prefer
+     * rootUri; fall back to the first entry in workspaceFolders. */
+    if (params && !g_workspace_root_path) {
+        yyjson_val *root_uri_val = yyjson_obj_get(params, "rootUri");
+        if (root_uri_val && yyjson_is_str(root_uri_val))
+            g_workspace_root_path = uri_to_path(yyjson_get_str(root_uri_val));
+
+        if (!g_workspace_root_path) {
+            yyjson_val *folders = yyjson_obj_get(params, "workspaceFolders");
+            if (folders && yyjson_is_arr(folders)
+                    && yyjson_arr_size(folders) > 0) {
+                yyjson_val *first = yyjson_arr_get_first(folders);
+                const char *uri = json_str(first, "uri");
+                if (uri) g_workspace_root_path = uri_to_path(uri);
+            }
+        }
+    }
 
     /* Server info */
     yyjson_mut_val *server_info = yyjson_mut_obj(doc);
@@ -462,6 +484,81 @@ static yyjson_mut_val *handle_shutdown(yyjson_mut_doc *doc, yyjson_val *id) {
 }
 
 /*
+ * Convert a filesystem path to a file:// URI.
+ * Returns a heap-allocated string; caller must free.
+ */
+static char *path_to_uri(const char *path) {
+    size_t len = strlen(path);
+    /* "file://" prefix (7) + path + NUL */
+    char *uri = malloc(7 + len + 1);
+    if (!uri) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    memcpy(uri, "file://", 7);
+    memcpy(uri + 7, path, len + 1);
+    return uri;
+}
+
+/*
+ * Load a single file from disk into the document store.
+ * If the URI is already present, it is skipped (does not overwrite
+ * editor-managed documents with stale disk content).
+ */
+static void load_file_from_disk(const char *path) {
+    char *uri = path_to_uri(path);
+    if (doc_find(uri)) { free(uri); return; }
+
+    char *text = read_file(path);
+    if (!text) { free(uri); return; }
+
+    Document *document = doc_alloc(uri);
+    free(uri);
+    if (!document) { free(text); return; }
+
+    document->text  = text;
+    document->parse = parse(text);
+}
+
+/*
+ * Recursively walk dir_path and call load_file_from_disk() for every
+ * regular file whose name ends in ".tji".  Silently skips unreadable
+ * directories.
+ */
+static void load_tji_files_recursive(const char *dir_path) {
+    DIR *dir = opendir(dir_path);
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue; /* skip hidden and . / .. */
+
+        /* Build the full path */
+        size_t dir_len  = strlen(dir_path);
+        size_t name_len = strlen(entry->d_name);
+        char *full_path = malloc(dir_len + 1 + name_len + 1);
+        if (!full_path) continue;
+        memcpy(full_path, dir_path, dir_len);
+        full_path[dir_len] = '/';
+        memcpy(full_path + dir_len + 1, entry->d_name, name_len + 1);
+
+        struct stat st;
+        if (stat(full_path, &st) != 0) { free(full_path); continue; }
+
+        if (S_ISDIR(st.st_mode)) {
+            load_tji_files_recursive(full_path);
+        } else if (S_ISREG(st.st_mode)) {
+            /* Check for .tji suffix */
+            if (name_len >= 4
+                    && strcmp(entry->d_name + name_len - 4, ".tji") == 0) {
+                load_file_from_disk(full_path);
+            }
+        }
+
+        free(full_path);
+    }
+
+    closedir(dir);
+}
+
+/*
  * Send client/registerCapability to ask the client to watch all .tjp and
  * .tji files in the workspace.  The server will then receive
  * workspace/didChangeWatchedFiles whenever those files change on disk.
@@ -502,6 +599,15 @@ static void handle_initialized(void) {
     yyjson_mut_doc_free(doc);
     lsp_send_message(text);
     free(text);
+
+    /* Perform an initial scan of the workspace for existing .tji files.
+     * File watchers only fire on future changes, so without this scan the
+     * server would never learn about .tji files that already exist on disk
+     * when the session starts. */
+    if (g_workspace_root_path) {
+        load_tji_files_recursive(g_workspace_root_path);
+        revalidate_all_docs();
+    }
 }
 
 /*
@@ -552,7 +658,10 @@ static void handle_did_change_watched_files(yyjson_val *params) {
             if (!document) { free(text); continue; }
 
             free(document->text);
-            document->text = text;
+            free(document->doc_symbols_json);
+            document->doc_symbols_json     = NULL;
+            document->doc_symbols_json_len = 0;
+            document->text  = text;
             parse_result_free(&document->parse);
             document->parse = parse(text);
             changed = 1;
@@ -943,6 +1052,17 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
+    /* Gather symbol pools from all other open documents */
+    const DocSymbol *extra_pools[MAX_DOCS];
+    int              extra_counts[MAX_DOCS];
+    int              num_extra = 0;
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use || &docs[i] == d) continue;
+        extra_pools[num_extra]  = docs[i].parse.doc_symbols;
+        extra_counts[num_extra] = docs[i].parse.num_doc_symbols;
+        num_extra++;
+    }
+
     LspPos pos             = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_completions_json(doc,
                                                      d->parse.tok_spans,
@@ -950,6 +1070,9 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
                                                      pos,
                                                      d->parse.doc_symbols,
                                                      d->parse.num_doc_symbols,
+                                                     extra_pools,
+                                                     extra_counts,
+                                                     num_extra,
                                                      d->text);
     return make_response(doc, id, result);
 }
