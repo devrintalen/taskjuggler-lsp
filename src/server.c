@@ -1205,13 +1205,25 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    LspPos pos         = json_to_pos(pos_obj);
+    /* Collect def_links from every open document so that references in files
+     * other than the cursor document are included in the result. */
+    RefDocLinks all_docs[MAX_DOCS];
+    int num_docs = 0;
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use) continue;
+        all_docs[num_docs].uri       = docs[i].uri;
+        all_docs[num_docs].links     = docs[i].parse.def_links;
+        all_docs[num_docs].num_links = docs[i].parse.num_def_links;
+        num_docs++;
+    }
+
+    LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_references_json(doc,
-                                                    d->parse.def_links,
-                                                    d->parse.num_def_links,
+                                                    uri,
                                                     d->parse.doc_symbols,
                                                     d->parse.num_doc_symbols,
-                                                    pos, uri);
+                                                    all_docs, num_docs,
+                                                    pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
 }
