@@ -644,42 +644,70 @@ static void follow_includes(const char *file_path, const ParseResult *result) {
 /*
  * Recursively walk dir_path and call load_file_from_disk() for every
  * regular .tjp or .tji file found.  Silently skips unreadable directories.
+ * Entries are processed in sorted order so the document store ordering is
+ * deterministic across filesystems (readdir order is filesystem-dependent).
  */
 static void load_tj_files_recursive(const char *dir_path) {
     DIR *dir = opendir(dir_path);
     if (!dir) return;
 
+    /* Collect entry names first so we can sort them */
+    char  **names     = NULL;
+    int     num_names = 0;
+    int     cap_names = 0;
+
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_name[0] == '.') continue; /* skip hidden and . / .. */
+        if (num_names >= cap_names) {
+            int nc = cap_names ? cap_names * 2 : 16;
+            char **tmp = realloc(names, (size_t)nc * sizeof(char *));
+            if (!tmp) continue;
+            names = tmp;
+            cap_names = nc;
+        }
+        names[num_names] = strdup(entry->d_name);
+        if (names[num_names]) num_names++;
+    }
+    closedir(dir);
 
-        /* Build the full path */
-        size_t dir_len  = strlen(dir_path);
-        size_t name_len = strlen(entry->d_name);
+    /* Sort alphabetically for deterministic load order */
+    if (num_names > 1) {
+        for (int i = 1; i < num_names; i++) {
+            char *key = names[i];
+            int j = i - 1;
+            while (j >= 0 && strcmp(names[j], key) > 0) {
+                names[j + 1] = names[j];
+                j--;
+            }
+            names[j + 1] = key;
+        }
+    }
+
+    size_t dir_len = strlen(dir_path);
+    for (int i = 0; i < num_names; i++) {
+        size_t name_len = strlen(names[i]);
         char *full_path = malloc(dir_len + 1 + name_len + 1);
-        if (!full_path) continue;
+        if (!full_path) { free(names[i]); continue; }
         memcpy(full_path, dir_path, dir_len);
         full_path[dir_len] = '/';
-        memcpy(full_path + dir_len + 1, entry->d_name, name_len + 1);
+        memcpy(full_path + dir_len + 1, names[i], name_len + 1);
+        free(names[i]);
 
         struct stat st;
         if (stat(full_path, &st) != 0) { free(full_path); continue; }
 
         if (S_ISDIR(st.st_mode)) {
             load_tj_files_recursive(full_path);
-        } else if (S_ISREG(st.st_mode)) {
-            if ((name_len >= 4
-                     && strcmp(entry->d_name + name_len - 4, ".tji") == 0)
-                 || (name_len >= 4
-                     && strcmp(entry->d_name + name_len - 4, ".tjp") == 0)) {
+        } else if (S_ISREG(st.st_mode) && name_len >= 4) {
+            const char *ext = full_path + dir_len + 1 + name_len - 4;
+            if (strcmp(ext, ".tji") == 0 || strcmp(ext, ".tjp") == 0)
                 load_file_from_disk(full_path);
-            }
         }
 
         free(full_path);
     }
-
-    closedir(dir);
+    free(names);
 }
 
 /*
