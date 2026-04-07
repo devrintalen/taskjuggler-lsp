@@ -97,14 +97,6 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
       "uri": "file://${CASE_DIR}/workspace/project.tjp",
       "diagnostics": []
     }
@@ -114,30 +106,6 @@
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file://${CASE_DIR}/workspace/project.tjp",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file://${CASE_DIR}/workspace/project.tjp",
       "diagnostics": []
     }
   },
@@ -145,23 +113,6 @@
     "jsonrpc": "2.0",
     "id": 2,
     "result": [
-      {
-        "name": "\"Design\"",
-        "kind": 12,
-        "location": {
-          "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-          "range": {
-            "start": {
-              "line": 0,
-              "character": 5
-            },
-            "end": {
-              "line": 0,
-              "character": 11
-            }
-          }
-        }
-      },
       {
         "name": "\"Project\"",
         "kind": 2,
@@ -192,6 +143,23 @@
             "end": {
               "line": 1,
               "character": 10
+            }
+          }
+        }
+      },
+      {
+        "name": "\"Design\"",
+        "kind": 12,
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/tasks.tji",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 5
+            },
+            "end": {
+              "line": 0,
+              "character": 11
             }
           }
         }
@@ -202,7 +170,7 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
+      "uri": "file://${CASE_DIR}/workspace/project.tjp",
       "diagnostics": []
     }
   },
@@ -210,7 +178,7 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file://${CASE_DIR}/workspace/project.tjp",
+      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
       "diagnostics": []
     }
   },
@@ -218,23 +186,6 @@
     "jsonrpc": "2.0",
     "id": 3,
     "result": [
-      {
-        "name": "\"Design\"",
-        "kind": 12,
-        "location": {
-          "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-          "range": {
-            "start": {
-              "line": 0,
-              "character": 5
-            },
-            "end": {
-              "line": 0,
-              "character": 11
-            }
-          }
-        }
-      },
       {
         "name": "\"Project\"",
         "kind": 2,
@@ -265,6 +216,23 @@
             "end": {
               "line": 1,
               "character": 10
+            }
+          }
+        }
+      },
+      {
+        "name": "\"Design\"",
+        "kind": 12,
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/tasks.tji",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 5
+            },
+            "end": {
+              "line": 0,
+              "character": 11
             }
           }
         }

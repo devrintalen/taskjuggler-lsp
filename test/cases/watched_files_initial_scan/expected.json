@@ -97,22 +97,6 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file://${CASE_DIR}/workspace/resources.tji",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
       "uri": "file://${CASE_DIR}/workspace/project.tjp",
       "diagnostics": []
     }
@@ -130,14 +114,6 @@
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file://${CASE_DIR}/workspace/project.tjp",
       "diagnostics": []
     }
   },
@@ -145,6 +121,23 @@
     "jsonrpc": "2.0",
     "id": 2,
     "result": [
+      {
+        "name": "\"ACME Corp\"",
+        "kind": 2,
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/project.tjp",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 8
+            },
+            "end": {
+              "line": 0,
+              "character": 12
+            }
+          }
+        }
+      },
       {
         "name": "\"Alice\"",
         "kind": 19,
@@ -210,23 +203,6 @@
             "end": {
               "line": 1,
               "character": 10
-            }
-          }
-        }
-      },
-      {
-        "name": "\"ACME Corp\"",
-        "kind": 2,
-        "location": {
-          "uri": "file://${CASE_DIR}/workspace/project.tjp",
-          "range": {
-            "start": {
-              "line": 0,
-              "character": 8
-            },
-            "end": {
-              "line": 0,
-              "character": 12
             }
           }
         }
