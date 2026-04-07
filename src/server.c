@@ -525,16 +525,48 @@ static yyjson_mut_val *handle_shutdown(yyjson_mut_doc *doc, yyjson_val *id) {
 }
 
 /*
+ * Percent-encode a filesystem path for use in a file:// URI.
+ * '/' is preserved as-is; all other characters outside the RFC 3986
+ * unreserved set (A-Z a-z 0-9 - _ . ~) are encoded as %XX.
+ * Returns a heap-allocated NUL-terminated string; caller must free.
+ */
+static char *percent_encode_path(const char *src) {
+    size_t len = strlen(src);
+    /* Worst case: every byte becomes %XX (3 chars) */
+    char *dst = malloc(len * 3 + 1);
+    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    size_t wi = 0;
+    for (size_t ri = 0; ri < len; ri++) {
+        unsigned char c = (unsigned char)src[ri];
+        if (c == '/'
+                || (c >= 'A' && c <= 'Z')
+                || (c >= 'a' && c <= 'z')
+                || (c >= '0' && c <= '9')
+                || c == '-' || c == '_' || c == '.' || c == '~') {
+            dst[wi++] = (char)c;
+        } else {
+            dst[wi++] = '%';
+            dst[wi++] = "0123456789ABCDEF"[c >> 4];
+            dst[wi++] = "0123456789ABCDEF"[c & 0xf];
+        }
+    }
+    dst[wi] = '\0';
+    return dst;
+}
+
+/*
  * Convert a filesystem path to a file:// URI.
  * Returns a heap-allocated string; caller must free.
  */
 static char *path_to_uri(const char *path) {
-    size_t len = strlen(path);
-    /* "file://" prefix (7) + path + NUL */
-    char *uri = malloc(7 + len + 1);
+    char *encoded = percent_encode_path(path);
+    size_t enc_len = strlen(encoded);
+    /* "file://" prefix (7) + encoded path + NUL */
+    char *uri = malloc(7 + enc_len + 1);
     if (!uri) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     memcpy(uri, "file://", 7);
-    memcpy(uri + 7, path, len + 1);
+    memcpy(uri + 7, encoded, enc_len + 1);
+    free(encoded);
     return uri;
 }
 
@@ -842,7 +874,14 @@ static void handle_didopen(yyjson_val *params) {
     Document *d = doc_find(uri);
     if (d) {
         if (!d->disk_only) return; /* duplicate open: LSP spec client error */
-        /* File was pre-loaded from disk; replace with authoritative editor content */
+        /* File was pre-loaded from disk.
+         * If the editor text matches the disk content, just promote the document
+         * to editor-managed — the existing parse and diagnostics are already current. */
+        if (d->text && strcmp(d->text, text) == 0) {
+            d->disk_only = 0;
+            return;
+        }
+        /* Text differs from disk — replace with authoritative editor content */
         free(d->text);
         free(d->doc_symbols_json);
         d->doc_symbols_json     = NULL;
