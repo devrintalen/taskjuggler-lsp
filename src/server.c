@@ -47,8 +47,8 @@
  * The editor sends JSON-RPC messages over stdin.  main() reads each message,
  * strips the Content-Length header, and calls server_process(json_text).
  * server_process() parses the JSON, dispatches to the matching handle_*
- * function, serialises the returned cJSON response with
- * cJSON_PrintUnformatted(), and returns the string to main() which calls
+ * function, serialises the returned yyjson response with
+ * yyjson_mut_write(), and returns the string to main() which calls
  * lsp_send_message() to write it to stdout.
  *
  * DOCUMENT LIFECYCLE
@@ -95,19 +95,23 @@
  *
  *   ParseResult field    Feature handlers that consume it
  *   ─────────────────    ───────────────────────────────────────────────────
- *   tok_spans[]          hover            → active_keyword_at()
- *                        signature_help   → active_context()
- *                        completion       → build_completions_json()
- *                        folding_range    → build_folding_ranges_json()
- *                        semantic_tokens  → build_semantic_tokens_json()
+ *   tok_spans[]          hover              → active_keyword_at() (fallback)
+ *                        signature_help     → active_context()
+ *                        completion         → build_completions_json()
+ *                        folding_range      → build_folding_ranges_json()
+ *                        semantic_tokens    → build_semantic_tokens_json()
+ *                        document_highlight → build_document_highlight_json()
  *
- *   doc_symbols[]        document_symbol  → build_document_symbols_json()
- *                        workspace_symbol → collect_workspace_symbols()
- *                        completion       → build_completions_json() (IDs)
- *                        references       → build_references_json()
+ *   doc_symbols[]        document_symbol    → build_document_symbols_json()
+ *                        workspace_symbol   → collect_workspace_symbols()
+ *                        completion         → build_completions_json() (IDs)
+ *                        references         → build_references_json()
+ *                        document_highlight → build_document_highlight_json()
  *
- *   def_links[]          definition       → build_definition_json()
- *                        references       → build_references_json()
+ *   def_links[]          definition         → build_definition_json()
+ *                        references         → build_references_json()
+ *                        hover              → resolved-ref hover (primary path)
+ *                        document_highlight → build_document_highlight_json()
  *
  *   diagnostics[]        (pushed proactively via publish_diagnostics;
  *                         never queried on demand)
@@ -117,8 +121,8 @@
  *
  * OUTBOUND (server → editor)
  * ──────────────────────────
- * Query handlers return a heap-allocated cJSON* response built by
- * make_response(id, result).  server_process() serialises it to a string and
+ * Query handlers return a yyjson_mut_val* response built by
+ * make_response(doc, id, result).  server_process() serialises it to a string and
  * returns it to main(), which writes:
  *
  *   Content-Length: <N>\r\n\r\n<json>
@@ -231,6 +235,36 @@ static char *percent_decode(const char *src) {
 }
 
 /*
+ * Percent-encode a filesystem path for use in a file:// URI.
+ * '/' is preserved as-is; all other characters outside the RFC 3986
+ * unreserved set (A-Z a-z 0-9 - _ . ~) are encoded as %XX.
+ * Returns a heap-allocated NUL-terminated string; caller must free.
+ */
+static char *percent_encode_path(const char *src) {
+    size_t len = strlen(src);
+    /* Worst case: every byte becomes %XX (3 chars) */
+    char *dst = malloc(len * 3 + 1);
+    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    size_t wi = 0;
+    for (size_t ri = 0; ri < len; ri++) {
+        unsigned char c = (unsigned char)src[ri];
+        if (c == '/'
+                || (c >= 'A' && c <= 'Z')
+                || (c >= 'a' && c <= 'z')
+                || (c >= '0' && c <= '9')
+                || c == '-' || c == '_' || c == '.' || c == '~') {
+            dst[wi++] = (char)c;
+        } else {
+            dst[wi++] = '%';
+            dst[wi++] = "0123456789ABCDEF"[c >> 4];
+            dst[wi++] = "0123456789ABCDEF"[c & 0xf];
+        }
+    }
+    dst[wi] = '\0';
+    return dst;
+}
+
+/*
  * Convert a file:// URI to a filesystem path.  Returns a heap-allocated,
  * percent-decoded copy of the path portion (after "file://"), or NULL if
  * the URI does not use the file scheme.  Caller must free.
@@ -238,6 +272,22 @@ static char *percent_decode(const char *src) {
 static char *uri_to_path(const char *uri) {
     if (!uri || strncmp(uri, "file://", 7) != 0) return NULL;
     return percent_decode(uri + 7);
+}
+
+/*
+ * Convert a filesystem path to a file:// URI.
+ * Returns a heap-allocated string; caller must free.
+ */
+static char *path_to_uri(const char *path) {
+    char *encoded = percent_encode_path(path);
+    size_t enc_len = strlen(encoded);
+    /* "file://" prefix (7) + encoded path + NUL */
+    char *uri = malloc(7 + enc_len + 1);
+    if (!uri) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    memcpy(uri, "file://", 7);
+    memcpy(uri + 7, encoded, enc_len + 1);
+    free(encoded);
+    return uri;
 }
 
 /*
@@ -257,6 +307,146 @@ static char *read_file(const char *path) {
     buffer[read_count] = '\0';
     fclose(file);
     return buffer;
+}
+
+/*
+ * Load a single file from disk into the document store.
+ * If the URI is already present, it is skipped (does not overwrite
+ * editor-managed documents with stale disk content).
+ */
+/* Forward declaration — follow_includes() and load_file_from_disk() are
+ * mutually recursive: loading a file may trigger following its includes. */
+static void follow_includes(const char *file_path, const ParseResult *parse);
+
+static void load_file_from_disk(const char *path) {
+    char *uri = path_to_uri(path);
+    if (doc_find(uri)) { free(uri); return; }
+
+    char *text = read_file(path);
+    if (!text) { free(uri); return; }
+
+    Document *document = doc_alloc(uri);
+    free(uri);
+    if (!document) { free(text); return; }
+
+    document->text      = text;
+    document->disk_only = 1;
+    document->parse     = parse(text);
+    follow_includes(path, &document->parse);
+}
+
+/*
+ * For each filename listed in parse->included_files, resolve it relative to
+ * the directory containing file_path and load it into the document store if
+ * not already present.  Cycle-safe: load_file_from_disk() skips URIs that are
+ * already in the store.
+ */
+static void follow_includes(const char *file_path, const ParseResult *result) {
+    if (!result->num_included_files) return;
+
+    /* Compute the directory portion of file_path */
+    size_t path_len = strlen(file_path);
+    const char *last_slash = NULL;
+    for (size_t i = path_len; i-- > 0; ) {
+        if (file_path[i] == '/') { last_slash = file_path + i; break; }
+    }
+    size_t dir_len = last_slash ? (size_t)(last_slash - file_path) : 0;
+
+    for (int i = 0; i < result->num_included_files; i++) {
+        const char *filename = result->included_files[i];
+        size_t fname_len = strlen(filename);
+
+        char *full_path;
+        if (filename[0] == '/') {
+            /* Absolute path — use as-is */
+            full_path = malloc(fname_len + 1);
+            if (!full_path) continue;
+            memcpy(full_path, filename, fname_len + 1);
+        } else {
+            /* Relative path — resolve against parent directory */
+            full_path = malloc(dir_len + 1 + fname_len + 1);
+            if (!full_path) continue;
+            if (dir_len > 0) {
+                memcpy(full_path, file_path, dir_len);
+                full_path[dir_len] = '/';
+                memcpy(full_path + dir_len + 1, filename, fname_len + 1);
+            } else {
+                memcpy(full_path, filename, fname_len + 1);
+            }
+        }
+
+        load_file_from_disk(full_path);
+        free(full_path);
+    }
+}
+
+/*
+ * Recursively walk dir_path and call load_file_from_disk() for every
+ * regular .tjp or .tji file found.  Silently skips unreadable directories.
+ * Entries are processed in sorted order so the document store ordering is
+ * deterministic across filesystems (readdir order is filesystem-dependent).
+ */
+static void load_tj_files_recursive(const char *dir_path) {
+    DIR *dir = opendir(dir_path);
+    if (!dir) return;
+
+    /* Collect entry names first so we can sort them */
+    char  **names     = NULL;
+    int     num_names = 0;
+    int     cap_names = 0;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue; /* skip hidden and . / .. */
+        if (num_names >= cap_names) {
+            int nc = cap_names ? cap_names * 2 : 16;
+            char **tmp = realloc(names, (size_t)nc * sizeof(char *));
+            if (!tmp) continue;
+            names = tmp;
+            cap_names = nc;
+        }
+        names[num_names] = strdup(entry->d_name);
+        if (names[num_names]) num_names++;
+    }
+    closedir(dir);
+
+    /* Sort alphabetically for deterministic load order */
+    if (num_names > 1) {
+        for (int i = 1; i < num_names; i++) {
+            char *key = names[i];
+            int j = i - 1;
+            while (j >= 0 && strcmp(names[j], key) > 0) {
+                names[j + 1] = names[j];
+                j--;
+            }
+            names[j + 1] = key;
+        }
+    }
+
+    size_t dir_len = strlen(dir_path);
+    for (int i = 0; i < num_names; i++) {
+        size_t name_len = strlen(names[i]);
+        char *full_path = malloc(dir_len + 1 + name_len + 1);
+        if (!full_path) { free(names[i]); continue; }
+        memcpy(full_path, dir_path, dir_len);
+        full_path[dir_len] = '/';
+        memcpy(full_path + dir_len + 1, names[i], name_len + 1);
+        free(names[i]);
+
+        struct stat st;
+        if (stat(full_path, &st) != 0) { free(full_path); continue; }
+
+        if (S_ISDIR(st.st_mode)) {
+            load_tj_files_recursive(full_path);
+        } else if (S_ISREG(st.st_mode) && name_len >= 4) {
+            const char *ext = full_path + dir_len + 1 + name_len - 4;
+            if (strcmp(ext, ".tji") == 0 || strcmp(ext, ".tjp") == 0)
+                load_file_from_disk(full_path);
+        }
+
+        free(full_path);
+    }
+    free(names);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -522,192 +712,6 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
  */
 static yyjson_mut_val *handle_shutdown(yyjson_mut_doc *doc, yyjson_val *id) {
     return make_response(doc, id, yyjson_mut_null(doc));
-}
-
-/*
- * Percent-encode a filesystem path for use in a file:// URI.
- * '/' is preserved as-is; all other characters outside the RFC 3986
- * unreserved set (A-Z a-z 0-9 - _ . ~) are encoded as %XX.
- * Returns a heap-allocated NUL-terminated string; caller must free.
- */
-static char *percent_encode_path(const char *src) {
-    size_t len = strlen(src);
-    /* Worst case: every byte becomes %XX (3 chars) */
-    char *dst = malloc(len * 3 + 1);
-    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    size_t wi = 0;
-    for (size_t ri = 0; ri < len; ri++) {
-        unsigned char c = (unsigned char)src[ri];
-        if (c == '/'
-                || (c >= 'A' && c <= 'Z')
-                || (c >= 'a' && c <= 'z')
-                || (c >= '0' && c <= '9')
-                || c == '-' || c == '_' || c == '.' || c == '~') {
-            dst[wi++] = (char)c;
-        } else {
-            dst[wi++] = '%';
-            dst[wi++] = "0123456789ABCDEF"[c >> 4];
-            dst[wi++] = "0123456789ABCDEF"[c & 0xf];
-        }
-    }
-    dst[wi] = '\0';
-    return dst;
-}
-
-/*
- * Convert a filesystem path to a file:// URI.
- * Returns a heap-allocated string; caller must free.
- */
-static char *path_to_uri(const char *path) {
-    char *encoded = percent_encode_path(path);
-    size_t enc_len = strlen(encoded);
-    /* "file://" prefix (7) + encoded path + NUL */
-    char *uri = malloc(7 + enc_len + 1);
-    if (!uri) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    memcpy(uri, "file://", 7);
-    memcpy(uri + 7, encoded, enc_len + 1);
-    free(encoded);
-    return uri;
-}
-
-/*
- * Load a single file from disk into the document store.
- * If the URI is already present, it is skipped (does not overwrite
- * editor-managed documents with stale disk content).
- */
-/* Forward declaration — follow_includes() and load_file_from_disk() are
- * mutually recursive: loading a file may trigger following its includes. */
-static void follow_includes(const char *file_path, const ParseResult *parse);
-
-static void load_file_from_disk(const char *path) {
-    char *uri = path_to_uri(path);
-    if (doc_find(uri)) { free(uri); return; }
-
-    char *text = read_file(path);
-    if (!text) { free(uri); return; }
-
-    Document *document = doc_alloc(uri);
-    free(uri);
-    if (!document) { free(text); return; }
-
-    document->text      = text;
-    document->disk_only = 1;
-    document->parse     = parse(text);
-    follow_includes(path, &document->parse);
-}
-
-/*
- * For each filename listed in parse->included_files, resolve it relative to
- * the directory containing file_path and load it into the document store if
- * not already present.  Cycle-safe: load_file_from_disk() skips URIs that are
- * already in the store.
- */
-static void follow_includes(const char *file_path, const ParseResult *result) {
-    if (!result->num_included_files) return;
-
-    /* Compute the directory portion of file_path */
-    size_t path_len = strlen(file_path);
-    const char *last_slash = NULL;
-    for (size_t i = path_len; i-- > 0; ) {
-        if (file_path[i] == '/') { last_slash = file_path + i; break; }
-    }
-    size_t dir_len = last_slash ? (size_t)(last_slash - file_path) : 0;
-
-    for (int i = 0; i < result->num_included_files; i++) {
-        const char *filename = result->included_files[i];
-        size_t fname_len = strlen(filename);
-
-        char *full_path;
-        if (filename[0] == '/') {
-            /* Absolute path — use as-is */
-            full_path = malloc(fname_len + 1);
-            if (!full_path) continue;
-            memcpy(full_path, filename, fname_len + 1);
-        } else {
-            /* Relative path — resolve against parent directory */
-            full_path = malloc(dir_len + 1 + fname_len + 1);
-            if (!full_path) continue;
-            if (dir_len > 0) {
-                memcpy(full_path, file_path, dir_len);
-                full_path[dir_len] = '/';
-                memcpy(full_path + dir_len + 1, filename, fname_len + 1);
-            } else {
-                memcpy(full_path, filename, fname_len + 1);
-            }
-        }
-
-        load_file_from_disk(full_path);
-        free(full_path);
-    }
-}
-
-/*
- * Recursively walk dir_path and call load_file_from_disk() for every
- * regular .tjp or .tji file found.  Silently skips unreadable directories.
- * Entries are processed in sorted order so the document store ordering is
- * deterministic across filesystems (readdir order is filesystem-dependent).
- */
-static void load_tj_files_recursive(const char *dir_path) {
-    DIR *dir = opendir(dir_path);
-    if (!dir) return;
-
-    /* Collect entry names first so we can sort them */
-    char  **names     = NULL;
-    int     num_names = 0;
-    int     cap_names = 0;
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.') continue; /* skip hidden and . / .. */
-        if (num_names >= cap_names) {
-            int nc = cap_names ? cap_names * 2 : 16;
-            char **tmp = realloc(names, (size_t)nc * sizeof(char *));
-            if (!tmp) continue;
-            names = tmp;
-            cap_names = nc;
-        }
-        names[num_names] = strdup(entry->d_name);
-        if (names[num_names]) num_names++;
-    }
-    closedir(dir);
-
-    /* Sort alphabetically for deterministic load order */
-    if (num_names > 1) {
-        for (int i = 1; i < num_names; i++) {
-            char *key = names[i];
-            int j = i - 1;
-            while (j >= 0 && strcmp(names[j], key) > 0) {
-                names[j + 1] = names[j];
-                j--;
-            }
-            names[j + 1] = key;
-        }
-    }
-
-    size_t dir_len = strlen(dir_path);
-    for (int i = 0; i < num_names; i++) {
-        size_t name_len = strlen(names[i]);
-        char *full_path = malloc(dir_len + 1 + name_len + 1);
-        if (!full_path) { free(names[i]); continue; }
-        memcpy(full_path, dir_path, dir_len);
-        full_path[dir_len] = '/';
-        memcpy(full_path + dir_len + 1, names[i], name_len + 1);
-        free(names[i]);
-
-        struct stat st;
-        if (stat(full_path, &st) != 0) { free(full_path); continue; }
-
-        if (S_ISDIR(st.st_mode)) {
-            load_tj_files_recursive(full_path);
-        } else if (S_ISREG(st.st_mode) && name_len >= 4) {
-            const char *ext = full_path + dir_len + 1 + name_len - 4;
-            if (strcmp(ext, ".tji") == 0 || strcmp(ext, ".tjp") == 0)
-                load_file_from_disk(full_path);
-        }
-
-        free(full_path);
-    }
-    free(names);
 }
 
 /*
