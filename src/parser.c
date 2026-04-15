@@ -114,14 +114,23 @@ void parse_result_free(ParseResult *r) {
         free(r->def_links[i].target_uri);
     free(r->def_links);
 
-    for (int i = 0; i < r->num_raw_dep_refs; i++) {
-        DepRef *dr = &r->raw_dep_refs[i];
-        for (int j = 0; j < dr->nseg; j++) free(dr->segs[j]);
-        free(dr->segs);
-        for (int j = 0; j < dr->scope_n; j++) free(dr->scope[j]);
-        free(dr->scope);
+    for (int i = 0; i < r->num_dep_edges; i++) {
+        DepEdge *e = &r->dep_edges[i];
+        for (int j = 0; j < e->nseg; j++) free(e->segs[j]);
+        free(e->segs);
     }
-    free(r->raw_dep_refs);
+    free(r->dep_edges);
+
+    /* dep_edge_scopes is normally consumed by assign_dep_edges(), but
+     * free any leftovers in case parse was interrupted. */
+    if (r->dep_edge_scopes) {
+        for (int i = 0; i < r->num_dep_edges; i++) {
+            DepEdgeScope *sc = &r->dep_edge_scopes[i];
+            for (int j = 0; j < sc->scope_n; j++) free(sc->scope[j]);
+            free(sc->scope);
+        }
+        free(r->dep_edge_scopes);
+    }
 
     for (int i = 0; i < r->num_included_files; i++)
         free(r->included_files[i]);
@@ -207,6 +216,89 @@ const DocSymbol *doc_symbol_find_path(const DocSymbol *syms, int n,
     return NULL;
 }
 
+/* ── DocSymbol tree linkage ─────────────────────────────────────────────── */
+
+/* Recursively set parent pointers for all children in the symbol tree. */
+static void assign_parents(DocSymbol *syms, int n, DocSymbol *parent) {
+    for (int i = 0; i < n; i++) {
+        syms[i].parent = parent;
+        assign_parents(syms[i].children, syms[i].num_children, &syms[i]);
+    }
+}
+
+/* ── Token-to-symbol cross-referencing ──────────────────────────────────── */
+
+/* Returns 1 if pos is contained within range (inclusive of start, exclusive
+ * of end), using standard LSP half-open interval semantics. */
+static int range_contains(LspRange range, LspPos pos) {
+    if (pos_cmp(pos, range.start) < 0) return 0;
+    if (pos_cmp(pos, range.end) >= 0) return 0;
+    return 1;
+}
+
+/* Find the deepest DocSymbol whose range contains pos.
+ * Returns NULL if no symbol contains the position. */
+static DocSymbol *find_deepest_symbol(DocSymbol *syms, int n, LspPos pos) {
+    for (int i = 0; i < n; i++) {
+        if (!range_contains(syms[i].range, pos))
+            continue;
+        /* This symbol contains pos; check if a child is more specific. */
+        DocSymbol *child = find_deepest_symbol(syms[i].children,
+                                               syms[i].num_children, pos);
+        return child ? child : &syms[i];
+    }
+    return NULL;
+}
+
+/* Assign each token span's owner pointer to the deepest enclosing DocSymbol.
+ * Called after parsing when both tok_spans[] and doc_symbols[] are finalized. */
+static void assign_token_owners(ParseResult *r) {
+    for (int i = 0; i < r->num_tok_spans; i++) {
+        r->tok_spans[i].owner = find_deepest_symbol(
+            r->doc_symbols, r->num_doc_symbols, r->tok_spans[i].start);
+    }
+}
+
+/* ── Dependency edge owner resolution ──────────────────────────────────── */
+
+/* Find a mutable DocSymbol by following the scope path (task IDs from root).
+ * Like doc_symbol_find_path but returns the node itself rather than its
+ * children, and returns a mutable pointer.  Returns NULL if not found. */
+static DocSymbol *find_symbol_by_scope(DocSymbol *syms, int n,
+                                       char **scope, int scope_n) {
+    if (scope_n == 0) return NULL;
+    for (int i = 0; i < n; i++) {
+        /* Transparently descend into project containers */
+        if (syms[i].kind == SK_MODULE) {
+            DocSymbol *found = find_symbol_by_scope(
+                syms[i].children, syms[i].num_children, scope, scope_n);
+            if (found) return found;
+        }
+        if (syms[i].kind == SK_FUNCTION && syms[i].detail &&
+                strcmp(syms[i].detail, scope[0]) == 0) {
+            if (scope_n == 1) return &syms[i];
+            return find_symbol_by_scope(syms[i].children, syms[i].num_children,
+                                        scope + 1, scope_n - 1);
+        }
+    }
+    return NULL;
+}
+
+/* Resolve the temporary scope snapshots in dep_edge_scopes[] to owner
+ * pointers on each DepEdge, then free the scopes parallel array. */
+static void assign_dep_edges(ParseResult *r) {
+    if (!r->dep_edge_scopes) return;
+    for (int i = 0; i < r->num_dep_edges; i++) {
+        DepEdgeScope *sc = &r->dep_edge_scopes[i];
+        r->dep_edges[i].owner = find_symbol_by_scope(
+            r->doc_symbols, r->num_doc_symbols, sc->scope, sc->scope_n);
+        for (int j = 0; j < sc->scope_n; j++) free(sc->scope[j]);
+        free(sc->scope);
+    }
+    free(r->dep_edge_scopes);
+    r->dep_edge_scopes = NULL;
+}
+
 /* ── Keyword classification ──────────────────────────────────────────────── */
 
 /* Returns the LSP SymbolKind constant for a top-level declaration keyword.
@@ -260,6 +352,11 @@ ParseResult parse(const char *src) {
     g_num_tok_spans   = 0;
     g_tok_span_cap    = 0;
     g_num_sem_entries = 0;
+
+    /* Build cross-references between tokens, symbols, and dep edges */
+    assign_parents(result.doc_symbols, result.num_doc_symbols, NULL);
+    assign_token_owners(&result);
+    assign_dep_edges(&result);
 
     return result;
 }

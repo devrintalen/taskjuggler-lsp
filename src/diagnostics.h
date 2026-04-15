@@ -27,11 +27,11 @@ void push_diagnostic(ParseResult *r, LspRange range, int severity,
 
 /* ── Dependency reference tracking ──────────────────────────────────────── *
  *
- * Called from grammar.y semantic actions to record each dep_ref seen during
- * parsing.  Raw refs are transferred to ParseResult via dep_refs_transfer()
- * and later checked by revalidate_dep_refs() in the server once all open
- * documents are available.  dep_refs_reset() must be called at the start of
- * each parse() invocation and free_dep_refs() after validation is complete.
+ * Called from grammar.y semantic actions to record each dep ref seen during
+ * parsing.  Raw refs are accumulated in a file-local buffer, then converted
+ * to DepEdge entries on ParseResult by dep_refs_transfer().  The post-parse
+ * pass assign_dep_edges() (parser.c) resolves scope snapshots to owner
+ * pointers on each edge.
  */
 
 void push_dep_ref(ParseResult *r, int bang_count, const char *path,
@@ -39,12 +39,11 @@ void push_dep_ref(ParseResult *r, int bang_count, const char *path,
                   LspPos start, LspPos end);
 
 void dep_refs_reset(void);
-void validate_dep_refs(const DocSymbol *syms, int nsym, ParseResult *r);
 void dep_refs_transfer(ParseResult *r);
 void free_dep_refs(void);
 
 /*
- * Re-run dep-ref validation for r using its stored raw_dep_refs.
+ * Re-run dep-edge validation for r using its stored dep_edges[].
  * Trims dep-validation diagnostics (from r->dep_diag_start) and def_links,
  * then re-validates against r->doc_symbols plus the extra symbol pools.
  * Only absolute (bang_count == 0) references are searched in extra pools.

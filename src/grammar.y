@@ -99,7 +99,8 @@ static void symarr_push(SymArr *a, DocSymbol s) {
 
 static DocSymbol make_doc_symbol(Token kw, Token id, Token name, BodyResult body) {
     DocSymbol s = {0};
-    s.kind = symbol_kind_for(kw.text);
+    s.kind    = symbol_kind_for(kw.text);
+    s.keyword = kw.kind;
 
     if (id.text) {
         s.detail          = id.text;   /* take ownership */

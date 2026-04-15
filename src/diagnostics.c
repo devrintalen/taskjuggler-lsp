@@ -176,11 +176,30 @@ void push_diagnostic(ParseResult *r, LspRange range, int severity,
         (Diagnostic){ range, severity, strdup(msg) };
 }
 
-/* ── Dependency reference tracking ──────────────────────────────────────── */
+/* ── Dependency reference tracking ──────────────────────────────────────── *
+ *
+ * During parsing, grammar.y calls push_dep_ref() to record each dependency
+ * reference.  These are accumulated in a file-local array (RawDepRef) that
+ * also stores the task scope at capture time.
+ *
+ * dep_refs_transfer() converts the raw accumulator into DepEdge entries on
+ * ParseResult, splitting the dot-separated path into segs[] and discarding
+ * the scope snapshot (the post-parse assign_dep_edges pass in parser.c
+ * resolves the scope to an owner DocSymbol pointer instead).
+ */
 
-static DepRef *g_dep_refs     = NULL;
-static int     g_num_dep_refs = 0;
-static int     g_dep_ref_cap  = 0;
+/* Intermediate storage — includes scope for later owner resolution. */
+typedef struct {
+    int       bang_count;
+    char     *path;       /* dot-separated, heap-allocated */
+    char    **scope;      /* task scope snapshot, heap-allocated */
+    int       scope_n;
+    LspRange  range;
+} RawDepRef;
+
+static RawDepRef *g_dep_refs     = NULL;
+static int        g_num_dep_refs = 0;
+static int        g_dep_ref_cap  = 0;
 
 /* Reset the global dep-ref accumulator to an empty state.
  * Frees any existing buffer before resetting.
@@ -201,50 +220,79 @@ void dep_refs_reset(void) {
 void push_dep_ref(ParseResult *r, int bang_count, const char *path,
                   const char **scope, int scope_n,
                   LspPos start, LspPos end) {
-    (void)r; /* not used directly; diagnostics emitted in revalidate_dep_refs */
+    (void)r;
     if (g_dep_ref_cap <= g_num_dep_refs) {
         g_dep_ref_cap = g_dep_ref_cap ? g_dep_ref_cap * 2 : 8;
-        DepRef *tmp = realloc(g_dep_refs, (size_t)g_dep_ref_cap * sizeof(DepRef));
+        RawDepRef *tmp = realloc(g_dep_refs,
+                                 (size_t)g_dep_ref_cap * sizeof(RawDepRef));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         g_dep_refs = tmp;
     }
-    DepRef *dr = &g_dep_refs[g_num_dep_refs++];
-
-    /* Split path by '.' into segs[] */
-    dr->nseg = 0;
-    dr->segs = NULL;
-    if (path && path[0]) {
-        /* Count segments */
-        int cap = 1;
-        for (const char *p = path; *p; p++) if (*p == '.') cap++;
-        dr->segs = malloc((size_t)cap * sizeof(char *));
-        char *tmp = strdup(path);
-        char *tok = strtok(tmp, ".");
-        while (tok) {
-            dr->segs[dr->nseg++] = strdup(tok);
-            tok = strtok(NULL, ".");
-        }
-        free(tmp);
-    }
-
-    /* Snapshot scope */
-    dr->scope_n = scope_n;
-    dr->scope   = scope_n ? malloc((size_t)scope_n * sizeof(char *)) : NULL;
+    RawDepRef *dr = &g_dep_refs[g_num_dep_refs++];
+    dr->bang_count = bang_count;
+    dr->path       = path && path[0] ? strdup(path) : NULL;
+    dr->scope_n    = scope_n;
+    dr->scope      = scope_n ? malloc((size_t)scope_n * sizeof(char *)) : NULL;
     for (int i = 0; i < scope_n; i++)
         dr->scope[i] = strdup(scope[i]);
-
-    dr->bang_count = bang_count;
-    dr->range      = (LspRange){ start, end };
+    dr->range = (LspRange){ start, end };
 }
 
-/* Transfer ownership of the global dep-ref accumulator into r.
+/* Split a dot-separated path string into a heap-allocated array of segments.
+ * Sets *out_segs and *out_nseg.  Caller owns the result. */
+static void split_path(const char *path, char ***out_segs, int *out_nseg) {
+    *out_nseg = 0;
+    *out_segs = NULL;
+    if (!path || !path[0]) return;
+    int cap = 1;
+    for (const char *p = path; *p; p++) if (*p == '.') cap++;
+    *out_segs = malloc((size_t)cap * sizeof(char *));
+    char *tmp = strdup(path);
+    char *tok = strtok(tmp, ".");
+    while (tok) {
+        (*out_segs)[(*out_nseg)++] = strdup(tok);
+        tok = strtok(NULL, ".");
+    }
+    free(tmp);
+}
+
+/* Convert the global RawDepRef accumulator into DepEdge entries on r.
+ * The scope snapshots are transferred to r->dep_edge_scopes for use by
+ * assign_dep_edges() in parser.c, which resolves them to owner pointers.
  * After this call the global state is reset to empty.
- * Called at the end of parse() to move raw_dep_refs into the ParseResult.
  */
 void dep_refs_transfer(ParseResult *r) {
-    r->raw_dep_refs     = g_dep_refs;
-    r->num_raw_dep_refs = g_num_dep_refs;
-    r->raw_dep_ref_cap  = g_dep_ref_cap;
+    for (int i = 0; i < g_num_dep_refs; i++) {
+        RawDepRef *raw = &g_dep_refs[i];
+
+        /* Build a DepEdge with segs split from the dot path. */
+        DepEdge edge = { .bang_count = raw->bang_count, .range = raw->range };
+        split_path(raw->path, &edge.segs, &edge.nseg);
+        free(raw->path);
+
+        /* Store scope on the edge temporarily via the scope fields that
+         * assign_dep_edges() will consume.  We piggyback on the ParseResult's
+         * dep_edge_scopes parallel array. */
+        if (r->num_dep_edges >= r->dep_edges_cap) {
+            int nc = r->dep_edges_cap ? r->dep_edges_cap * 2 : 8;
+            DepEdge *tmp = realloc(r->dep_edges, (size_t)nc * sizeof(DepEdge));
+            if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+            r->dep_edges = tmp;
+            r->dep_edge_scopes = realloc(r->dep_edge_scopes,
+                                         (size_t)nc * sizeof(DepEdgeScope));
+            if (!r->dep_edge_scopes) {
+                fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+            }
+            r->dep_edges_cap = nc;
+        }
+        r->dep_edge_scopes[r->num_dep_edges] = (DepEdgeScope){
+            .scope = raw->scope, .scope_n = raw->scope_n
+        };
+        r->dep_edges[r->num_dep_edges++] = edge;
+    }
+
+    /* Free the raw accumulator shell (contents transferred). */
+    free(g_dep_refs);
     g_dep_refs     = NULL;
     g_num_dep_refs = 0;
     g_dep_ref_cap  = 0;
@@ -255,9 +303,8 @@ void dep_refs_transfer(ParseResult *r) {
  */
 void free_dep_refs(void) {
     for (int i = 0; i < g_num_dep_refs; i++) {
-        DepRef *dr = &g_dep_refs[i];
-        for (int j = 0; j < dr->nseg; j++) free(dr->segs[j]);
-        free(dr->segs);
+        RawDepRef *dr = &g_dep_refs[i];
+        free(dr->path);
         for (int j = 0; j < dr->scope_n; j++) free(dr->scope[j]);
         free(dr->scope);
     }
@@ -383,31 +430,6 @@ static const DocSymbol *resolve_from_map(const SymMap *map,
     return resolve_from(first->children, first->num_children, segs + 1, nseg - 1);
 }
 
-/* Resolve a single raw dep ref against the symbol tree, applying bang
- * navigation first.  Returns the matching DocSymbol on success, NULL on failure.
- * syms/nsym        — root-level symbol array
- * scope/scope_len  — task IDs from root to the containing task
- * bang_count       — number of leading '!' characters in the reference
- * segs/nseg        — dot-split path segments after the bangs
- */
-static const DocSymbol *validate_ref(const DocSymbol *syms, int nsym,
-                                     const char **scope, int scope_len,
-                                     int bang_count, const char **segs,
-                                     int nseg) {
-    const DocSymbol *ctx;
-    int nctx;
-    if (bang_count == 0) {
-        ctx  = syms;
-        nctx = nsym;
-    } else {
-        int k = scope_len;
-        if (bang_count > k) return NULL;
-        ctx = doc_symbol_find_path(syms, nsym, scope, k - bang_count, &nctx);
-        if (!ctx) { nctx = 0; ctx = NULL; }
-    }
-    return resolve_from(ctx, nctx, segs, nseg);
-}
-
 /* Append a DefinitionLink to r's def_links array, growing it if needed.
  * source     — range of the reference expression in the current document
  * target     — selection range of the matching task symbol declaration
@@ -428,57 +450,53 @@ static void push_def_link(ParseResult *r, LspRange source, LspRange target,
     };
 }
 
-/* Validate dep refs from the global accumulator against syms[].
- * Emits diagnostics into r for invalid references and DefinitionLinks for
- * valid ones.  Uses a linear scan.  Note: this function is not called in
- * the normal server code path — see revalidate_dep_refs() for the live
- * cross-file implementation.
- */
-void validate_dep_refs(const DocSymbol *syms, int nsym, ParseResult *r) {
-    for (int i = 0; i < g_num_dep_refs; i++) {
-        const DepRef *dr = &g_dep_refs[i];
-        const DocSymbol *sym = validate_ref(syms, nsym,
-                                            (const char **)dr->scope,
-                                            dr->scope_n,
-                                            dr->bang_count,
-                                            (const char **)dr->segs,
-                                            dr->nseg);
-        if (sym) {
-            /* Valid reference — record a definition link for go-to-definition */
-            push_def_link(r, dr->range, sym->selection_range, NULL);
-        } else {
-            /* Invalid reference — emit diagnostic */
-            if (dr->bang_count > dr->scope_n) {
-                /* The number of leading `!` characters exceeds the nesting
-                 * depth of the containing task.  e.g. a top-level task
-                 * (scope_n=0) writing `depends !other` has one bang but zero
-                 * levels to ascend. */
-                push_diagnostic(r, dr->range, DIAG_WARNING,
-                    "dependency reference escapes beyond project root");
-            } else {
-                /* The bang count is valid but the resulting path does not
-                 * match any task in the resolved lookup scope.  Reconstruct
-                 * the dot-separated path for the error message. */
-                char path[256] = "";
-                for (int j = 0; j < dr->nseg; j++) {
-                    if (j > 0) strncat(path, ".", sizeof(path) - strlen(path) - 1);
-                    strncat(path, dr->segs[j], sizeof(path) - strlen(path) - 1);
-                }
-                char msg[320];
-                snprintf(msg, sizeof(msg), "unresolved task: `%s`", path);
-                push_diagnostic(r, dr->range, DIAG_ERROR, msg);
-            }
-        }
+/* ── Scope helpers for DepEdge resolution ───────────────────────────────── */
+
+/* Count the nesting depth of a DocSymbol by walking its parent chain.
+ * Only counts SK_FUNCTION (task) ancestors, skipping SK_MODULE (project). */
+static int owner_scope_depth(const DocSymbol *sym) {
+    int depth = 0;
+    for (const DocSymbol *p = sym; p; p = p->parent)
+        if (p->kind == SK_FUNCTION) depth++;
+    return depth;
+}
+
+/* Navigate from owner up bang_count levels via the parent chain.
+ * Returns the ancestor whose children should be searched, or NULL if the
+ * navigation escapes beyond the root.  Only SK_FUNCTION parents count as
+ * levels; SK_MODULE is transparent. */
+static const DocSymbol *navigate_up(const DocSymbol *owner, int bang_count) {
+    const DocSymbol *node = owner;
+    for (int i = 0; i < bang_count; i++) {
+        /* Walk up to the next SK_FUNCTION ancestor */
+        do {
+            node = node->parent;
+            if (!node) return NULL;
+        } while (node->kind != SK_FUNCTION);
     }
+    return node;
+}
+
+/* Emit an "unresolved task" diagnostic for the given dep edge. */
+static void emit_unresolved_diag(ParseResult *r, const DepEdge *edge) {
+    char path[256] = "";
+    for (int j = 0; j < edge->nseg; j++) {
+        if (j > 0) strncat(path, ".", sizeof(path) - strlen(path) - 1);
+        strncat(path, edge->segs[j], sizeof(path) - strlen(path) - 1);
+    }
+    char msg[320];
+    snprintf(msg, sizeof(msg), "unresolved task: `%s`", path);
+    push_diagnostic(r, edge->range, DIAG_ERROR, msg);
 }
 
 /* ── Cross-file dependency revalidation ──────────────────────────────────── */
 
-/* Re-run dep-ref validation against the current document and extra symbol
+/* Re-run dep-edge validation against the current document and extra symbol
  * pools from all other open documents.  Called after every document change.
  *
  * r            — ParseResult for the document being validated; its diagnostics
- *                from dep_diag_start onward and all def_links are replaced
+ *                from dep_diag_start onward and all def_links are replaced.
+ *                Each dep_edge's resolved pointer is updated.
  * extra_pools  — doc_symbols arrays from other open documents
  * extra_counts — corresponding num_doc_symbols counts
  * extra_uris   — corresponding document URIs (used in cross-file DefinitionLinks)
@@ -503,71 +521,62 @@ void revalidate_dep_refs(ParseResult *r,
         free(r->def_links[i].target_uri);
     r->num_def_links = 0;
 
-    /* Build root-level lookup map once for all dep refs in this document. */
+    /* Build root-level lookup map once for all dep edges in this document. */
     int map_cap = 16;
     while (map_cap < r->num_doc_symbols * 2 + 1) map_cap <<= 1;
     SymMap root_map;
     symmap_init(&root_map, map_cap);
     symmap_populate(&root_map, r->doc_symbols, r->num_doc_symbols);
 
-    for (int i = 0; i < r->num_raw_dep_refs; i++) {
-        const DepRef      *dr        = &r->raw_dep_refs[i];
+    for (int i = 0; i < r->num_dep_edges; i++) {
+        DepEdge           *edge      = &r->dep_edges[i];
         const DocSymbol   *sym       = NULL;
         const char        *found_uri = NULL;
 
-        int k = dr->scope_n;
+        edge->resolved = NULL;
+
+        if (!edge->owner) {
+            emit_unresolved_diag(r, edge);
+            continue;
+        }
+
+        int k = owner_scope_depth(edge->owner);
 
         /* Too many bangs: reference escapes the project root. */
-        if (dr->bang_count > k) {
-            push_diagnostic(r, dr->range, DIAG_WARNING,
+        if (edge->bang_count > k) {
+            push_diagnostic(r, edge->range, DIAG_WARNING,
                 "dependency reference escapes beyond project root");
             continue;
         }
 
-        /* nav_len: scope levels to navigate before searching.
-         * bang_count == 0 is an absolute reference — always searches from
-         * the project root (nav_len = 0).
-         * bang_count > 0 navigates up (k - bang_count) levels; if that also
-         * reaches the root, use the hash map too. */
-        int nav_len = (dr->bang_count == 0) ? 0 : (k - dr->bang_count);
-
-        if (nav_len == 0) {
-            /* Root-level lookup — use the hash map. */
+        if (edge->bang_count == 0) {
+            /* Absolute reference — root-level lookup via hash map. */
             sym = resolve_from_map(&root_map,
-                                   (const char **)dr->segs, dr->nseg);
+                                   (const char **)edge->segs, edge->nseg);
         } else {
-            /* Subtree lookup — navigate to the ancestor, then linear scan.
-             * Child arrays are bounded by the tree branching factor so this
-             * path stays fast. */
-            int nctx;
-            const DocSymbol *ctx = doc_symbol_find_path(
-                r->doc_symbols, r->num_doc_symbols,
-                (const char **)dr->scope, nav_len, &nctx);
-            if (ctx)
-                sym = resolve_from(ctx, nctx,
-                                   (const char **)dr->segs, dr->nseg);
+            /* Relative reference — navigate up from owner, then search
+             * the ancestor's children. */
+            const DocSymbol *ancestor = navigate_up(edge->owner,
+                                                     edge->bang_count);
+            if (ancestor)
+                sym = resolve_from(ancestor->children, ancestor->num_children,
+                                   (const char **)edge->segs, edge->nseg);
         }
 
         /* For absolute references (no bangs), also search other open files. */
-        if (!sym && dr->bang_count == 0) {
+        if (!sym && edge->bang_count == 0) {
             for (int p = 0; p < num_extra; p++) {
                 sym = resolve_from(extra_pools[p], extra_counts[p],
-                                   (const char **)dr->segs, dr->nseg);
+                                   (const char **)edge->segs, edge->nseg);
                 if (sym) { found_uri = extra_uris[p]; break; }
             }
         }
 
         if (sym) {
-            push_def_link(r, dr->range, sym->selection_range, found_uri);
+            edge->resolved = (DocSymbol *)sym;
+            push_def_link(r, edge->range, sym->selection_range, found_uri);
         } else {
-            char path[256] = "";
-            for (int j = 0; j < dr->nseg; j++) {
-                if (j > 0) strncat(path, ".", sizeof(path) - strlen(path) - 1);
-                strncat(path, dr->segs[j], sizeof(path) - strlen(path) - 1);
-            }
-            char msg[320];
-            snprintf(msg, sizeof(msg), "unresolved task: `%s`", path);
-            push_diagnostic(r, dr->range, DIAG_ERROR, msg);
+            emit_unresolved_diag(r, edge);
         }
     }
 

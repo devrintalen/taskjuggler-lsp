@@ -117,64 +117,63 @@ void token_free(Token *t);
  *   }
  */
 typedef struct DocSymbol DocSymbol;
+
+/* ── DepEdge ────────────────────────────────────────────────────────────── *
+ *
+ * An unresolved dependency reference, stored as a flat queue on ParseResult.
+ * Each edge records the raw reference data captured during parsing plus
+ * pointers that link it back to the document tree.
+ *
+ * owner points to the DocSymbol that declared the dependency (the task
+ * containing the `depends` or `precedes` clause).  This allows the
+ * resolution pass to update the DocSymbol tree in O(1) time.
+ *
+ * resolved is filled in during dep validation — it points to the target
+ * DocSymbol that the reference resolves to (NULL while unresolved).
+ *
+ * The owning task's scope can be reconstructed by walking up
+ * owner->parent, so no separate scope snapshot is needed.
+ *
+ * Example: task gui depends !database
+ *
+ *   DepEdge {
+ *     .bang_count = 1,
+ *     .segs       = ["database"],
+ *     .nseg       = 1,
+ *     .range      = { {3,12}, {3,21} },
+ *     .owner      = &gui_sym,
+ *     .resolved   = NULL,  // filled by validation → &database_sym
+ *   }
+ */
+typedef struct {
+    int        bang_count;
+    char     **segs;      /* dot-split path segments, heap-allocated */
+    int        nseg;
+    LspRange   range;     /* source range of the reference expression */
+    DocSymbol *owner;     /* declaring node; set during post-parse pass */
+    DocSymbol *resolved;  /* resolved target node; NULL until validation */
+} DepEdge;
+
+/* Temporary scope snapshot, stored in a parallel array to dep_edges during
+ * the gap between dep_refs_transfer() and assign_dep_edges().  Consumed and
+ * freed by assign_dep_edges(), which resolves each scope to an owner pointer. */
+typedef struct {
+    char **scope;
+    int    scope_n;
+} DepEdgeScope;
+
 struct DocSymbol {
     char      *name;           /* display name, heap-allocated */
     char      *detail;         /* TJP identifier, heap-allocated */
     int        kind;           /* SK_* constant */
+    int        keyword;        /* KW_* constant from grammar.tab.h */
     LspRange   range;
     LspRange   selection_range;
+    DocSymbol *parent;         /* parent node; NULL for root-level symbols */
     DocSymbol *children;       /* dynamic array */
     int        num_children;
     int        children_cap;
 };
-
-/* ── DepRef ──────────────────────────────────────────────────────────────── *
- *
- * A raw dependency reference captured during parsing.  Stored in ParseResult
- * for cross-file revalidation by diagnostics.c:revalidate_dep_refs().
- *
- * bang_count counts leading '!' tokens, which shift the lookup root up the
- * scope chain.  segs[] is the dot-split path after the bangs.  scope[] is a
- * snapshot of the enclosing task identifier chain at the point of capture, used
- * by the validator to reproduce the relative-lookup algorithm at any time.
- *
- * Lookup rule: given scope depth k = scope_n and bang_count n,
- *   n == 0  ->  global (root-level) lookup
- *   n >= 1  ->  start at scope[0..k-n-1] (navigate n levels up), then
- *               search children for segs[0], then segs[1], etc.
- *   n > k   ->  invalid (too many bangs)
- *
- * Example TJP input (cursor task path = ["spec", "gui"], k=2):
- *
- *   task spec "Specification" {
- *       task database "Database" {}
- *       task gui "GUI" {
- *           depends !database       <- line 3, characters 12-21
- *       }
- *   }
- *
- * Produces:
- *
- *   DepRef {
- *     .bang_count = 1,
- *     .segs       = ["database"],
- *     .nseg       = 1,
- *     .scope      = ["spec", "gui"],
- *     .scope_n    = 2,
- *     .range      = { {3,12}, {3,21} },  // "!database"
- *   }
- *
- * The validator resolves this as: navigate to scope[0..0] = ["spec"], then
- * find "database" among spec's children -> spec.database. Valid.
- */
-typedef struct {
-    int       bang_count;
-    char    **segs;       /* dot-split path segments, heap-allocated */
-    int       nseg;
-    char    **scope;      /* task scope snapshot at parse time, heap-allocated */
-    int       scope_n;
-    LspRange  range;
-} DepRef;
 
 /* ── Diagnostic severity ─────────────────────────────────────────────────── */
 
@@ -248,7 +247,8 @@ typedef struct {
 typedef struct {
     int    token_kind;
     LspPos start, end;
-    char  *text;   /* heap-allocated; may be NULL */
+    char  *text;       /* heap-allocated; may be NULL */
+    DocSymbol *owner;  /* enclosing symbol node; NULL if outside any symbol */
 } TokenSpan;
 
 /* ── DefinitionLink ──────────────────────────────────────────────────────── *
@@ -301,33 +301,27 @@ typedef struct {
  *       depends database
  *   }
  *
- * After parse() and revalidate_dep_refs():
+ * After parse():
  *
  *   ParseResult {
  *     .num_diagnostics = 0,          // no errors
  *     .dep_diag_start  = 0,
  *
  *     .doc_symbols = [               // two top-level tasks
- *       DocSymbol { .detail="database", ... },
- *       DocSymbol { .detail="gui", ... },
+ *       DocSymbol { .detail="database", .keyword=KW_TASK, ... },
+ *       DocSymbol { .detail="gui", .keyword=KW_TASK, ... },
  *     ],
  *     .num_doc_symbols = 2,
  *
- *     .tok_spans = [                 // every token in the file, in order
- *       {KW_TASK,"task",...}, {TK_IDENT,"database",...}, ...
- *       {KW_DEPENDS,"depends",...}, {TK_IDENT,"database",...}, ...
+ *     .tok_spans = [                 // every token, in order; each has owner
+ *       {KW_TASK,"task", .owner=&database_sym, ...}, ...
  *     ],
  *     .num_tok_spans = N,
  *
- *     .def_links = [                 // one resolved dependency
- *       DefinitionLink { .source={2,16..24}, .target={0,5..13}, .target_uri=NULL },
+ *     .dep_edges = [                 // unresolved dep queue with owner ptrs
+ *       DepEdge { .bang_count=0, .segs=["database"], .owner=&gui_sym },
  *     ],
- *     .num_def_links = 1,
- *
- *     .raw_dep_refs = [              // same dep, stored for revalidation
- *       DepRef { .bang_count=0, .segs=["database"], .scope=["gui"], ... },
- *     ],
- *     .num_raw_dep_refs = 1,
+ *     .num_dep_edges = 1,
  *   }
  */
 
@@ -345,9 +339,10 @@ typedef struct {
     DefinitionLink *def_links;
     int             num_def_links;
     int             def_link_cap;
-    DepRef         *raw_dep_refs;     /* captured dep refs for cross-file revalidation */
-    int             num_raw_dep_refs;
-    int             raw_dep_ref_cap;
+    DepEdge        *dep_edges;        /* post-parse queue; owner set, resolved initially NULL */
+    int             num_dep_edges;
+    int             dep_edges_cap;
+    DepEdgeScope   *dep_edge_scopes;  /* parallel to dep_edges; consumed by assign_dep_edges */
     int             num_sem_entries;  /* upper bound on push_entry calls for semantic tokens */
     char          **included_files;   /* unquoted filenames from include statements */
     int             num_included_files;

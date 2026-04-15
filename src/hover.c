@@ -55,7 +55,7 @@ TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
         copy.text = strdup(tokens[found].text ? tokens[found].text : "");
         return copy;
     }
-    return (TokenSpan){ TK_EOF, pos, pos, strdup("") };
+    return (TokenSpan){ TK_EOF, pos, pos, strdup(""), NULL };
 }
 
 /* ── scan_kw_stack ───────────────────────────────────────────────────────── */
