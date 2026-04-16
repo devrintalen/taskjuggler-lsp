@@ -25,34 +25,9 @@
 void push_diagnostic(ParseResult *r, LspRange range, int severity,
                      const char *msg);
 
-/* ── Dependency reference tracking ──────────────────────────────────────── *
- *
- * Called from grammar.y semantic actions to record each dep ref seen during
- * parsing.  Raw refs are accumulated in a file-local buffer, then converted
- * to DepEdge entries on ParseResult by dep_refs_transfer().  The post-parse
- * pass assign_dep_edges() (parser.c) resolves scope snapshots to owner
- * pointers on each edge.
- */
-
-void push_dep_ref(ParseResult *r, int bang_count, const char *path,
-                  const char **scope, int scope_n,
-                  LspPos start, LspPos end);
-
-void dep_refs_reset(void);
-void dep_refs_transfer(ParseResult *r);
-void free_dep_refs(void);
-
-/*
- * Re-run dep-edge validation for r using its stored dep_edges[].
- * Trims dep-validation diagnostics (from r->dep_diag_start) and def_links,
- * then re-validates against r->doc_symbols plus the extra symbol pools.
- * Only absolute (bang_count == 0) references are searched in extra pools.
- */
-void revalidate_dep_refs(ParseResult *r,
-                         const DocSymbol * const *extra_pools,
-                         const int *extra_counts,
-                         const char * const *extra_uris,
-                         int num_extra);
+/* TODO: revalidate_dep_refs() has been removed; dep resolution now happens
+ * in resolve_dep_edges() during parse().  Cross-file resolution support
+ * needs to be added there. */
 
 /* ── LSP publishDiagnostics notification ─────────────────────────────────── */
 

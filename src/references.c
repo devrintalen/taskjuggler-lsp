@@ -24,22 +24,16 @@
  * Find-references is answered from two data structures already in ParseResult:
  *
  *   doc_symbols — the symbol tree; each SK_FUNCTION node has a selection_range
- *                 covering its declaration identifier
- *   def_links   — the DefinitionLink array populated by revalidate_dep_refs();
- *                 each entry maps a reference's source range to the target
- *                 symbol's selection_range
+ *                 covering its declaration identifier, and each node may carry
+ *                 def_links[] pointing to resolved target DocSymbols
  *
  * At query time, build_references_json():
  *
  *   1. Walks the doc_symbols tree of the cursor document to find the SK_FUNCTION
  *      (task) whose selection_range contains the cursor.  Returns null if none.
  *
- *   2. Scans def_links from EVERY supplied document for entries whose resolved
- *      target points to the task found in step 1.  A def_link in document D
- *      targets the declaration in cursor_uri when:
- *        • link.target_uri == cursor_uri  (explicit cross-file pointer), or
- *        • link.target_uri == NULL and D.uri == cursor_uri (same-file link)
- *      and link.target range-equals the task's selection_range.
+ *   2. Walks the symbol tree of EVERY supplied document looking for
+ *      DefinitionLinks whose target pointer matches the task found in step 1.
  *
  *   3. Returns a JSON array of Location objects, one per matching link.
  *      The array may be empty if no dependency references point to the task
@@ -65,11 +59,6 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-/* Returns 1 if ranges a and b have identical start and end positions. */
-static int range_eq(LspRange a, LspRange b) {
-    return pos_cmp(a.start, b.start) == 0 && pos_cmp(a.end, b.end) == 0;
-}
-
 /* Walk the symbol tree depth-first to find the SK_FUNCTION node whose
  * selection_range contains pos.  Returns NULL if no such node exists. */
 static const DocSymbol *find_task_at(const DocSymbol *syms, int n, LspPos pos) {
@@ -84,18 +73,27 @@ static const DocSymbol *find_task_at(const DocSymbol *syms, int n, LspPos pos) {
     return NULL;
 }
 
-/* Build the JSON array for a textDocument/references response.
- * Finds the task declaration at cursor in cursor_uri, then collects every
- * dep_ref link — across all supplied documents — that resolves to it.
- *
- * doc          — the mutable JSON document that will own the returned value
- * cursor_uri   — URI of the document the cursor is in
- * symbols      — root-level symbol array of the cursor document
- * num_symbols  — number of entries in symbols
- * all_docs     — one entry per open document; all are searched for references
- * num_docs     — number of entries in all_docs
- * cursor       — cursor position from the textDocument/references request
- */
+/* Walk the symbol tree and collect all DefinitionLinks whose target matches
+ * the given task pointer.  Appends Location objects to arr. */
+static void collect_refs(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                         const DocSymbol *syms, int n,
+                         const DocSymbol *task, const char *doc_uri) {
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < syms[i].num_def_links; j++) {
+            const DefinitionLink *link = &syms[i].def_links[j];
+            if (link->target != task) continue;
+
+            yyjson_mut_val *location = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_str(doc, location, "uri", doc_uri);
+            yyjson_mut_obj_add_val(doc, location, "range",
+                                   range_json(doc, link->source));
+            yyjson_mut_arr_add_val(arr, location);
+        }
+        collect_refs(doc, arr, syms[i].children, syms[i].num_children,
+                     task, doc_uri);
+    }
+}
+
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
                                        const char *cursor_uri,
                                        const DocSymbol *symbols, int num_symbols,
@@ -107,22 +105,8 @@ yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     for (int d = 0; d < num_docs; d++) {
         const RefDocLinks *rdl = &all_docs[d];
-        for (int i = 0; i < rdl->num_links; i++) {
-            const DefinitionLink *link = &rdl->links[i];
-            /* Determine the URI of the file that contains the target symbol.
-             * target_uri == NULL means the target is in the same file as the
-             * reference (i.e. rdl->uri). */
-            const char *effective_target_uri =
-                link->target_uri ? link->target_uri : rdl->uri;
-            if (strcmp(effective_target_uri, cursor_uri) != 0) continue;
-            if (!range_eq(link->target, task->selection_range))  continue;
-
-            yyjson_mut_val *location = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_str(doc, location, "uri", rdl->uri);
-            yyjson_mut_obj_add_val(doc, location, "range",
-                                   range_json(doc, link->source));
-            yyjson_mut_arr_add_val(arr, location);
-        }
+        collect_refs(doc, arr, rdl->symbols, rdl->num_symbols,
+                     task, rdl->uri);
     }
     return arr;
 }

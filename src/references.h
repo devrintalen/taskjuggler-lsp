@@ -23,14 +23,14 @@
 
 /*
  * One document's contribution to a cross-file references search.
- * uri      — the URI of the document (used as the Location uri in results)
- * links    — resolved definition links from the document's ParseResult
- * num_links — number of entries in links
+ * uri         — the URI of the document (used as the Location uri in results)
+ * symbols     — root-level symbol array from the document's ParseResult
+ * num_symbols — number of entries in symbols
  */
 typedef struct {
-    const char           *uri;
-    const DefinitionLink *links;
-    int                   num_links;
+    const char      *uri;
+    const DocSymbol *symbols;
+    int              num_symbols;
 } RefDocLinks;
 
 /*

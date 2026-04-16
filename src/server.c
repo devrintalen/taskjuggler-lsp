@@ -1145,20 +1145,11 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
     /* Check whether the cursor is on a resolved dependency/allocation reference.
      * If so, show the target symbol's kind, id, and name instead of keyword docs. */
-    for (int i = 0; i < d->parse.num_def_links; i++) {
-        DefinitionLink *link = &d->parse.def_links[i];
-        if (pos_cmp(link->source.start, pos) > 0) continue;
-        if (pos_cmp(pos, link->source.end)   > 0) continue;
-
-        /* Cursor is within this definition link's source range */
-        const char *target_uri = link->target_uri ? link->target_uri : uri;
-        Document   *tgt        = doc_find(target_uri);
-        if (!tgt) break;
-
-        const DocSymbol *sym = find_sym_at_pos(tgt->parse.doc_symbols,
-                                               tgt->parse.num_doc_symbols,
-                                               link->target.start);
-        if (!sym) break;
+    const DefinitionLink *hover_link = find_def_link_at(
+        d->parse.doc_symbols, d->parse.num_doc_symbols, pos);
+    if (hover_link) {
+        const DocSymbol *sym = hover_link->target;
+        if (!sym) goto keyword_hover;
 
         /* Build: "**<Kind> `<id>`** — <name>" */
         const char *label    = sym_kind_label(sym->kind);
@@ -1175,10 +1166,11 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
         yyjson_mut_val *hover = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_val(doc, hover, "contents", contents);
-        yyjson_mut_obj_add_val(doc, hover, "range",    range_json(doc, link->source));
+        yyjson_mut_obj_add_val(doc, hover, "range",    range_json(doc, hover_link->source));
         return make_response(doc, id, hover);
     }
 
+keyword_hover:;
     /* Fall back to keyword documentation */
     ActiveKeyword ak = active_keyword_at(d->parse.tok_spans, d->parse.num_tok_spans, pos);
     if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));

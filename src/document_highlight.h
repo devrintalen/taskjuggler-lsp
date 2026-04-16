@@ -37,7 +37,6 @@
  */
 yyjson_mut_val *build_document_highlight_json(
     yyjson_mut_doc *doc,
-    const DefinitionLink *links, int num_links,
     const DocSymbol *symbols, int num_symbols,
     const TokenSpan *tokens, int num_tokens,
     LspPos cursor);

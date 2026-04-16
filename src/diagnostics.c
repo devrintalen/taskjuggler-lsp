@@ -430,24 +430,38 @@ static const DocSymbol *resolve_from_map(const SymMap *map,
     return resolve_from(first->children, first->num_children, segs + 1, nseg - 1);
 }
 
-/* Append a DefinitionLink to r's def_links array, growing it if needed.
+/* Append a DefinitionLink to owner's def_links array, growing it if needed.
+ * owner      — the DocSymbol that declared the dependency
  * source     — range of the reference expression in the current document
- * target     — selection range of the matching task symbol declaration
+ * target     — resolved target DocSymbol
  * target_uri — URI of the file containing the target (NULL = same file)
  */
-static void push_def_link(ParseResult *r, LspRange source, LspRange target,
+static void push_def_link(DocSymbol *owner, LspRange source, DocSymbol *target,
                           const char *target_uri) {
-    if (r->num_def_links >= r->def_link_cap) {
-        int nc = r->def_link_cap ? r->def_link_cap * 2 : 4;
-        DefinitionLink *tmp = realloc(r->def_links,
+    if (owner->num_def_links >= owner->def_links_cap) {
+        int nc = owner->def_links_cap ? owner->def_links_cap * 2 : 4;
+        DefinitionLink *tmp = realloc(owner->def_links,
                                       (size_t)nc * sizeof(DefinitionLink));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        r->def_links = tmp;
-        r->def_link_cap = nc;
+        owner->def_links = tmp;
+        owner->def_links_cap = nc;
     }
-    r->def_links[r->num_def_links++] = (DefinitionLink){
+    owner->def_links[owner->num_def_links++] = (DefinitionLink){
         source, target, target_uri ? strdup(target_uri) : NULL
     };
+}
+
+/* Recursively clear all def_links on every DocSymbol in the tree.
+ * Frees target_uri strings but retains the allocated arrays (just resets
+ * num_def_links to 0) so they can be reused on the next validation pass.
+ */
+static void clear_def_links(DocSymbol *syms, int n) {
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < syms[i].num_def_links; j++)
+            free(syms[i].def_links[j].target_uri);
+        syms[i].num_def_links = 0;
+        clear_def_links(syms[i].children, syms[i].num_children);
+    }
 }
 
 /* ── Scope helpers for DepEdge resolution ───────────────────────────────── */
@@ -516,10 +530,8 @@ void revalidate_dep_refs(ParseResult *r,
         free(r->diagnostics[i].message);
     r->num_diagnostics = r->dep_diag_start;
 
-    /* Clear definition links */
-    for (int i = 0; i < r->num_def_links; i++)
-        free(r->def_links[i].target_uri);
-    r->num_def_links = 0;
+    /* Clear definition links on all symbols */
+    clear_def_links(r->doc_symbols, r->num_doc_symbols);
 
     /* Build root-level lookup map once for all dep edges in this document. */
     int map_cap = 16;
@@ -574,7 +586,7 @@ void revalidate_dep_refs(ParseResult *r,
 
         if (sym) {
             edge->resolved = (DocSymbol *)sym;
-            push_def_link(r, edge->range, sym->selection_range, found_uri);
+            push_def_link(edge->owner, edge->range, (DocSymbol *)sym, found_uri);
         } else {
             emit_unresolved_diag(r, edge);
         }
