@@ -25,10 +25,6 @@
 void push_diagnostic(ParseResult *r, LspRange range, int severity,
                      const char *msg);
 
-/* TODO: revalidate_dep_refs() has been removed; dep resolution now happens
- * in resolve_dep_edges() during parse().  Cross-file resolution support
- * needs to be added there. */
-
 /* ── LSP publishDiagnostics notification ─────────────────────────────────── */
 
 void publish_diagnostics(const char *uri, const ParseResult *r);
