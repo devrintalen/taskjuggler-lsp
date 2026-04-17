@@ -28,8 +28,8 @@
  *
  * grammar.y calls push_dep_ref() for each dependency reference encountered
  * during parsing.  These are stored in a file-local buffer until parse()
- * calls dep_refs_collect(), which converts them into a local DepEdge array
- * for resolution.
+ * calls resolve_dep_refs(), which resolves them in place and populates
+ * def_links/ref_links on the target DocSymbols.
  */
 
 typedef struct {
@@ -38,17 +38,6 @@ typedef struct {
     DocSymbol *owner;      /* owning symbol; stable because individually malloc'd */
     LspRange   range;
 } RawDepRef;
-
-/* Intermediate representation of a dependency reference, used between
- * dep_refs_collect() and resolve_dep_edges(). */
-typedef struct {
-    int        bang_count;
-    char     **segs;      /* dot-split path segments, heap-allocated */
-    int        nseg;
-    LspRange   range;     /* source range of the reference expression */
-    DocSymbol *owner;     /* declaring node; set directly from grammar */
-    DocSymbol *resolved;  /* resolved target node; NULL until resolution */
-} DepEdge;
 
 static RawDepRef *g_dep_refs     = NULL;
 static int        g_num_dep_refs = 0;
@@ -100,35 +89,6 @@ static void split_path(const char *path, char ***out_segs, int *out_nseg) {
     free(tmp);
 }
 
-/* Convert the global RawDepRef accumulator into a local DepEdge array.
- * Ownership of all heap memory transfers to the output array.
- * Resets the global accumulator to empty. */
-static void dep_refs_collect(DepEdge **out_edges, int *out_count) {
-    int n = g_num_dep_refs;
-    DepEdge *edges = NULL;
-    if (n > 0) {
-        edges = malloc((size_t)n * sizeof(DepEdge));
-        if (!edges) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    }
-    for (int i = 0; i < n; i++) {
-        RawDepRef *raw = &g_dep_refs[i];
-        edges[i] = (DepEdge){
-            .bang_count = raw->bang_count,
-            .range      = raw->range,
-            .owner      = raw->owner,
-        };
-        split_path(raw->path, &edges[i].segs, &edges[i].nseg);
-        free(raw->path);
-    }
-    /* Free accumulator shell (contents transferred). */
-    free(g_dep_refs);
-    g_dep_refs     = NULL;
-    g_num_dep_refs = 0;
-    g_dep_ref_cap  = 0;
-
-    *out_edges = edges;
-    *out_count = n;
-}
 
 /* ── flex scanner interface ──────────────────────────────────────────────── *
  *
@@ -322,35 +282,94 @@ static void assign_parents(DocSymbol **syms, int n, DocSymbol *parent) {
 
 /* ── Token-to-symbol cross-referencing ──────────────────────────────────── */
 
-/* Returns 1 if pos is contained within range (inclusive of start, exclusive
- * of end), using standard LSP half-open interval semantics. */
-static int range_contains(LspRange range, LspPos pos) {
-    if (pos_cmp(pos, range.start) < 0) return 0;
-    if (pos_cmp(pos, range.end) >= 0) return 0;
-    return 1;
-}
-
-/* Find the deepest DocSymbol whose range contains pos.
- * Returns NULL if no symbol contains the position. */
-static DocSymbol *find_deepest_symbol(DocSymbol **syms, int n, LspPos pos) {
-    for (int i = 0; i < n; i++) {
-        if (!range_contains(syms[i]->range, pos))
-            continue;
-        /* This symbol contains pos; check if a child is more specific. */
-        DocSymbol *child = find_deepest_symbol(syms[i]->children,
-                                               syms[i]->num_children, pos);
-        return child ? child : syms[i];
-    }
-    return NULL;
-}
-
-/* Assign each token span's owner pointer to the deepest enclosing DocSymbol.
- * Called after parsing when both tok_spans[] and doc_symbols[] are finalized. */
+/* Assign each token span's owner to the deepest enclosing DocSymbol using
+ * a single linear sweep.  Both tok_spans[] and symbol ranges are in document
+ * order, so we walk them in lockstep with a stack of open symbol scopes.
+ *
+ * Each stack frame tracks a symbol's children array and the current child
+ * index, so we can advance to the next sibling without rescanning.
+ *
+ * Complexity: O(T + S) where T = num_tok_spans, S = total DocSymbols. */
 static void assign_token_owners(ParseResult *r) {
-    for (int i = 0; i < r->num_tok_spans; i++) {
-        r->tok_spans[i].owner = find_deepest_symbol(
-            r->doc_symbols, r->num_doc_symbols, r->tok_spans[i].start);
+    typedef struct { DocSymbol **syms; int n; int idx; } Frame;
+    int frame_cap = 64;
+    Frame *stack = malloc((size_t)frame_cap * sizeof(Frame));
+    if (!stack) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    int depth = 0;
+
+    /* Seed with the root-level symbols */
+    stack[depth++] = (Frame){ r->doc_symbols, r->num_doc_symbols, 0 };
+
+    for (int t = 0; t < r->num_tok_spans; t++) {
+        LspPos pos = r->tok_spans[t].start;
+
+        /* Pop frames whose current symbol's range has ended */
+        while (depth > 1) {
+            Frame *top = &stack[depth - 1];
+            DocSymbol *sym = top->syms[top->idx];
+            if (pos_cmp(pos, sym->range.end) < 0)
+                break;  /* still inside this symbol */
+            /* Back up to parent level and advance to next sibling */
+            depth--;
+            stack[depth - 1].idx++;
+        }
+
+        /* At each level, advance past siblings whose range has ended,
+         * then descend into the first child that contains pos. */
+        for (;;) {
+            Frame *top = &stack[depth - 1];
+
+            /* Skip siblings that ended before this token */
+            while (top->idx < top->n &&
+                   pos_cmp(pos, top->syms[top->idx]->range.end) >= 0)
+                top->idx++;
+
+            if (top->idx >= top->n)
+                break;  /* no more siblings at this level */
+
+            DocSymbol *sym = top->syms[top->idx];
+            if (pos_cmp(pos, sym->range.start) < 0)
+                break;  /* token is before next symbol — gap between symbols */
+
+            /* Token is inside sym; descend into its children */
+            if (sym->num_children > 0) {
+                if (depth >= frame_cap) {
+                    frame_cap *= 2;
+                    Frame *tmp = realloc(stack, (size_t)frame_cap * sizeof(Frame));
+                    if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+                    stack = tmp;
+                }
+                stack[depth++] = (Frame){ sym->children, sym->num_children, 0 };
+            } else {
+                break;  /* leaf symbol — this is the deepest */
+            }
+        }
+
+        /* Owner is the deepest symbol we're inside, or NULL if outside all */
+        if (depth > 1) {
+            Frame *top = &stack[depth - 1];
+            if (top->idx < top->n) {
+                DocSymbol *sym = top->syms[top->idx];
+                if (pos_cmp(pos, sym->range.start) >= 0 &&
+                    pos_cmp(pos, sym->range.end) < 0) {
+                    r->tok_spans[t].owner = sym;
+                    continue;
+                }
+            }
+            /* Check parent frames — token may be in a parent but between children */
+            for (int d = depth - 2; d >= 1; d--) {
+                DocSymbol *sym = stack[d].syms[stack[d].idx];
+                if (pos_cmp(pos, sym->range.start) >= 0 &&
+                    pos_cmp(pos, sym->range.end) < 0) {
+                    r->tok_spans[t].owner = sym;
+                    break;
+                }
+            }
+        }
+        /* If no frame matched, owner stays NULL (the default) */
     }
+
+    free(stack);
 }
 
 /* ── Dependency edge resolution ────────────────────────────────────────── */
@@ -381,49 +400,110 @@ static void push_ref_link(DocSymbol *sym, ReferenceLink link) {
     sym->ref_links[sym->num_ref_links++] = link;
 }
 
-/* Resolve dep edges: resolve targets, populate def_links/ref_links, emit
- * diagnostics for broken links, then free the edges array. */
-static void resolve_dep_edges(ParseResult *r, DepEdge *edges, int num_edges) {
-    for (int i = 0; i < num_edges; i++) {
-        DepEdge *edge = &edges[i];
+/* Find a task DocSymbol by searching a children array for the first segment,
+ * then descending through subsequent segments.  Returns the matched node,
+ * or NULL if any segment is not found.  Only KW_TASK nodes are matched;
+ * KW_PROJECT nodes are transparently descended. */
+static DocSymbol *find_task(DocSymbol **syms, int n,
+                            char **segs, int nseg) {
+    if (nseg == 0 || !segs) return NULL;
+    for (int i = 0; i < n; i++) {
+        if (syms[i]->keyword == KW_PROJECT) {
+            DocSymbol *found = find_task(syms[i]->children,
+                                         syms[i]->num_children, segs, nseg);
+            if (found) return found;
+        }
+        if (syms[i]->keyword == KW_TASK && syms[i]->id &&
+                strcmp(syms[i]->id, segs[0]) == 0) {
+            if (nseg == 1) return syms[i];
+            return find_task(syms[i]->children, syms[i]->num_children,
+                             segs + 1, nseg - 1);
+        }
+    }
+    return NULL;
+}
 
-        if (!edge->owner) continue;
+/* Resolve dep refs: split paths, resolve targets, populate def_links/ref_links,
+ * emit diagnostics for broken links, then free the global accumulator. */
+static void resolve_dep_refs(ParseResult *r) {
+    for (int i = 0; i < g_num_dep_refs; i++) {
+        RawDepRef *ref = &g_dep_refs[i];
 
-        /* TODO: resolve edge->segs using edge->bang_count and edge->owner
-         * to find the target DocSymbol.  This involves navigating up
-         * bang_count levels from owner via parent pointers, then walking
-         * down through segs[].  On success set edge->resolved; on failure
-         * emit a diagnostic. */
+        if (!ref->owner) continue;
 
-        if (!edge->resolved) {
-            /* TODO: build a descriptive error message from segs[] */
-            push_diagnostic(r, edge->range, DIAG_ERROR,
-                            "unresolved dependency reference");
+        char **segs = NULL;
+        int    nseg = 0;
+        split_path(ref->path, &segs, &nseg);
+
+        /* Determine the search root based on bang_count:
+         *   0 bangs  → absolute lookup from root
+         *   n bangs  → walk up n levels from owner, search that ancestor's children
+         *   too many → invalid (more bangs than nesting depth) */
+        DocSymbol  *resolved   = NULL;
+        DocSymbol **search_syms = NULL;
+        int         search_n    = 0;
+
+        if (ref->bang_count == 0) {
+            search_syms = r->doc_symbols;
+            search_n    = r->num_doc_symbols;
+        } else {
+            DocSymbol *ancestor = ref->owner;
+            for (int b = 0; b < ref->bang_count; b++) {
+                if (!ancestor->parent) {
+                    /* Too many bangs — can't go higher than root */
+                    ancestor = NULL;
+                    break;
+                }
+                ancestor = ancestor->parent;
+            }
+            if (ancestor) {
+                search_syms = ancestor->children;
+                search_n    = ancestor->num_children;
+            }
+        }
+
+        if (search_syms && nseg > 0)
+            resolved = find_task(search_syms, search_n, segs, nseg);
+
+        if (!resolved) {
+            /* Build error message: join segs with dots for display */
+            size_t msg_len = 32; /* "unresolved dependency: " prefix */
+            for (int j = 0; j < nseg; j++) msg_len += strlen(segs[j]) + 1;
+            char *msg = malloc(msg_len);
+            if (msg) {
+                strcpy(msg, "unresolved dependency: ");
+                for (int j = 0; j < nseg; j++) {
+                    if (j > 0) strcat(msg, ".");
+                    strcat(msg, segs[j]);
+                }
+                push_diagnostic(r, ref->range, DIAG_ERROR, msg);
+                free(msg);
+            }
+            for (int j = 0; j < nseg; j++) free(segs[j]);
+            free(segs);
             continue;
         }
 
         /* Outgoing link on the owner (go-to-definition) */
-        push_def_link(edge->owner, (DefinitionLink){
-            .source     = edge->range,
-            .target     = edge->resolved,
+        push_def_link(ref->owner, (DefinitionLink){
+            .source     = ref->range,
+            .target     = resolved,
             .target_uri = NULL,
         });
 
         /* Incoming link on the target (find-references) */
-        push_ref_link(edge->resolved, (ReferenceLink){
-            .source     = edge->range,
-            .origin     = edge->owner,
+        push_ref_link(resolved, (ReferenceLink){
+            .source     = ref->range,
+            .origin     = ref->owner,
             .source_uri = NULL,
         });
+
+        for (int j = 0; j < nseg; j++) free(segs[j]);
+        free(segs);
     }
 
-    /* Free edges — fully consumed */
-    for (int i = 0; i < num_edges; i++) {
-        DepEdge *e = &edges[i];
-        for (int j = 0; j < e->nseg; j++) free(e->segs[j]);
-        free(e->segs);
-    }
-    free(edges);
+    /* Free the global accumulator — fully consumed */
+    free_dep_refs();
 }
 
 /* ── Keyword classification ──────────────────────────────────────────────── */
@@ -433,12 +513,14 @@ static void resolve_dep_edges(ParseResult *r, DepEdge *edges, int num_edges) {
  *
  * kw — keyword string (e.g. "project", "resource", "task")
  */
-int symbol_kind_for(const char *kw) {
-    if (strcmp(kw, "project")  == 0) return SK_MODULE;
-    if (strcmp(kw, "resource") == 0) return SK_OBJECT;
-    if (strcmp(kw, "account")  == 0) return SK_VARIABLE;
-    if (strcmp(kw, "shift")    == 0) return SK_EVENT;
-    return SK_FUNCTION;
+int symbol_kind_for(int keyword) {
+    switch (keyword) {
+    case KW_PROJECT:  return SK_MODULE;
+    case KW_RESOURCE: return SK_OBJECT;
+    case KW_ACCOUNT:  return SK_VARIABLE;
+    case KW_SHIFT:    return SK_EVENT;
+    default:          return SK_FUNCTION;
+    }
 }
 
 /* ── Public parse() entry point ──────────────────────────────────────────── */
@@ -463,18 +545,6 @@ ParseResult parse(const char *src) {
     /* Record where dep-validation diagnostics will start (after syntax errors). */
     result.dep_diag_start = result.num_diagnostics;
 
-    /* Collect raw dep refs into a local array for resolution. */
-    DepEdge *dep_edges = NULL;
-    int num_dep_edges = 0;
-    dep_refs_collect(&dep_edges, &num_dep_edges);
-    // TODO Figure out how dep_refs_collect() gets simplified from the
-    // work done in grammar.y. We've changed RawDepRef to collect a
-    // DocSymbol pointer instead of a string, so work on that
-    // RawDepRef -> DepEdge logic. It doesn't seem like any real work
-    // gets done during dep_refs_collect() and we could just use the
-    // RawDepRefs or eliminate RawDepRefs and just call them DepEdge
-    // instead.
-    
 
     /* Transfer tok_spans array ownership to the ParseResult */
     result.tok_spans       = g_tok_spans;
@@ -491,7 +561,7 @@ ParseResult parse(const char *src) {
     /* Build cross-references between tokens, symbols, and dep edges */
     assign_parents(result.doc_symbols, result.num_doc_symbols, NULL);
     assign_token_owners(&result);
-    resolve_dep_edges(&result, dep_edges, num_dep_edges);
+    resolve_dep_refs(&result);
 
     return result;
 }

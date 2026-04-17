@@ -209,34 +209,6 @@ void dep_refs_reset(void) {
     free_dep_refs();
 }
 
-/* Record one raw dependency reference encountered during parsing.
- * r          — current ParseResult (unused directly; diagnostics deferred)
- * bang_count — number of leading '!' characters in the reference
- * path       — dot-separated task path after the bangs (e.g. "gui.engine")
- * scope      — task ID path from root to the containing task at parse time
- * scope_n    — number of segments in scope
- * start/end  — source range of the full reference expression
- */
-void push_dep_ref(ParseResult *r, int bang_count, const char *path,
-                  const char **scope, int scope_n,
-                  LspPos start, LspPos end) {
-    (void)r;
-    if (g_dep_ref_cap <= g_num_dep_refs) {
-        g_dep_ref_cap = g_dep_ref_cap ? g_dep_ref_cap * 2 : 8;
-        RawDepRef *tmp = realloc(g_dep_refs,
-                                 (size_t)g_dep_ref_cap * sizeof(RawDepRef));
-        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        g_dep_refs = tmp;
-    }
-    RawDepRef *dr = &g_dep_refs[g_num_dep_refs++];
-    dr->bang_count = bang_count;
-    dr->path       = path && path[0] ? strdup(path) : NULL;
-    dr->scope_n    = scope_n;
-    dr->scope      = scope_n ? malloc((size_t)scope_n * sizeof(char *)) : NULL;
-    for (int i = 0; i < scope_n; i++)
-        dr->scope[i] = strdup(scope[i]);
-    dr->range = (LspRange){ start, end };
-}
 
 /* Split a dot-separated path string into a heap-allocated array of segments.
  * Sets *out_segs and *out_nseg.  Caller owns the result. */
