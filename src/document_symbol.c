@@ -17,9 +17,27 @@
  */
 
 #include "document_symbol.h"
+#include "grammar.tab.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+
+/* LSP SymbolKind values — only used for JSON serialization. */
+#define SK_MODULE   2
+#define SK_FUNCTION 12
+#define SK_VARIABLE 13
+#define SK_OBJECT   19
+#define SK_EVENT    24
+
+int symbol_kind_for(int keyword) {
+    switch (keyword) {
+    case KW_PROJECT:  return SK_MODULE;
+    case KW_RESOURCE: return SK_OBJECT;
+    case KW_ACCOUNT:  return SK_VARIABLE;
+    case KW_SHIFT:    return SK_EVENT;
+    default:          return SK_FUNCTION;
+    }
+}
 
 /* Convenience macro: push a string literal without calling strlen at runtime. */
 #define PUSH_LIT(b, s) buf_push((b), (s), sizeof(s) - 1)
@@ -134,7 +152,7 @@ static void write_sym_buf(Buf *b, const DocSymbol *sym) {
     PUSH_LIT(b, ",\"detail\":");
     buf_push_json_str(b, sym->id ? sym->id : "");
     PUSH_LIT(b, ",\"kind\":");
-    buf_push_uint(b, (uint32_t)sym->kind);
+    buf_push_uint(b, (uint32_t)symbol_kind_for(sym->keyword));
     PUSH_LIT(b, ",\"range\":");
     write_range_buf(b, sym->range);
     PUSH_LIT(b, ",\"selectionRange\":");

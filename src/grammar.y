@@ -43,8 +43,9 @@ typedef struct {
 }
 
 %{
-#include "parser.h"        /* Token, DocSymbol, ParseResult, LspRange, etc. */
-#include "grammar.tab.h"   /* TK_* / KW_* constants, YYSTYPE */
+#include "parser.h"           /* Token, DocSymbol, ParseResult, LspRange, etc. */
+#include "grammar.tab.h"      /* TK_* / KW_* constants, YYSTYPE */
+#include "document_symbol.h"  /* symbol_kind_for() */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,7 +62,6 @@ extern void push_doc_symbol    (ParseResult *r, DocSymbol *s);
 extern void push_included_file (ParseResult *r, const char *quoted_text);
 extern void push_diagnostic(ParseResult *r, LspRange range, int severity,
                              const char *msg);
-extern int  symbol_kind_for(int keyword);
 extern void push_dep_ref   (int bang_count, const char *path,
                              DocSymbol *owner, LspPos start, LspPos end);
 
@@ -111,7 +111,6 @@ static void symarr_push(SymArr *a, DocSymbol *s) {
 static DocSymbol *alloc_doc_symbol(Token kw, Token id, Token name) {
     DocSymbol *s = calloc(1, sizeof(DocSymbol));
     if (!s) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    s->kind    = symbol_kind_for(kw.kind);
     s->keyword = kw.kind;
 
     if (id.text) {

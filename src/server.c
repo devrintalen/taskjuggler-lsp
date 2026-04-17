@@ -1077,14 +1077,14 @@ static const DocSymbol *find_sym_at_pos(DocSymbol *const *syms, int n, LspPos po
     return NULL;
 }
 
-/* Return a human-readable label for a DocSymbol kind. */
-static const char *sym_kind_label(int kind) {
-    switch (kind) {
-    case SK_FUNCTION: return "Task";
-    case SK_OBJECT:   return "Resource";
-    case SK_VARIABLE: return "Account";
-    case SK_EVENT:    return "Shift";
-    case SK_MODULE:   return "Project";
+/* Return a human-readable label for a DocSymbol keyword. */
+static const char *sym_kind_label(int keyword) {
+    switch (keyword) {
+    case KW_TASK:     return "Task";
+    case KW_RESOURCE: return "Resource";
+    case KW_ACCOUNT:  return "Account";
+    case KW_SHIFT:    return "Shift";
+    case KW_PROJECT:  return "Project";
     default:          return "Symbol";
     }
 }
@@ -1128,7 +1128,7 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
         if (!sym) goto keyword_hover;
 
         /* Build: "**<Kind> `<id>`** — <name>" */
-        const char *label    = sym_kind_label(sym->kind);
+        const char *label    = sym_kind_label(sym->keyword);
         const char *sym_id   = sym->id ? sym->id : "";
         const char *sym_name = sym->name   ? sym->name   : "";
         /* Stack buffer — label(≤8) + id + name + 32 bytes punctuation */

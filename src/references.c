@@ -23,13 +23,13 @@
  *
  * Find-references is answered from two data structures already in ParseResult:
  *
- *   doc_symbols — the symbol tree; each SK_FUNCTION node has a selection_range
+ *   doc_symbols — the symbol tree; each KW_TASK node has a selection_range
  *                 covering its declaration identifier, and each node may carry
  *                 def_links[] pointing to resolved target DocSymbols
  *
  * At query time, build_references_json():
  *
- *   1. Walks the doc_symbols tree of the cursor document to find the SK_FUNCTION
+ *   1. Walks the doc_symbols tree of the cursor document to find the KW_TASK
  *      (task) whose selection_range contains the cursor.  Returns null if none.
  *
  *   2. Walks the symbol tree of EVERY supplied document looking for
@@ -41,13 +41,14 @@
  *
  * ── Trigger constraint ───────────────────────────────────────────────────
  *
- * Only task declaration identifiers (SK_FUNCTION selection_range) trigger a
+ * Only task declaration identifiers (KW_TASK selection_range) trigger a
  * response.  Positioning the cursor on a reference in a depends/precedes
  * clause, on a keyword, or on a non-task symbol returns null.
  */
 
 #include "references.h"
 #include "document_symbol.h"
+#include "grammar.tab.h"
 #include <string.h>
 
 /* Returns 1 if position p falls within range r (both endpoints inclusive). */
@@ -59,11 +60,11 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-/* Walk the symbol tree depth-first to find the SK_FUNCTION node whose
+/* Walk the symbol tree depth-first to find the KW_TASK node whose
  * selection_range contains pos.  Returns NULL if no such node exists. */
 static const DocSymbol *find_task_at(DocSymbol *const *syms, int n, LspPos pos) {
     for (int i = 0; i < n; i++) {
-        if (syms[i]->kind == SK_FUNCTION
+        if (syms[i]->keyword == KW_TASK
                 && pos_in_range(pos, syms[i]->selection_range))
             return syms[i];
         const DocSymbol *found =

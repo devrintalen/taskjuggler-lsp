@@ -68,13 +68,6 @@ typedef struct {
 
 void token_free(Token *t);
 
-/* ── DocSymbol kinds (LSP SymbolKind values) ─────────────────────────────── */
-
-#define SK_MODULE   2
-#define SK_FUNCTION 12
-#define SK_VARIABLE 13
-#define SK_OBJECT   19
-#define SK_EVENT    24
 
 /* ── DocSymbol ───────────────────────────────────────────────────────────── *
  *
@@ -125,7 +118,6 @@ typedef struct ReferenceLink ReferenceLink;
 struct DocSymbol {
     char      *name;           /* display name, heap-allocated */
     char      *id;             /* TJP identifier, heap-allocated */
-    int        kind;           /* SK_* constant */
     int        keyword;        /* KW_* constant from grammar.tab.h */
     LspRange   range;
     LspRange   selection_range;

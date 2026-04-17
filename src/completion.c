@@ -424,14 +424,14 @@ static void idlist_free(IdList *il) {
  *
  * syms   — symbol array to search
  * n      — number of entries in syms
- * kind   — SK_FUNCTION, SK_OBJECT, etc. — only symbols of this kind are added
+ * kind   — KW_TASK, KW_RESOURCE, etc. — only symbols of this keyword are added
  * prefix — dot-path prefix to prepend; "" for the root level
  * out    — IdList to append results to
  */
 static void collect_ids(DocSymbol *const *syms, int n, int kind,
                          const char *prefix, IdList *out) {
     for (int i = 0; i < n; i++) {
-        if (syms[i]->kind == kind && syms[i]->id && syms[i]->id[0]) {
+        if (syms[i]->keyword == kind && syms[i]->id && syms[i]->id[0]) {
             size_t plen = prefix ? strlen(prefix) : 0;
             size_t dlen = strlen(syms[i]->id);
             size_t qlen = plen ? plen + 1 + dlen : dlen;
@@ -622,12 +622,14 @@ static int istarts(const char *s, const char *prefix) {
     return 1;
 }
 
-/* Map a SymbolKind constant to the corresponding CompletionItemKind value. */
-static int completion_kind_for(int sym_kind) {
-    if (sym_kind == SK_FUNCTION) return CIK_FUNCTION;
-    if (sym_kind == SK_OBJECT)   return CIK_CLASS;
-    if (sym_kind == SK_VARIABLE) return CIK_VARIABLE;
-    return CIK_REFERENCE;
+/* Map a KW_* keyword constant to the corresponding CompletionItemKind value. */
+static int completion_kind_for(int keyword) {
+    switch (keyword) {
+    case KW_TASK:     return CIK_FUNCTION;
+    case KW_RESOURCE: return CIK_CLASS;
+    case KW_ACCOUNT:  return CIK_VARIABLE;
+    default:          return CIK_REFERENCE;
+    }
 }
 
 /* ── build_completions_json ──────────────────────────────────────────────── */
@@ -681,21 +683,21 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
         int id_kind = 0;
         if (ac.keyword) {
             if (strcmp(ac.keyword, "depends")  == 0 || strcmp(ac.keyword, "precedes") == 0)
-                id_kind = SK_FUNCTION;
+                id_kind = KW_TASK;
             else if (strcmp(ac.keyword, "allocate")   == 0
                   || strcmp(ac.keyword, "responsible") == 0
                   || strcmp(ac.keyword, "managers")    == 0)
-                id_kind = SK_OBJECT;
+                id_kind = KW_RESOURCE;
             else if (strcmp(ac.keyword, "chargeset") == 0
                   || strcmp(ac.keyword, "balance")   == 0)
-                id_kind = SK_VARIABLE;
+                id_kind = KW_ACCOUNT;
         }
 
         if (id_kind) {
             IdList ids = {0};
             char   bang_prefix[64] = "";
 
-            if (id_kind == SK_FUNCTION
+            if (id_kind == KW_TASK
                     && ac.keyword
                     && (strcmp(ac.keyword, "depends") == 0
                      || strcmp(ac.keyword, "precedes") == 0)) {

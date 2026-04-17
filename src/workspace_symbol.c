@@ -17,7 +17,7 @@
  */
 
 #include "workspace_symbol.h"
-#include "document_symbol.h"
+#include "document_symbol.h"  /* symbol_kind_for() */
 
 #include <string.h>
 #include <strings.h>
@@ -48,7 +48,7 @@ static void collect_recursive(yyjson_mut_doc *doc, const char *query,
         if (matches) {
             yyjson_mut_val *entry = yyjson_mut_obj(doc);
             yyjson_mut_obj_add_str(doc, entry, "name", name);
-            yyjson_mut_obj_add_uint(doc, entry, "kind", (uint64_t)sym->kind);
+            yyjson_mut_obj_add_uint(doc, entry, "kind", (uint64_t)symbol_kind_for(sym->keyword));
             if (container)
                 yyjson_mut_obj_add_str(doc, entry, "containerName", container);
 

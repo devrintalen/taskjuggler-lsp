@@ -240,7 +240,7 @@ void push_included_file(ParseResult *r, const char *quoted_text) {
 
 /* Navigate the symbol tree following the path segments path[0..plen-1] and
  * return the children array at that node.  Transparently descends into
- * SK_MODULE (project) nodes when matching path segments against tasks.
+ * KW_PROJECT nodes when matching path segments against tasks.
  *
  * syms  — root-level symbols to start from
  * n     — number of entries in syms
@@ -255,12 +255,13 @@ DocSymbol *const *doc_symbol_find_path(DocSymbol *const *syms, int n,
                                        int *out_n) {
     if (plen == 0) { *out_n = n; return syms; }
     for (int i = 0; i < n; i++) {
-        if (syms[i]->kind == SK_FUNCTION && strcmp(syms[i]->id, path[0]) == 0)
+        if (syms[i]->keyword == KW_TASK && syms[i]->id &&
+                strcmp(syms[i]->id, path[0]) == 0)
             return doc_symbol_find_path(syms[i]->children, syms[i]->num_children,
                                         path + 1, plen - 1, out_n);
         /* Transparently traverse project containers so that task scope paths
          * rooted inside a project body resolve correctly. */
-        if (syms[i]->kind == SK_MODULE) {
+        if (syms[i]->keyword == KW_PROJECT) {
             DocSymbol *const *found = doc_symbol_find_path(
                 syms[i]->children, syms[i]->num_children, path, plen, out_n);
             if (found) return found;
@@ -400,25 +401,21 @@ static void push_ref_link(DocSymbol *sym, ReferenceLink link) {
     sym->ref_links[sym->num_ref_links++] = link;
 }
 
-/* Find a task DocSymbol by searching a children array for the first segment,
- * then descending through subsequent segments.  Returns the matched node,
- * or NULL if any segment is not found.  Only KW_TASK nodes are matched;
- * KW_PROJECT nodes are transparently descended. */
+/* Find a task DocSymbol by navigating to the parent scope via
+ * doc_symbol_find_path(), then scanning for the final segment.
+ * Returns the matched node, or NULL if any segment is not found.
+ * Only KW_TASK nodes are matched at the leaf level. */
 static DocSymbol *find_task(DocSymbol **syms, int n,
                             char **segs, int nseg) {
     if (nseg == 0 || !segs) return NULL;
-    for (int i = 0; i < n; i++) {
-        if (syms[i]->keyword == KW_PROJECT) {
-            DocSymbol *found = find_task(syms[i]->children,
-                                         syms[i]->num_children, segs, nseg);
-            if (found) return found;
-        }
-        if (syms[i]->keyword == KW_TASK && syms[i]->id &&
-                strcmp(syms[i]->id, segs[0]) == 0) {
-            if (nseg == 1) return syms[i];
-            return find_task(syms[i]->children, syms[i]->num_children,
-                             segs + 1, nseg - 1);
-        }
+    int parent_n = 0;
+    DocSymbol *const *parent = doc_symbol_find_path(
+        syms, n, (const char **)segs, nseg - 1, &parent_n);
+    if (!parent) return NULL;
+    for (int i = 0; i < parent_n; i++) {
+        if (parent[i]->keyword == KW_TASK && parent[i]->id &&
+                strcmp(parent[i]->id, segs[nseg - 1]) == 0)
+            return parent[i];
     }
     return NULL;
 }
@@ -504,23 +501,6 @@ static void resolve_dep_refs(ParseResult *r) {
 
     /* Free the global accumulator — fully consumed */
     free_dep_refs();
-}
-
-/* ── Keyword classification ──────────────────────────────────────────────── */
-
-/* Returns the LSP SymbolKind constant for a top-level declaration keyword.
- * Defaults to SK_FUNCTION (task) for any keyword not explicitly listed.
- *
- * kw — keyword string (e.g. "project", "resource", "task")
- */
-int symbol_kind_for(int keyword) {
-    switch (keyword) {
-    case KW_PROJECT:  return SK_MODULE;
-    case KW_RESOURCE: return SK_OBJECT;
-    case KW_ACCOUNT:  return SK_VARIABLE;
-    case KW_SHIFT:    return SK_EVENT;
-    default:          return SK_FUNCTION;
-    }
 }
 
 /* ── Public parse() entry point ──────────────────────────────────────────── */
