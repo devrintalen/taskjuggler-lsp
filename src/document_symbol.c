@@ -132,7 +132,7 @@ static void write_sym_buf(Buf *b, const DocSymbol *sym) {
     PUSH_LIT(b, "{\"name\":");
     buf_push_json_str(b, sym->name   ? sym->name   : "");
     PUSH_LIT(b, ",\"detail\":");
-    buf_push_json_str(b, sym->detail ? sym->detail : "");
+    buf_push_json_str(b, sym->id ? sym->id : "");
     PUSH_LIT(b, ",\"kind\":");
     buf_push_uint(b, (uint32_t)sym->kind);
     PUSH_LIT(b, ",\"range\":");
@@ -143,7 +143,7 @@ static void write_sym_buf(Buf *b, const DocSymbol *sym) {
         PUSH_LIT(b, ",\"children\":[");
         for (int i = 0; i < sym->num_children; i++) {
             if (i > 0) buf_push(b, ",", 1);
-            write_sym_buf(b, &sym->children[i]);
+            write_sym_buf(b, sym->children[i]);
         }
         buf_push(b, "]", 1);
     }
@@ -161,12 +161,12 @@ static void write_sym_buf(Buf *b, const DocSymbol *sym) {
  * n       — number of entries in syms
  * out_len — receives the byte count of the returned string
  */
-char *build_document_symbols_json(const DocSymbol *syms, int n, size_t *out_len) {
+char *build_document_symbols_json(DocSymbol *const *syms, int n, size_t *out_len) {
     Buf b = {0};
     buf_push(&b, "[", 1);
     for (int i = 0; i < n; i++) {
         if (i > 0) buf_push(&b, ",", 1);
-        write_sym_buf(&b, &syms[i]);
+        write_sym_buf(&b, syms[i]);
     }
     buf_push(&b, "]", 1);
     *out_len = b.len;

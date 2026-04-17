@@ -28,5 +28,5 @@
  * entry's location field.  Values are allocated in doc.
  */
 void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
-                                const DocSymbol *syms, int n,
+                                DocSymbol *const *syms, int n,
                                 const char *uri, yyjson_mut_val *arr);

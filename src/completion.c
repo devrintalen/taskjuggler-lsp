@@ -428,27 +428,27 @@ static void idlist_free(IdList *il) {
  * prefix — dot-path prefix to prepend; "" for the root level
  * out    — IdList to append results to
  */
-static void collect_ids(const DocSymbol *syms, int n, int kind,
+static void collect_ids(DocSymbol *const *syms, int n, int kind,
                          const char *prefix, IdList *out) {
     for (int i = 0; i < n; i++) {
-        if (syms[i].kind == kind && syms[i].detail && syms[i].detail[0]) {
+        if (syms[i]->kind == kind && syms[i]->id && syms[i]->id[0]) {
             size_t plen = prefix ? strlen(prefix) : 0;
-            size_t dlen = strlen(syms[i].detail);
+            size_t dlen = strlen(syms[i]->id);
             size_t qlen = plen ? plen + 1 + dlen : dlen;
             char *qid = malloc(qlen + 1);
             if (!qid) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
             if (!prefix || !prefix[0]) {
-                memcpy(qid, syms[i].detail, dlen + 1);
+                memcpy(qid, syms[i]->id, dlen + 1);
             } else {
                 memcpy(qid, prefix, plen);
                 qid[plen] = '.';
-                memcpy(qid + plen + 1, syms[i].detail, dlen + 1);
+                memcpy(qid + plen + 1, syms[i]->id, dlen + 1);
             }
-            idlist_push(out, qid, syms[i].name ? syms[i].name : "");
-            collect_ids(syms[i].children, syms[i].num_children, kind, qid, out);
+            idlist_push(out, qid, syms[i]->name ? syms[i]->name : "");
+            collect_ids(syms[i]->children, syms[i]->num_children, kind, qid, out);
             free(qid);
         } else {
-            collect_ids(syms[i].children, syms[i].num_children, kind, prefix, out);
+            collect_ids(syms[i]->children, syms[i]->num_children, kind, prefix, out);
         }
     }
 }
@@ -648,8 +648,8 @@ static int completion_kind_for(int sym_kind) {
 yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const TokenSpan *tokens, int num_tokens,
                                         LspPos cursor,
-                                        const DocSymbol *symbols, int num_symbols,
-                                        const DocSymbol **extra_pools,
+                                        DocSymbol *const *symbols, int num_symbols,
+                                        DocSymbol *const **extra_pools,
                                         const int *extra_counts,
                                         int num_extra,
                                         const char *text) {
@@ -715,8 +715,8 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                     /* Scoped (no bangs): collect siblings from current file.
                      * Also include top-level IDs from other files since
                      * absolute references are always valid. */
-                    const DocSymbol *ch;
-                    int           ch_n;
+                    DocSymbol *const *ch;
+                    int               ch_n;
                     ch = doc_symbol_find_path(symbols, num_symbols,
                                              (const char **)scope, scope_n, &ch_n);
                     if (ch) collect_ids(ch, ch_n, id_kind, "", &ids);
@@ -724,8 +724,8 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                         collect_ids(extra_pools[e], extra_counts[e], id_kind, "", &ids);
                 } else if (bang_count <= scope_n) {
                     /* Bang navigation: relative to current scope, file-local only */
-                    const DocSymbol *ch;
-                    int           ch_n;
+                    DocSymbol *const *ch;
+                    int               ch_n;
                     ch = doc_symbol_find_path(symbols, num_symbols,
                                              (const char **)scope, scope_n - bang_count,
                                              &ch_n);

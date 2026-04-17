@@ -34,12 +34,12 @@
  * arr       — JSON array to append matching entries to
  */
 static void collect_recursive(yyjson_mut_doc *doc, const char *query,
-                               const DocSymbol *syms, int n,
+                               DocSymbol *const *syms, int n,
                                const char *uri, const char *container,
                                yyjson_mut_val *arr)
 {
     for (int i = 0; i < n; i++) {
-        const DocSymbol *sym = &syms[i];
+        const DocSymbol *sym = syms[i];
         const char *name = sym->name ? sym->name : "";
 
         /* Empty query matches everything; otherwise case-insensitive substring. */
@@ -62,7 +62,8 @@ static void collect_recursive(yyjson_mut_doc *doc, const char *query,
         }
 
         if (sym->num_children > 0)
-            collect_recursive(doc, query, sym->children, sym->num_children,
+            collect_recursive(doc, query,
+                              sym->children, sym->num_children,
                               uri, name, arr);
     }
 }
@@ -78,7 +79,7 @@ static void collect_recursive(yyjson_mut_doc *doc, const char *query,
  * arr   — shared JSON array to append results to (across all documents)
  */
 void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
-                                const DocSymbol *syms, int n,
+                                DocSymbol *const *syms, int n,
                                 const char *uri, yyjson_mut_val *arr)
 {
     collect_recursive(doc, query, syms, n, uri, NULL, arr);

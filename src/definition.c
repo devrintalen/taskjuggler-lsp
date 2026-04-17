@@ -25,8 +25,8 @@
  * DocSymbol.  Each DefinitionLink records a source range (the reference
  * expression) and a target pointer (the resolved DocSymbol).
  *
- * These links are populated by diagnostics.c:revalidate_dep_refs() after
- * every document change for every successfully resolved dependency reference.
+ * These links are populated by parser.c:resolve_dep_refs() after every
+ * document change for every successfully resolved dependency reference.
  *
  * At query time, build_definition_json() walks the symbol tree looking for a
  * DefinitionLink whose source range contains the cursor and, when found,
@@ -53,15 +53,15 @@ static int pos_in_range(LspPos p, LspRange r) {
 
 /* Walk the symbol tree looking for a DefinitionLink whose source range
  * contains the cursor.  Returns a pointer to the matching link, or NULL. */
-const DefinitionLink *find_def_link_at(const DocSymbol *syms, int n,
+const DefinitionLink *find_def_link_at(DocSymbol *const *syms, int n,
                                        LspPos cursor) {
     for (int i = 0; i < n; i++) {
-        for (int j = 0; j < syms[i].num_def_links; j++) {
-            if (pos_in_range(cursor, syms[i].def_links[j].source))
-                return &syms[i].def_links[j];
+        for (int j = 0; j < syms[i]->num_def_links; j++) {
+            if (pos_in_range(cursor, syms[i]->def_links[j].source))
+                return &syms[i]->def_links[j];
         }
         const DefinitionLink *found =
-            find_def_link_at(syms[i].children, syms[i].num_children, cursor);
+            find_def_link_at(syms[i]->children, syms[i]->num_children, cursor);
         if (found) return found;
     }
     return NULL;
@@ -78,7 +78,7 @@ const DefinitionLink *find_def_link_at(const DocSymbol *syms, int n,
  * uri         — URI of the requesting document, used as fallback target URI
  */
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
-                                       const DocSymbol *symbols, int num_symbols,
+                                       DocSymbol *const *symbols, int num_symbols,
                                        LspPos cursor, const char *uri) {
     const DefinitionLink *link = find_def_link_at(symbols, num_symbols, cursor);
     if (!link) return NULL;

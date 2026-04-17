@@ -61,13 +61,13 @@ static int pos_in_range(LspPos p, LspRange r) {
 
 /* Walk the symbol tree depth-first to find the SK_FUNCTION node whose
  * selection_range contains pos.  Returns NULL if no such node exists. */
-static const DocSymbol *find_task_at(const DocSymbol *syms, int n, LspPos pos) {
+static const DocSymbol *find_task_at(DocSymbol *const *syms, int n, LspPos pos) {
     for (int i = 0; i < n; i++) {
-        if (syms[i].kind == SK_FUNCTION
-                && pos_in_range(pos, syms[i].selection_range))
-            return &syms[i];
+        if (syms[i]->kind == SK_FUNCTION
+                && pos_in_range(pos, syms[i]->selection_range))
+            return syms[i];
         const DocSymbol *found =
-            find_task_at(syms[i].children, syms[i].num_children, pos);
+            find_task_at(syms[i]->children, syms[i]->num_children, pos);
         if (found) return found;
     }
     return NULL;
@@ -76,11 +76,11 @@ static const DocSymbol *find_task_at(const DocSymbol *syms, int n, LspPos pos) {
 /* Walk the symbol tree and collect all DefinitionLinks whose target matches
  * the given task pointer.  Appends Location objects to arr. */
 static void collect_refs(yyjson_mut_doc *doc, yyjson_mut_val *arr,
-                         const DocSymbol *syms, int n,
+                         DocSymbol *const *syms, int n,
                          const DocSymbol *task, const char *doc_uri) {
     for (int i = 0; i < n; i++) {
-        for (int j = 0; j < syms[i].num_def_links; j++) {
-            const DefinitionLink *link = &syms[i].def_links[j];
+        for (int j = 0; j < syms[i]->num_def_links; j++) {
+            const DefinitionLink *link = &syms[i]->def_links[j];
             if (link->target != task) continue;
 
             yyjson_mut_val *location = yyjson_mut_obj(doc);
@@ -89,14 +89,14 @@ static void collect_refs(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                                    range_json(doc, link->source));
             yyjson_mut_arr_add_val(arr, location);
         }
-        collect_refs(doc, arr, syms[i].children, syms[i].num_children,
+        collect_refs(doc, arr, syms[i]->children, syms[i]->num_children,
                      task, doc_uri);
     }
 }
 
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
                                        const char *cursor_uri,
-                                       const DocSymbol *symbols, int num_symbols,
+                                       DocSymbol *const *symbols, int num_symbols,
                                        const RefDocLinks *all_docs, int num_docs,
                                        LspPos cursor) {
     const DocSymbol *task = find_task_at(symbols, num_symbols, cursor);

@@ -75,12 +75,6 @@
  *       │  for each document, gathers doc_symbols[] from all *other* open
  *       │  documents as extra symbol pools, then calls:
  *       │
- *       ├─► revalidate_dep_refs(&parse, extra_pools, …)   ← diagnostics.c
- *       │       resolves each raw_dep_ref against the local + extra pools:
- *       │         success → appends a DefinitionLink to def_links[]
- *       │         failure → appends an error Diagnostic to diagnostics[]
- *       │                   (starting at dep_diag_start)
- *       │
  *       └─► publish_diagnostics(uri, &parse)              ← diagnostics.c
  *               serialises diagnostics[] and pushes a
  *               textDocument/publishDiagnostics notification to the editor
@@ -109,15 +103,13 @@
  *                        document_highlight → build_document_highlight_json()
  *
  *   def_links[]          definition         → build_definition_json()
- *                        references         → build_references_json()
+ *   (on DocSymbol)       references         → build_references_json()
  *                        hover              → resolved-ref hover (primary path)
  *                        document_highlight → build_document_highlight_json()
  *
  *   diagnostics[]        (pushed proactively via publish_diagnostics;
  *                         never queried on demand)
  *
- *   raw_dep_refs[]       (consumed only by revalidate_dep_refs;
- *                         not read by any query handler)
  *
  * OUTBOUND (server → editor)
  * ──────────────────────────
@@ -553,25 +545,9 @@ static yyjson_mut_val *make_response(yyjson_mut_doc *doc, yyjson_val *id,
  * dependency references are resolved against the current workspace state.
  */
 static void revalidate_all_docs(void) {
-    const DocSymbol *extra_pools[MAX_DOCS];
-    int              extra_counts[MAX_DOCS];
-    const char      *extra_uris[MAX_DOCS];
-
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
-
-        int num_extra = 0;
-        for (int j = 0; j < MAX_DOCS; j++) {
-            if (!docs[j].in_use || j == i) continue;
-            extra_pools[num_extra]  = docs[j].parse.doc_symbols;
-            extra_counts[num_extra] = docs[j].parse.num_doc_symbols;
-            extra_uris[num_extra]   = docs[j].uri;
-            num_extra++;
-        }
-
-        revalidate_dep_refs(&docs[i].parse,
-                            extra_pools, extra_counts, extra_uris,
-                            num_extra);
+        /* TODO: cross-file dep resolution with extra symbol pools */
         publish_diagnostics(docs[i].uri, &docs[i].parse);
     }
 }
@@ -1090,12 +1066,12 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
 /* Recursively search syms[n] for a DocSymbol whose selection_range.start
  * matches pos.  Returns a pointer into the array (not a copy); NULL if not found.
  */
-static const DocSymbol *find_sym_at_pos(const DocSymbol *syms, int n, LspPos pos) {
+static const DocSymbol *find_sym_at_pos(DocSymbol *const *syms, int n, LspPos pos) {
     for (int i = 0; i < n; i++) {
-        if (pos_cmp(syms[i].selection_range.start, pos) == 0)
-            return &syms[i];
-        const DocSymbol *child = find_sym_at_pos(syms[i].children,
-                                                  syms[i].num_children, pos);
+        if (pos_cmp(syms[i]->selection_range.start, pos) == 0)
+            return syms[i];
+        const DocSymbol *child = find_sym_at_pos(syms[i]->children,
+                                                  syms[i]->num_children, pos);
         if (child) return child;
     }
     return NULL;
@@ -1153,7 +1129,7 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
         /* Build: "**<Kind> `<id>`** — <name>" */
         const char *label    = sym_kind_label(sym->kind);
-        const char *sym_id   = sym->detail ? sym->detail : "";
+        const char *sym_id   = sym->id ? sym->id : "";
         const char *sym_name = sym->name   ? sym->name   : "";
         /* Stack buffer — label(≤8) + id + name + 32 bytes punctuation */
         char hover_text[512];
@@ -1274,9 +1250,9 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     int num_docs = 0;
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
-        all_docs[num_docs].uri       = docs[i].uri;
-        all_docs[num_docs].links     = docs[i].parse.def_links;
-        all_docs[num_docs].num_links = docs[i].parse.num_def_links;
+        all_docs[num_docs].uri         = docs[i].uri;
+        all_docs[num_docs].symbols     = docs[i].parse.doc_symbols;
+        all_docs[num_docs].num_symbols = docs[i].parse.num_doc_symbols;
         num_docs++;
     }
 
@@ -1312,8 +1288,6 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
 
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_document_highlight_json(doc,
-                                                            d->parse.def_links,
-                                                            d->parse.num_def_links,
                                                             d->parse.doc_symbols,
                                                             d->parse.num_doc_symbols,
                                                             d->parse.tok_spans,
@@ -1343,8 +1317,8 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
 
     LspPos pos         = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_definition_json(doc,
-                                                    d->parse.def_links,
-                                                    d->parse.num_def_links,
+                                                    d->parse.doc_symbols,
+                                                    d->parse.num_doc_symbols,
                                                     pos, uri);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1377,9 +1351,9 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
     /* Gather symbol pools from all other open documents */
-    const DocSymbol *extra_pools[MAX_DOCS];
-    int              extra_counts[MAX_DOCS];
-    int              num_extra = 0;
+    DocSymbol *const *extra_pools[MAX_DOCS];
+    int               extra_counts[MAX_DOCS];
+    int               num_extra = 0;
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use || &docs[i] == d) continue;
         extra_pools[num_extra]  = docs[i].parse.doc_symbols;

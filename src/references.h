@@ -29,8 +29,8 @@
  */
 typedef struct {
     const char      *uri;
-    const DocSymbol *symbols;
-    int              num_symbols;
+    DocSymbol *const *symbols;
+    int               num_symbols;
 } RefDocLinks;
 
 /*
@@ -54,6 +54,6 @@ typedef struct {
  */
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
                                        const char *cursor_uri,
-                                       const DocSymbol *symbols, int num_symbols,
+                                       DocSymbol *const *symbols, int num_symbols,
                                        const RefDocLinks *all_docs, int num_docs,
                                        LspPos cursor);

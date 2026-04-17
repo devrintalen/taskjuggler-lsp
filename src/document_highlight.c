@@ -24,7 +24,7 @@
  * Document-highlight is answered from three data structures in ParseResult:
  *
  *   doc_symbols — the symbol tree; each node has a selection_range covering
- *                 its declaration identifier, a detail field with the
+ *                 its declaration identifier, an id field with the
  *                 identifier text, and def_links[] with resolved references
  *   tok_spans   — flat ordered token array used to identify the token at the
  *                 cursor and to find per-segment ranges within dotted paths
@@ -72,13 +72,13 @@ static int range_eq(LspRange a, LspRange b) {
 /* Walk the symbol tree depth-first to find any node whose selection_range
  * contains pos.  Unlike find_task_at in references.c, this is not filtered
  * by kind — it matches tasks, resources, accounts, and all other symbols. */
-static const DocSymbol *find_symbol_at(const DocSymbol *syms, int n,
+static const DocSymbol *find_symbol_at(DocSymbol *const *syms, int n,
                                        LspPos pos) {
     for (int i = 0; i < n; i++) {
-        if (pos_in_range(pos, syms[i].selection_range))
-            return &syms[i];
+        if (pos_in_range(pos, syms[i]->selection_range))
+            return syms[i];
         const DocSymbol *found =
-            find_symbol_at(syms[i].children, syms[i].num_children, pos);
+            find_symbol_at(syms[i]->children, syms[i]->num_children, pos);
         if (found) return found;
     }
     return NULL;
@@ -87,14 +87,13 @@ static const DocSymbol *find_symbol_at(const DocSymbol *syms, int n,
 /* Walk the symbol tree depth-first to find the first node whose detail
  * matches the given string.  Used for intermediate segments in dotted
  * dependency paths where no def_link directly targets the segment. */
-static const DocSymbol *find_symbol_by_detail(const DocSymbol *syms, int n,
-                                              const char *detail) {
+static const DocSymbol *find_symbol_by_id(DocSymbol *const *syms, int n,
+                                          const char *id) {
     for (int i = 0; i < n; i++) {
-        if (syms[i].detail && strcmp(syms[i].detail, detail) == 0)
-            return &syms[i];
+        if (syms[i]->id && strcmp(syms[i]->id, id) == 0)
+            return syms[i];
         const DocSymbol *found =
-            find_symbol_by_detail(syms[i].children, syms[i].num_children,
-                                  detail);
+            find_symbol_by_id(syms[i]->children, syms[i]->num_children, id);
         if (found) return found;
     }
     return NULL;
@@ -102,17 +101,17 @@ static const DocSymbol *find_symbol_by_detail(const DocSymbol *syms, int n,
 
 /* Walk the symbol tree looking for a same-document DefinitionLink whose
  * source range contains pos.  Returns the link's target, or NULL. */
-static const DocSymbol *find_link_target_at(const DocSymbol *syms, int n,
+static const DocSymbol *find_link_target_at(DocSymbol *const *syms, int n,
                                             LspPos pos) {
     for (int i = 0; i < n; i++) {
-        for (int j = 0; j < syms[i].num_def_links; j++) {
-            const DefinitionLink *link = &syms[i].def_links[j];
+        for (int j = 0; j < syms[i]->num_def_links; j++) {
+            const DefinitionLink *link = &syms[i]->def_links[j];
             if (link->target_uri) continue;
             if (pos_in_range(pos, link->source))
                 return link->target;
         }
         const DocSymbol *found =
-            find_link_target_at(syms[i].children, syms[i].num_children, pos);
+            find_link_target_at(syms[i]->children, syms[i]->num_children, pos);
         if (found) return found;
     }
     return NULL;
@@ -131,12 +130,12 @@ static void push_highlight(yyjson_mut_doc *doc, yyjson_mut_val *arr,
 /* Walk the symbol tree collecting Read highlights for all same-document
  * def_links that target the given symbol. */
 static void collect_ref_highlights(yyjson_mut_doc *doc, yyjson_mut_val *arr,
-                                   const DocSymbol *syms, int n,
+                                   DocSymbol *const *syms, int n,
                                    const DocSymbol *target,
                                    const TokenSpan *tokens, int num_tokens) {
     for (int i = 0; i < n; i++) {
-        for (int j = 0; j < syms[i].num_def_links; j++) {
-            const DefinitionLink *link = &syms[i].def_links[j];
+        for (int j = 0; j < syms[i]->num_def_links; j++) {
+            const DefinitionLink *link = &syms[i]->def_links[j];
             if (link->target_uri) continue;
 
             int link_matches = (link->target == target);
@@ -144,7 +143,7 @@ static void collect_ref_highlights(yyjson_mut_doc *doc, yyjson_mut_val *arr,
             for (int t = 0; t < num_tokens; t++) {
                 if (tokens[t].token_kind != TK_IDENT) continue;
                 if (!tokens[t].text) continue;
-                if (strcmp(tokens[t].text, target->detail) != 0) continue;
+                if (strcmp(tokens[t].text, target->id) != 0) continue;
 
                 LspRange token_range = { tokens[t].start, tokens[t].end };
 
@@ -157,14 +156,14 @@ static void collect_ref_highlights(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                     push_highlight(doc, arr, token_range, 2);
             }
         }
-        collect_ref_highlights(doc, arr, syms[i].children, syms[i].num_children,
+        collect_ref_highlights(doc, arr, syms[i]->children, syms[i]->num_children,
                                target, tokens, num_tokens);
     }
 }
 
 yyjson_mut_val *build_document_highlight_json(
     yyjson_mut_doc *doc,
-    const DocSymbol *symbols, int num_symbols,
+    DocSymbol *const *symbols, int num_symbols,
     const TokenSpan *tokens, int num_tokens,
     LspPos cursor) {
 
@@ -185,18 +184,18 @@ yyjson_mut_val *build_document_highlight_json(
         const DocSymbol *link_target =
             find_link_target_at(symbols, num_symbols, cursor);
         if (link_target) {
-            if (link_target->detail && tok.text
-                    && strcmp(link_target->detail, tok.text) == 0) {
+            if (link_target->id && tok.text
+                    && strcmp(link_target->id, tok.text) == 0) {
                 target = link_target;
             } else {
-                target = find_symbol_by_detail(symbols, num_symbols, tok.text);
+                target = find_symbol_by_id(symbols, num_symbols, tok.text);
             }
         }
     }
 
     free(tok.text);
 
-    if (!target || !target->detail) return NULL;
+    if (!target || !target->id) return NULL;
 
     /* Step 3: collect highlights. */
     yyjson_mut_val *arr = yyjson_mut_arr(doc);

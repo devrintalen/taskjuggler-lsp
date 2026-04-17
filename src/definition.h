@@ -33,12 +33,12 @@
  * Values are allocated in doc; caller owns doc.
  */
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
-                                       const DocSymbol *symbols, int num_symbols,
+                                       DocSymbol *const *symbols, int num_symbols,
                                        LspPos cursor, const char *uri);
 
 /*
  * Walk the symbol tree looking for a DefinitionLink whose source range
  * contains the cursor.  Returns a pointer to the matching link, or NULL.
  */
-const DefinitionLink *find_def_link_at(const DocSymbol *syms, int n,
+const DefinitionLink *find_def_link_at(DocSymbol *const *syms, int n,
                                        LspPos cursor);

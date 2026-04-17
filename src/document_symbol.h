@@ -30,4 +30,4 @@ yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r);
  * Caller owns the returned memory and must free() it.
  * Intended to be cached and embedded via yyjson_mut_rawncpy.
  */
-char *build_document_symbols_json(const DocSymbol *syms, int n, size_t *out_len);
+char *build_document_symbols_json(DocSymbol *const *syms, int n, size_t *out_len);
