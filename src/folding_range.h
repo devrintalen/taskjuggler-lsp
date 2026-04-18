@@ -26,11 +26,14 @@
  * textDocument/foldingRange responses.
  *
  * Two kinds of ranges are emitted:
- *   "region"  — brace-delimited blocks ({ ... }), covering at least two lines
+ *   "region"  — brace-delimited blocks and bracket pairs, covering at least
+ *               two lines
  *   "comment" — multi-line block comments
  *
  * Values are allocated in doc; caller owns doc.
  */
 yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
                                            const TokenSpan *spans,
-                                           int num_spans);
+                                           int num_spans,
+                                           DocSymbol *const *symbols,
+                                           int num_symbols);

@@ -92,13 +92,14 @@
  *   tok_spans[]          hover              → active_keyword_at() (fallback)
  *                        signature_help     → active_context()
  *                        completion         → build_completions_json()
- *                        folding_range      → build_folding_ranges_json()
+ *                        folding_range      → build_folding_ranges_json() (brackets, comments)
  *                        semantic_tokens    → build_semantic_tokens_json()
  *                        document_highlight → build_document_highlight_json()
  *
  *   doc_symbols[]        document_symbol    → build_document_symbols_json()
  *                        workspace_symbol   → collect_workspace_symbols()
  *                        completion         → build_completions_json() (IDs)
+ *                        folding_range      → build_folding_ranges_json() (brace blocks)
  *                        references         → build_references_json()
  *                        document_highlight → build_document_highlight_json()
  *
@@ -1059,7 +1060,9 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
 
     yyjson_mut_val *arr = build_folding_ranges_json(doc,
                                                      d->parse.tok_spans,
-                                                     d->parse.num_tok_spans);
+                                                     d->parse.num_tok_spans,
+                                                     d->parse.doc_symbols,
+                                                     d->parse.num_doc_symbols);
     return make_response(doc, id, arr);
 }
 

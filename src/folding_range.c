@@ -19,17 +19,10 @@
 #include "folding_range.h"
 #include "grammar.tab.h"
 
-/* Maximum nesting depth for brace matching. */
-#define MAX_BRACE_DEPTH 256
+/* Maximum nesting depth for bracket matching. */
+#define MAX_BRACKET_DEPTH 256
 
-/* Append one FoldingRange entry to arr.
- *
- * doc        — the mutable JSON document that will own new values
- * arr        — the JSON array to append to
- * start_line — first line of the range (0-based)
- * end_line   — last line of the range (0-based)
- * kind       — LSP FoldingRangeKind string: "region" or "comment"
- */
+/* Append one FoldingRange entry to arr. */
 static void push_range(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                         uint32_t start_line, uint32_t end_line,
                         const char *kind) {
@@ -40,45 +33,31 @@ static void push_range(yyjson_mut_doc *doc, yyjson_mut_val *arr,
     yyjson_mut_arr_add_val(arr, obj);
 }
 
-/* Build the JSON array for a textDocument/foldingRange response.
- * Scans the token stream for matching brace/bracket pairs and multi-line
- * block comments, emitting one FoldingRange per spanning pair.
- *
- * doc       — the mutable JSON document that will own the returned value
- * spans     — token span array from the ParseResult
- * num_spans — number of entries in spans
- */
-yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
-                                           const TokenSpan *spans, int num_spans) {
-    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+/* Recursively emit "region" folding ranges from the DocSymbol tree. */
+static void emit_symbol_ranges(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                                DocSymbol *const *syms, int n) {
+    for (int i = 0; i < n; i++) {
+        if (syms[i]->range.end.line > syms[i]->range.start.line)
+            push_range(doc, arr,
+                       syms[i]->range.start.line,
+                       syms[i]->range.end.line, "region");
+        emit_symbol_ranges(doc, arr, syms[i]->children, syms[i]->num_children);
+    }
+}
 
-    /* Stacks of opening-line numbers for unmatched { and [ tokens */
-    uint32_t brace_stack[MAX_BRACE_DEPTH];
-    int brace_depth = 0;
-
-    uint32_t bracket_stack[MAX_BRACE_DEPTH];
+/* Scan tokens for bracket pairs and block comments that are not represented
+ * in the DocSymbol tree. */
+static void emit_token_ranges(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                               const TokenSpan *spans, int num_spans) {
+    uint32_t bracket_stack[MAX_BRACKET_DEPTH];
     int bracket_depth = 0;
 
     for (int i = 0; i < num_spans; i++) {
         const TokenSpan *s = &spans[i];
 
         switch (s->token_kind) {
-        case TK_LBRACE:
-            if (brace_depth < MAX_BRACE_DEPTH)
-                brace_stack[brace_depth++] = s->start.line;
-            break;
-
-        case TK_RBRACE:
-            if (brace_depth > 0) {
-                uint32_t start_line = brace_stack[--brace_depth];
-                uint32_t end_line   = s->start.line;
-                if (end_line > start_line)
-                    push_range(doc, arr, start_line, end_line, "region");
-            }
-            break;
-
         case TK_LBRACKET:
-            if (bracket_depth < MAX_BRACE_DEPTH)
+            if (bracket_depth < MAX_BRACKET_DEPTH)
                 bracket_stack[bracket_depth++] = s->start.line;
             break;
 
@@ -100,6 +79,19 @@ yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
             break;
         }
     }
+}
 
+/* Build the JSON array for a textDocument/foldingRange response.
+ * Emits folding ranges from two sources:
+ *   — DocSymbol tree ranges for brace-delimited blocks ({ ... })
+ *   — Token scan for bracket pairs ([ ... ]) and multi-line block comments
+ */
+yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
+                                           const TokenSpan *spans, int num_spans,
+                                           DocSymbol *const *symbols,
+                                           int num_symbols) {
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+    emit_symbol_ranges(doc, arr, symbols, num_symbols);
+    emit_token_ranges(doc, arr, spans, num_spans);
     return arr;
 }
