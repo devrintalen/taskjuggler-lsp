@@ -32,7 +32,38 @@
 #define CIK_KEYWORD   14
 #define CIK_REFERENCE 18
 
-/* ── cursor_in_string_or_scissors ────────────────────────────────────────── */
+/* ── String utilities ────────────────────────────────────────────────────── */
+
+/* Returns 1 if needle is a case-insensitive substring of haystack. */
+static int icontains(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return 0;
+    size_t hn = strlen(haystack), nn = strlen(needle);
+    if (nn > hn) return 0;
+    for (size_t i = 0; i <= hn - nn; i++) {
+        int match = 1;
+        for (size_t j = 0; j < nn; j++) {
+            if (tolower((unsigned char)haystack[i + j]) != tolower((unsigned char)needle[j])) {
+                match = 0;
+                break;
+            }
+        }
+        if (match) return 1;
+    }
+    return 0;
+}
+
+/* Returns 1 if s begins with prefix (case-insensitive). */
+static int istarts(const char *s, const char *prefix) {
+    if (!s || !prefix) return 0;
+    size_t pn = strlen(prefix);
+    for (size_t i = 0; i < pn; i++) {
+        if (tolower((unsigned char)s[i]) != tolower((unsigned char)prefix[i]))
+            return 0;
+    }
+    return 1;
+}
+
+/* ── Cursor suppression ──────────────────────────────────────────────────── */
 
 /* Find the start of the line containing cursor in text.  Returns a pointer
  * into text at the first character of that line.
@@ -132,80 +163,94 @@ static int cursor_in_scissors(const char *text, LspPos cursor,
     return 0;
 }
 
-/* ── block_stack ─────────────────────────────────────────────────────────── */
+/* ── Token context ───────────────────────────────────────────────────────── */
 
-/* Returns 1 if token kind k introduces a block whose body has a
- * context-specific keyword set (i.e. keywords valid inside that block differ
- * from the top-level set).
- */
-static int is_block_opener_kind(int k) {
-    return k == KW_PROJECT   || k == KW_TASK        || k == KW_RESOURCE
-        || k == KW_ACCOUNT   || k == KW_SHIFT       || k == KW_SCENARIO
-        || k == KW_SUPPLEMENT|| k == KW_EXTEND      || k == KW_JOURNALENTRY
-        || k == KW_LIMITS    || k == KW_NAVIGATOR   || k == KW_TASKREPORT
-        || k == KW_TEXTREPORT|| k == KW_RESOURCEREPORT;
-}
-
-/* Build the stack of block-opener keyword names enclosing cursor.
- * Each entry is the keyword that opened the corresponding { block.
- * Returns a heap-allocated array of heap-allocated strings; caller must free
- * with free_block_stack().
- *
- * tokens     — token span array from the ParseResult
- * num_tokens — number of entries in tokens
- * cursor     — position used as the scan stop point
- * out_n      — set to the number of entries returned
- */
-static char **block_stack(const TokenSpan *tokens, int num_tokens,
-                           LspPos cursor, int *out_n) {
-    char **stack = NULL;
-    int    n = 0, cap = 0;
-    char  *pending = NULL;
-
+/* Returns heap-allocated text of the first non-comment token on cursor's line,
+ * or NULL if no such ident exists. */
+static char *line_first_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     for (int i = 0; i < num_tokens; i++) {
-        const TokenSpan *tok = &tokens[i];
-        if (tok->token_kind == TK_EOF || pos_cmp(cursor, tok->start) < 0) break;
-
-        switch (tok->token_kind) {
-        case TK_LINE_COMMENT:
-        case TK_BLOCK_COMMENT:
-            break;
-
-        case TK_LBRACE:
-            if (n >= cap) {
-                cap = cap ? cap * 2 : 8;
-                char **tmp = realloc(stack, cap * sizeof(char *));
-                if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-                stack = tmp;
-            }
-            stack[n++] = pending ? pending : strdup("");
-            pending = NULL;
-            break;
-
-        case TK_RBRACE:
-            free(pending);
-            pending = NULL;
-            if (n > 0) { free(stack[--n]); }
-            break;
-
-        default:
-            if (is_block_opener_kind(tok->token_kind) && tok->text) {
-                free(pending);
-                pending = strdup(tok->text);
-            }
-            break;
-        }
+        const TokenSpan *t = &tokens[i];
+        if (t->token_kind == TK_EOF) break;
+        if (t->token_kind == TK_LINE_COMMENT || t->token_kind == TK_BLOCK_COMMENT) continue;
+        if (t->start.line < cursor.line) continue;
+        if (t->start.line > cursor.line) break;
+        /* First non-comment token on cursor.line */
+        if (t->token_kind == TK_IDENT && t->text) return strdup(t->text);
+        return NULL;
     }
-
-    free(pending);
-    *out_n = n;
-    return stack;
+    return NULL;
 }
 
-/* Free a block_stack result returned by block_stack(). */
-static void free_block_stack(char **stack, int n) {
-    for (int i = 0; i < n; i++) free(stack[i]);
-    free(stack);
+/* Returns 1 if there are no non-whitespace tokens before cursor on its line. */
+static int at_statement_start(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
+    for (int i = 0; i < num_tokens; i++) {
+        const TokenSpan *t = &tokens[i];
+        if (t->token_kind == TK_EOF) break;
+        if (t->token_kind == TK_LINE_COMMENT || t->token_kind == TK_BLOCK_COMMENT) continue;
+        if (t->start.line > cursor.line) break;
+        if (t->start.line == cursor.line && t->start.character < cursor.character)
+            return 0;
+    }
+    return 1;
+}
+
+/* Return the identifier text at cursor if cursor is on a TK_IDENT token,
+ * otherwise return an empty heap-allocated string.  Caller must free.
+ */
+static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
+    TokenSpan t = tok_span_at(tokens, num_tokens, cursor);
+    if (t.token_kind == TK_IDENT) {
+        char *txt = t.text; /* take ownership */
+        t.text = NULL;
+        return txt;
+    }
+    free(t.text);
+    return strdup("");
+}
+
+/* ── Position helpers ────────────────────────────────────────────────────── */
+
+/* Return 1 if cursor falls within range (inclusive of start, exclusive of end). */
+static int range_contains(LspRange range, LspPos cursor) {
+    return pos_cmp(cursor, range.start) >= 0
+        && pos_cmp(cursor, range.end)   <  0;
+}
+
+/* ── Block stack ─────────────────────────────────────────────────────────── */
+
+/* Recursively walk the DocSymbol tree to find the chain of keyword constants
+ * for blocks enclosing cursor (outermost first).
+ */
+static void block_stack_walk(DocSymbol *const *syms, int n, LspPos cursor,
+                             int **result, int *out_n, int *cap) {
+    for (int i = 0; i < n; i++) {
+        if (!range_contains(syms[i]->range, cursor))
+            continue;
+
+        if (*out_n >= *cap) {
+            *cap = *cap ? *cap * 2 : 8;
+            int *tmp = realloc(*result, *cap * sizeof(int));
+            if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+            *result = tmp;
+        }
+        (*result)[(*out_n)++] = syms[i]->keyword;
+
+        block_stack_walk(syms[i]->children, syms[i]->num_children,
+                         cursor, result, out_n, cap);
+        return;  /* cursor can only be inside one sibling */
+    }
+}
+
+/* Build the stack of block-opener keyword constants enclosing cursor.
+ * Returns a heap-allocated array of KW_* values; caller must free.
+ */
+static int *block_stack(DocSymbol *const *symbols, int num_symbols,
+                        LspPos cursor, int *out_n) {
+    int *result = NULL;
+    int cap = 0;
+    *out_n = 0;
+    block_stack_walk(symbols, num_symbols, cursor, &result, out_n, &cap);
+    return result;
 }
 
 /* ── Keyword tables ──────────────────────────────────────────────────────── */
@@ -317,78 +362,24 @@ static const KwEntry ACCOUNT_KWS[] = {
  * Walks the stack from innermost outward, skipping structural-but-transparent
  * blocks (limits, supplement, etc.) until a recognized type is found.
  * Returns TOPLEVEL_KWS if no recognized block is found.
- *
- * stack — block-opener keyword name array from block_stack()
- * n     — number of entries in stack
  */
-static const KwEntry *kws_for_stack(char **stack, int n) {
+static const KwEntry *kws_for_stack(const int *stack, int n) {
     for (int i = n - 1; i >= 0; i--) {
-        const char *kw = stack[i];
-        if (strcmp(kw, "task")     == 0) return TASK_KWS;
-        if (strcmp(kw, "resource") == 0) return RESOURCE_KWS;
-        if (strcmp(kw, "project")  == 0) return PROJECT_KWS;
-        if (strcmp(kw, "account")  == 0) return ACCOUNT_KWS;
-        /* Terminal / skip-upward blocks */
-        if (strcmp(kw, "limits")        == 0 || strcmp(kw, "journalentry") == 0
-         || strcmp(kw, "supplement")    == 0 || strcmp(kw, "extend")       == 0
-         || strcmp(kw, "scenario")      == 0 || strcmp(kw, "navigator")    == 0
-         || strcmp(kw, "taskreport")    == 0 || strcmp(kw, "textreport")   == 0
-         || strcmp(kw, "resourcereport") == 0 || strcmp(kw, "shift")       == 0)
+        int kw = stack[i];
+        if (kw == KW_TASK)     return TASK_KWS;
+        if (kw == KW_RESOURCE) return RESOURCE_KWS;
+        if (kw == KW_PROJECT)  return PROJECT_KWS;
+        if (kw == KW_ACCOUNT)  return ACCOUNT_KWS;
+        /* Transparent blocks: look through to the parent */
+        if (kw == KW_LIMITS    || kw == KW_JOURNALENTRY
+         || kw == KW_SUPPLEMENT|| kw == KW_EXTEND
+         || kw == KW_SCENARIO  || kw == KW_NAVIGATOR
+         || kw == KW_TASKREPORT|| kw == KW_TEXTREPORT
+         || kw == KW_RESOURCEREPORT || kw == KW_SHIFT)
             continue;
         break;
     }
     return TOPLEVEL_KWS;
-}
-
-/* ── Line helpers ────────────────────────────────────────────────────────── */
-
-/* Returns heap-allocated text of the first non-comment token on cursor's line,
- * or NULL if no such ident exists. */
-static char *line_first_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
-    for (int i = 0; i < num_tokens; i++) {
-        const TokenSpan *t = &tokens[i];
-        if (t->token_kind == TK_EOF) break;
-        if (t->token_kind == TK_LINE_COMMENT || t->token_kind == TK_BLOCK_COMMENT) continue;
-        if (t->start.line < cursor.line) continue;
-        if (t->start.line > cursor.line) break;
-        /* First non-comment token on cursor.line */
-        if (t->token_kind == TK_IDENT && t->text) return strdup(t->text);
-        return NULL;
-    }
-    return NULL;
-}
-
-/* Returns 1 if there are no non-whitespace tokens before cursor on its line. */
-static int at_statement_start(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
-    for (int i = 0; i < num_tokens; i++) {
-        const TokenSpan *t = &tokens[i];
-        if (t->token_kind == TK_EOF) break;
-        if (t->token_kind == TK_LINE_COMMENT || t->token_kind == TK_BLOCK_COMMENT) continue;
-        if (t->start.line > cursor.line) break;
-        if (t->start.line == cursor.line && t->start.character < cursor.character)
-            return 0;
-    }
-    return 1;
-}
-
-/* ── partial_word ────────────────────────────────────────────────────────── */
-
-/* Return the identifier text at cursor if cursor is on a TK_IDENT token,
- * otherwise return an empty heap-allocated string.  Caller must free.
- *
- * tokens     — token span array from the ParseResult
- * num_tokens — number of entries in tokens
- * cursor     — cursor position
- */
-static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
-    TokenSpan t = tok_span_at(tokens, num_tokens, cursor);
-    if (t.token_kind == TK_IDENT) {
-        char *txt = t.text; /* take ownership */
-        t.text = NULL;
-        return txt;
-    }
-    free(t.text);
-    return strdup("");
 }
 
 /* ── ID collection ───────────────────────────────────────────────────────── */
@@ -421,12 +412,6 @@ static void idlist_free(IdList *il) {
  * dot-separated fully-qualified paths relative to prefix.  Symbols of other
  * kinds are recursed into but not emitted (so task children of a project
  * container are still collected).
- *
- * syms   — symbol array to search
- * n      — number of entries in syms
- * kind   — KW_TASK, KW_RESOURCE, etc. — only symbols of this keyword are added
- * prefix — dot-path prefix to prepend; "" for the root level
- * out    — IdList to append results to
  */
 static void collect_ids(DocSymbol *const *syms, int n, int kind,
                          const char *prefix, IdList *out) {
@@ -455,117 +440,50 @@ static void collect_ids(DocSymbol *const *syms, int n, int kind,
 
 /* ── Scope-aware helpers ─────────────────────────────────────────────────── */
 
-typedef struct { char **ids; uint32_t *depths; int n, cap; } ScopeStack;
+/* Recursively walk the DocSymbol tree to find the chain of task IDs enclosing
+ * cursor.  Appends each enclosing task's id to result (outermost first via
+ * pre-order traversal).  Returns the total depth found.
+ */
+static int task_scope_walk(DocSymbol *const *syms, int n, LspPos cursor,
+                           char ***result, int *out_n, int *cap) {
+    for (int i = 0; i < n; i++) {
+        if (!range_contains(syms[i]->range, cursor))
+            continue;
 
-/* Append (id, depth) to ss, growing it if needed. */
-static void ss_push(ScopeStack *ss, const char *id, uint32_t depth) {
-    if (ss->n >= ss->cap) {
-        ss->cap = ss->cap ? ss->cap * 2 : 8;
-        char    **ti = realloc(ss->ids,    ss->cap * sizeof(char *));
-        uint32_t *td = realloc(ss->depths, ss->cap * sizeof(uint32_t));
-        if (!ti || !td) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        ss->ids    = ti;
-        ss->depths = td;
+        if (syms[i]->keyword == KW_TASK && syms[i]->id && syms[i]->id[0]) {
+            if (*out_n >= *cap) {
+                *cap = *cap ? *cap * 2 : 8;
+                char **tmp = realloc(*result, *cap * sizeof(char *));
+                if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+                *result = tmp;
+            }
+            (*result)[(*out_n)++] = strdup(syms[i]->id);
+        }
+
+        task_scope_walk(syms[i]->children, syms[i]->num_children,
+                        cursor, result, out_n, cap);
+        return 1;  /* cursor can only be inside one sibling */
     }
-    ss->ids[ss->n]    = strdup(id);
-    ss->depths[ss->n] = depth;
-    ss->n++;
+    return 0;
 }
 
-/* Walk tokens up to cursor and return the ordered list of task IDs enclosing
- * the cursor position (outermost first).  Used to determine the bang-relative
- * dep-ref scope for dependency completions.
+/* Return the ordered list of task IDs enclosing cursor (outermost first).
+ * Used to determine the bang-relative dep-ref scope for dependency completions.
  * Returns a heap-allocated array of heap-allocated strings; caller must free
  * each string and the array.
- *
- * tokens     — token span array from the ParseResult
- * num_tokens — number of entries in tokens
- * cursor     — position used as the scan stop point
- * out_n      — set to the number of task IDs returned
  */
-static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
-                                  LspPos cursor, int *out_n) {
-    typedef enum { SS_SCAN, SS_EXPECT_ID, SS_BEFORE_LBRACE } SState;
-
-    SState sstate     = SS_SCAN;
-    char  *pending_id = NULL;
-    uint32_t brace_depth = 0;
-    ScopeStack ts = {0};
-
-    for (int i = 0; i < num_tokens; i++) {
-        const TokenSpan *tok = &tokens[i];
-        if (tok->token_kind == TK_EOF || pos_cmp(cursor, tok->start) < 0) break;
-
-        switch (tok->token_kind) {
-        case TK_LINE_COMMENT:
-        case TK_BLOCK_COMMENT:
-            break;
-
-        case TK_LBRACE:
-            brace_depth++;
-            if (sstate == SS_BEFORE_LBRACE && pending_id) {
-                ss_push(&ts, pending_id, brace_depth);
-                free(pending_id);
-                pending_id = NULL;
-            }
-            sstate = SS_SCAN;
-            break;
-
-        case TK_RBRACE:
-            while (ts.n > 0 && ts.depths[ts.n - 1] >= brace_depth)
-                free(ts.ids[--ts.n]);
-            if (brace_depth > 0) brace_depth--;
-            sstate = SS_SCAN;
-            free(pending_id);
-            pending_id = NULL;
-            break;
-
-        case KW_TASK:
-            sstate = SS_EXPECT_ID;
-            free(pending_id);
-            pending_id = NULL;
-            break;
-
-        case TK_IDENT:
-            if (sstate == SS_EXPECT_ID && tok->text) {
-                free(pending_id);
-                pending_id = strdup(tok->text);
-                sstate     = SS_BEFORE_LBRACE;
-            }
-            break;
-
-        default:
-            if (sstate == SS_EXPECT_ID) {
-                sstate = SS_SCAN;
-                free(pending_id);
-                pending_id = NULL;
-            }
-            break;
-        }
-    }
-
-    free(pending_id);
-
-    /* Extract just the ids */
+static char **current_task_scope(DocSymbol *const *symbols, int num_symbols,
+                                 LspPos cursor, int *out_n) {
     char **result = NULL;
-    if (ts.n > 0) {
-        result = malloc(ts.n * sizeof(char *));
-        for (int i = 0; i < ts.n; i++) result[i] = ts.ids[i];
-        free(ts.ids);
-        ts.ids = NULL;
-    }
-    *out_n = ts.n;
-    free(ts.depths);
+    int cap = 0;
+    *out_n = 0;
+    task_scope_walk(symbols, num_symbols, cursor, &result, out_n, &cap);
     return result;
 }
 
 /* Count the number of consecutive `!` tokens immediately before the cursor,
  * skipping any trailing partial identifier and any comments.
  * Used to determine the bang depth for dep-ref scope navigation.
- *
- * tokens     — token span array from the ParseResult
- * num_tokens — number of entries in tokens
- * cursor     — position used as the scan stop point
  */
 static int count_leading_bangs(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     /* Find index past the last non-comment token before (or at) cursor */
@@ -591,36 +509,7 @@ static int count_leading_bangs(const TokenSpan *tokens, int num_tokens, LspPos c
     return count;
 }
 
-/* ── Helper: check if needle is a case-insensitive substring of haystack ── */
-
-/* Returns 1 if needle is a case-insensitive substring of haystack. */
-static int icontains(const char *haystack, const char *needle) {
-    if (!haystack || !needle) return 0;
-    size_t hn = strlen(haystack), nn = strlen(needle);
-    if (nn > hn) return 0;
-    for (size_t i = 0; i <= hn - nn; i++) {
-        int match = 1;
-        for (size_t j = 0; j < nn; j++) {
-            if (tolower((unsigned char)haystack[i + j]) != tolower((unsigned char)needle[j])) {
-                match = 0;
-                break;
-            }
-        }
-        if (match) return 1;
-    }
-    return 0;
-}
-
-/* Returns 1 if s begins with prefix (case-insensitive). */
-static int istarts(const char *s, const char *prefix) {
-    if (!s || !prefix) return 0;
-    size_t pn = strlen(prefix);
-    for (size_t i = 0; i < pn; i++) {
-        if (tolower((unsigned char)s[i]) != tolower((unsigned char)prefix[i]))
-            return 0;
-    }
-    return 1;
-}
+/* ── Completion builders ─────────────────────────────────────────────────── */
 
 /* Map a KW_* keyword constant to the corresponding CompletionItemKind value. */
 static int completion_kind_for(int keyword) {
@@ -631,8 +520,6 @@ static int completion_kind_for(int keyword) {
     default:          return CIK_REFERENCE;
     }
 }
-
-/* ── build_completions_json ──────────────────────────────────────────────── */
 
 /* Return 1 if fw is a declaration keyword whose id/name the user is typing
  * (i.e. completions should be suppressed). */
@@ -679,7 +566,7 @@ static void collect_dep_ids(const TokenSpan *tokens, int num_tokens,
                             const int *extra_counts, int num_extra,
                             int id_kind, IdList *ids, char *bang_prefix) {
     int scope_n = 0;
-    char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
+    char **scope = current_task_scope(symbols, num_symbols, cursor, &scope_n);
     int bang_count = count_leading_bangs(tokens, num_tokens, cursor);
 
     for (int i = 0; i < bang_count; i++)
@@ -774,7 +661,7 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
 static int build_keyword_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                      const TokenSpan *tokens, int num_tokens,
                                      LspPos cursor, const char *partial,
-                                     char **stack, int stack_n) {
+                                     const int *stack, int stack_n) {
     int typing = (partial[0] != '\0')
               || at_statement_start(tokens, num_tokens, cursor);
     if (!typing) return 0;
@@ -816,7 +703,7 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
 
     /* Gather cursor context: enclosing block stack, partial word, first word */
     int    stack_n    = 0;
-    char **stack      = block_stack(tokens, num_tokens, cursor, &stack_n);
+    int   *stack      = block_stack(symbols, num_symbols, cursor, &stack_n);
     char  *partial    = partial_word(tokens, num_tokens, cursor);
     char  *first_word = line_first_word(tokens, num_tokens, cursor);
 
@@ -853,7 +740,7 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
 
 done:
     /* Clean up and wrap items in a CompletionList */
-    free_block_stack(stack, stack_n);
+    free(stack);
     free(partial);
     free(first_word);
 
