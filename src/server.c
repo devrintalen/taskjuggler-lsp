@@ -1066,20 +1066,6 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, arr);
 }
 
-/* Recursively search syms[n] for a DocSymbol whose selection_range.start
- * matches pos.  Returns a pointer into the array (not a copy); NULL if not found.
- */
-static const DocSymbol *find_sym_at_pos(DocSymbol *const *syms, int n, LspPos pos) {
-    for (int i = 0; i < n; i++) {
-        if (pos_cmp(syms[i]->selection_range.start, pos) == 0)
-            return syms[i];
-        const DocSymbol *child = find_sym_at_pos(syms[i]->children,
-                                                  syms[i]->num_children, pos);
-        if (child) return child;
-    }
-    return NULL;
-}
-
 /* Return a human-readable label for a DocSymbol keyword. */
 static const char *sym_kind_label(int keyword) {
     switch (keyword) {

@@ -70,16 +70,16 @@ static int range_eq(LspRange a, LspRange b) {
 }
 
 /* Walk the symbol tree depth-first to find any node whose selection_range
- * contains pos.  Unlike find_task_at in references.c, this is not filtered
- * by kind — it matches tasks, resources, accounts, and all other symbols. */
+ * contains pos.  Uses each symbol's range to skip subtrees that cannot
+ * contain pos.  Not filtered by kind — matches all symbol types. */
 static const DocSymbol *find_symbol_at(DocSymbol *const *syms, int n,
                                        LspPos pos) {
     for (int i = 0; i < n; i++) {
+        if (!pos_in_range(pos, syms[i]->range))
+            continue;
         if (pos_in_range(pos, syms[i]->selection_range))
             return syms[i];
-        const DocSymbol *found =
-            find_symbol_at(syms[i]->children, syms[i]->num_children, pos);
-        if (found) return found;
+        return find_symbol_at(syms[i]->children, syms[i]->num_children, pos);
     }
     return NULL;
 }

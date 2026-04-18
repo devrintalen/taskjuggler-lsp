@@ -60,15 +60,16 @@ static int pos_in_range(LspPos p, LspRange r) {
 }
 
 /* Walk the symbol tree depth-first to find the KW_TASK node whose
- * selection_range contains pos.  Returns NULL if no such node exists. */
+ * selection_range contains pos.  Uses each symbol's range to skip
+ * subtrees that cannot contain pos.  Returns NULL if no match. */
 static const DocSymbol *find_task_at(DocSymbol *const *syms, int n, LspPos pos) {
     for (int i = 0; i < n; i++) {
+        if (!pos_in_range(pos, syms[i]->range))
+            continue;
         if (syms[i]->keyword == KW_TASK
                 && pos_in_range(pos, syms[i]->selection_range))
             return syms[i];
-        const DocSymbol *found =
-            find_task_at(syms[i]->children, syms[i]->num_children, pos);
-        if (found) return found;
+        return find_task_at(syms[i]->children, syms[i]->num_children, pos);
     }
     return NULL;
 }
