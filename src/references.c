@@ -32,12 +32,11 @@
  *   1. Walks the doc_symbols tree of the cursor document to find the KW_TASK
  *      (task) whose selection_range contains the cursor.  Returns null if none.
  *
- *   2. Walks the symbol tree of EVERY supplied document looking for
- *      DefinitionLinks whose target pointer matches the task found in step 1.
+ *   2. Iterates the target task's ref_links[] to collect all incoming
+ *      references (same-document and cross-document).
  *
- *   3. Returns a JSON array of Location objects, one per matching link.
- *      The array may be empty if no dependency references point to the task
- *      across the whole workspace.
+ *   3. Returns a JSON array of Location objects, one per reference.
+ *      The array may be empty if no dependency references point to the task.
  *
  * ── Trigger constraint ───────────────────────────────────────────────────
  *
@@ -74,40 +73,23 @@ static const DocSymbol *find_task_at(DocSymbol *const *syms, int n, LspPos pos) 
     return NULL;
 }
 
-/* Walk the symbol tree and collect all DefinitionLinks whose target matches
- * the given task pointer.  Appends Location objects to arr. */
-static void collect_refs(yyjson_mut_doc *doc, yyjson_mut_val *arr,
-                         DocSymbol *const *syms, int n,
-                         const DocSymbol *task, const char *doc_uri) {
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < syms[i]->num_def_links; j++) {
-            const DefinitionLink *link = &syms[i]->def_links[j];
-            if (link->target != task) continue;
-
-            yyjson_mut_val *location = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_str(doc, location, "uri", doc_uri);
-            yyjson_mut_obj_add_val(doc, location, "range",
-                                   range_json(doc, link->source));
-            yyjson_mut_arr_add_val(arr, location);
-        }
-        collect_refs(doc, arr, syms[i]->children, syms[i]->num_children,
-                     task, doc_uri);
-    }
-}
-
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
                                        const char *cursor_uri,
                                        DocSymbol *const *symbols, int num_symbols,
-                                       const RefDocLinks *all_docs, int num_docs,
                                        LspPos cursor) {
     const DocSymbol *task = find_task_at(symbols, num_symbols, cursor);
     if (!task) return NULL;
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    for (int d = 0; d < num_docs; d++) {
-        const RefDocLinks *rdl = &all_docs[d];
-        collect_refs(doc, arr, rdl->symbols, rdl->num_symbols,
-                     task, rdl->uri);
+    for (int i = 0; i < task->num_ref_links; i++) {
+        const ReferenceLink *ref = &task->ref_links[i];
+        const char *uri = ref->source_uri ? ref->source_uri : cursor_uri;
+
+        yyjson_mut_val *location = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc, location, "uri", uri);
+        yyjson_mut_obj_add_val(doc, location, "range",
+                               range_json(doc, ref->source));
+        yyjson_mut_arr_add_val(arr, location);
     }
     return arr;
 }

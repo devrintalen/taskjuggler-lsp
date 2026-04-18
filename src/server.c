@@ -100,12 +100,12 @@
  *                        workspace_symbol   → collect_workspace_symbols()
  *                        completion         → build_completions_json() (IDs)
  *                        folding_range      → build_folding_ranges_json() (brace blocks)
- *                        references         → build_references_json()
  *                        document_highlight → build_document_highlight_json()
  *
  *   def_links[]          definition         → build_definition_json()
- *   (on DocSymbol)       references         → build_references_json()
- *                        hover              → resolved-ref hover (primary path)
+ *   (on DocSymbol)       hover              → resolved-ref hover (primary path)
+ *
+ *   ref_links[]          references         → build_references_json()
  *                        document_highlight → build_document_highlight_json()
  *
  *   diagnostics[]        (pushed proactively via publish_diagnostics;
@@ -1247,24 +1247,11 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    /* Collect def_links from every open document so that references in files
-     * other than the cursor document are included in the result. */
-    RefDocLinks all_docs[MAX_DOCS];
-    int num_docs = 0;
-    for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use) continue;
-        all_docs[num_docs].uri         = docs[i].uri;
-        all_docs[num_docs].symbols     = docs[i].parse.doc_symbols;
-        all_docs[num_docs].num_symbols = docs[i].parse.num_doc_symbols;
-        num_docs++;
-    }
-
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_references_json(doc,
                                                     uri,
                                                     d->parse.doc_symbols,
                                                     d->parse.num_doc_symbols,
-                                                    all_docs, num_docs,
                                                     pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);

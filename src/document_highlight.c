@@ -100,19 +100,22 @@ static const DocSymbol *find_symbol_by_id(DocSymbol *const *syms, int n,
 }
 
 /* Walk the symbol tree looking for a same-document DefinitionLink whose
- * source range contains pos.  Returns the link's target, or NULL. */
+ * source range contains pos.  Uses each symbol's range to skip subtrees
+ * that cannot contain pos.  Returns the link's target, or NULL. */
 static const DocSymbol *find_link_target_at(DocSymbol *const *syms, int n,
                                             LspPos pos) {
     for (int i = 0; i < n; i++) {
+        if (!pos_in_range(pos, syms[i]->range))
+            continue;
+
         for (int j = 0; j < syms[i]->num_def_links; j++) {
             const DefinitionLink *link = &syms[i]->def_links[j];
             if (link->target_uri) continue;
             if (pos_in_range(pos, link->source))
                 return link->target;
         }
-        const DocSymbol *found =
-            find_link_target_at(syms[i]->children, syms[i]->num_children, pos);
-        if (found) return found;
+        return find_link_target_at(syms[i]->children, syms[i]->num_children,
+                                   pos);
     }
     return NULL;
 }
@@ -127,37 +130,29 @@ static void push_highlight(yyjson_mut_doc *doc, yyjson_mut_val *arr,
     yyjson_mut_arr_add_val(arr, obj);
 }
 
-/* Walk the symbol tree collecting Read highlights for all same-document
- * def_links that target the given symbol. */
+/* Collect Read highlights from the target symbol's ref_links.
+ * For each same-document reference, find the specific token within the
+ * ref source range that matches the target's id. */
 static void collect_ref_highlights(yyjson_mut_doc *doc, yyjson_mut_val *arr,
-                                   DocSymbol *const *syms, int n,
                                    const DocSymbol *target,
                                    const TokenSpan *tokens, int num_tokens) {
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < syms[i]->num_def_links; j++) {
-            const DefinitionLink *link = &syms[i]->def_links[j];
-            if (link->target_uri) continue;
+    for (int i = 0; i < target->num_ref_links; i++) {
+        const ReferenceLink *ref = &target->ref_links[i];
+        if (ref->source_uri) continue;
 
-            int link_matches = (link->target == target);
+        /* Scan only tokens within the ref source range */
+        for (int t = 0; t < num_tokens; t++) {
+            if (pos_cmp(tokens[t].start, ref->source.end) > 0) break;
+            if (pos_cmp(tokens[t].end, ref->source.start) < 0) continue;
+            if (tokens[t].token_kind != TK_IDENT) continue;
+            if (!tokens[t].text) continue;
+            if (strcmp(tokens[t].text, target->id) != 0) continue;
 
-            for (int t = 0; t < num_tokens; t++) {
-                if (tokens[t].token_kind != TK_IDENT) continue;
-                if (!tokens[t].text) continue;
-                if (strcmp(tokens[t].text, target->id) != 0) continue;
+            LspRange token_range = { tokens[t].start, tokens[t].end };
+            if (range_eq(token_range, target->selection_range)) continue;
 
-                LspRange token_range = { tokens[t].start, tokens[t].end };
-
-                if (!pos_in_range(tokens[t].start, link->source)) continue;
-                if (range_eq(token_range, target->selection_range)) continue;
-
-                if (link_matches)
-                    push_highlight(doc, arr, token_range, 2);
-                else
-                    push_highlight(doc, arr, token_range, 2);
-            }
+            push_highlight(doc, arr, token_range, 2);
         }
-        collect_ref_highlights(doc, arr, syms[i]->children, syms[i]->num_children,
-                               target, tokens, num_tokens);
     }
 }
 
@@ -204,8 +199,7 @@ yyjson_mut_val *build_document_highlight_json(
     push_highlight(doc, arr, target->selection_range, 3);
 
     /* 3b: reference sites — Read. */
-    collect_ref_highlights(doc, arr, symbols, num_symbols, target,
-                           tokens, num_tokens);
+    collect_ref_highlights(doc, arr, target, tokens, num_tokens);
 
     return arr;
 }

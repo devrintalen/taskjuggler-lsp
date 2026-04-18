@@ -22,32 +22,19 @@
 #include <yyjson.h>
 
 /*
- * One document's contribution to a cross-file references search.
- * uri         — the URI of the document (used as the Location uri in results)
- * symbols     — root-level symbol array from the document's ParseResult
- * num_symbols — number of entries in symbols
- */
-typedef struct {
-    const char      *uri;
-    DocSymbol *const *symbols;
-    int               num_symbols;
-} RefDocLinks;
-
-/*
  * Build a Location[] JSON array for textDocument/references.
  *
  * Returns NULL when the cursor is not on a task declaration identifier.
  * Returns an empty array when the cursor is on a task declaration that
  * no dependency reference points to anywhere in the workspace.
  * Otherwise returns an array of Location objects, one per dependency
- * reference that resolves to the task under the cursor, across all supplied
- * documents.
+ * reference that resolves to the task under the cursor, collected from
+ * the target's ref_links.
  *
- * cursor_uri   — URI of the document the cursor is in
+ * cursor_uri   — URI of the document the cursor is in (used for
+ *                same-document references where source_uri is NULL)
  * symbols/num_symbols — symbol tree of the cursor document (used to locate
  *                       the declaration under the cursor)
- * all_docs/num_docs   — one RefDocLinks entry per open document; all of these
- *                       are scanned for def_links that point to the target task
  * cursor       — the cursor position
  *
  * Values are allocated in doc; caller owns doc.
@@ -55,5 +42,4 @@ typedef struct {
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
                                        const char *cursor_uri,
                                        DocSymbol *const *symbols, int num_symbols,
-                                       const RefDocLinks *all_docs, int num_docs,
                                        LspPos cursor);

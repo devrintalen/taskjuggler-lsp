@@ -52,17 +52,21 @@ static int pos_in_range(LspPos p, LspRange r) {
 }
 
 /* Walk the symbol tree looking for a DefinitionLink whose source range
- * contains the cursor.  Returns a pointer to the matching link, or NULL. */
+ * contains the cursor.  Uses each symbol's range to skip subtrees that
+ * cannot contain the cursor, then checks only the enclosing symbol's
+ * def_links.  Returns a pointer to the matching link, or NULL. */
 const DefinitionLink *find_def_link_at(DocSymbol *const *syms, int n,
                                        LspPos cursor) {
     for (int i = 0; i < n; i++) {
+        if (!pos_in_range(cursor, syms[i]->range))
+            continue;
+
         for (int j = 0; j < syms[i]->num_def_links; j++) {
             if (pos_in_range(cursor, syms[i]->def_links[j].source))
                 return &syms[i]->def_links[j];
         }
-        const DefinitionLink *found =
-            find_def_link_at(syms[i]->children, syms[i]->num_children, cursor);
-        if (found) return found;
+        return find_def_link_at(syms[i]->children, syms[i]->num_children,
+                                cursor);
     }
     return NULL;
 }
