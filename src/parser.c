@@ -416,6 +416,12 @@ static DocSymbol *find_task(DocSymbol **syms, int n,
         if (parent[i]->keyword == KW_TASK && parent[i]->id &&
                 strcmp(parent[i]->id, segs[nseg - 1]) == 0)
             return parent[i];
+        if (parent[i]->keyword == KW_PROJECT) {
+            DocSymbol *found = find_task(parent[i]->children,
+                                         parent[i]->num_children,
+                                         segs + (nseg - 1), 1);
+            if (found) return found;
+        }
     }
     return NULL;
 }
