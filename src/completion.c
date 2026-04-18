@@ -634,18 +634,172 @@ static int completion_kind_for(int keyword) {
 
 /* ── build_completions_json ──────────────────────────────────────────────── */
 
+/* Return 1 if fw is a declaration keyword whose id/name the user is typing
+ * (i.e. completions should be suppressed). */
+static int is_decl_keyword(const char *fw) {
+    return fw && (strcmp(fw, "project")    == 0 || strcmp(fw, "task")       == 0
+              || strcmp(fw, "resource")   == 0 || strcmp(fw, "account")    == 0
+              || strcmp(fw, "shift")      == 0 || strcmp(fw, "scenario")   == 0
+              || strcmp(fw, "macro")      == 0 || strcmp(fw, "include")    == 0
+              || strcmp(fw, "supplement") == 0);
+}
+
+/* Map an active-context keyword string to the KW_* symbol kind that its
+ * arguments reference, or 0 if the keyword does not take ID arguments. */
+static int id_kind_for_keyword(const char *keyword) {
+    if (!keyword) return 0;
+    if (strcmp(keyword, "depends")  == 0 || strcmp(keyword, "precedes") == 0)
+        return KW_TASK;
+    if (strcmp(keyword, "allocate")   == 0
+     || strcmp(keyword, "responsible") == 0
+     || strcmp(keyword, "managers")    == 0)
+        return KW_RESOURCE;
+    if (strcmp(keyword, "chargeset") == 0
+     || strcmp(keyword, "balance")   == 0)
+        return KW_ACCOUNT;
+    return 0;
+}
+
+/* Collect IDs from all symbol pools (primary + extras). */
+static void collect_all_ids(DocSymbol *const *symbols, int num_symbols,
+                            DocSymbol *const **extra_pools,
+                            const int *extra_counts, int num_extra,
+                            int id_kind, IdList *ids) {
+    collect_ids(symbols, num_symbols, id_kind, "", ids);
+    for (int e = 0; e < num_extra; e++)
+        collect_ids(extra_pools[e], extra_counts[e], id_kind, "", ids);
+}
+
+/* Collect dep IDs for depends/precedes, applying scope and bang navigation.
+ * Writes the bang prefix string into bang_prefix (must be at least 64 bytes). */
+static void collect_dep_ids(const TokenSpan *tokens, int num_tokens,
+                            LspPos cursor,
+                            DocSymbol *const *symbols, int num_symbols,
+                            DocSymbol *const **extra_pools,
+                            const int *extra_counts, int num_extra,
+                            int id_kind, IdList *ids, char *bang_prefix) {
+    int scope_n = 0;
+    char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
+    int bang_count = count_leading_bangs(tokens, num_tokens, cursor);
+
+    for (int i = 0; i < bang_count; i++)
+        strncat(bang_prefix, "!", 64 - strlen(bang_prefix) - 1);
+
+    if (scope_n == 0) {
+        /* Global level: absolute references can target any file */
+        collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
+                        num_extra, id_kind, ids);
+    } else if (bang_count == 0) {
+        /* Scoped (no bangs): collect siblings from current file.
+         * Also include top-level IDs from other files since
+         * absolute references are always valid. */
+        int ch_n;
+        DocSymbol *const *ch = doc_symbol_find_path(
+            symbols, num_symbols, (const char **)scope, scope_n, &ch_n);
+        if (ch) collect_ids(ch, ch_n, id_kind, "", ids);
+        for (int e = 0; e < num_extra; e++)
+            collect_ids(extra_pools[e], extra_counts[e], id_kind, "", ids);
+    } else if (bang_count <= scope_n) {
+        /* Bang navigation: relative to current scope, file-local only */
+        int ch_n;
+        DocSymbol *const *ch = doc_symbol_find_path(
+            symbols, num_symbols,
+            (const char **)scope, scope_n - bang_count, &ch_n);
+        if (ch) collect_ids(ch, ch_n, id_kind, "", ids);
+    }
+    /* bang_count > scope_n: no valid completions */
+
+    for (int i = 0; i < scope_n; i++) free(scope[i]);
+    free(scope);
+}
+
+/* Build ID completion items for a depends/allocate/chargeset/etc. argument.
+ * Returns the number of items added to the items array. */
+static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
+                                const TokenSpan *tokens, int num_tokens,
+                                LspPos cursor, const char *partial,
+                                DocSymbol *const *symbols, int num_symbols,
+                                DocSymbol *const **extra_pools,
+                                const int *extra_counts, int num_extra,
+                                int id_kind, const char *keyword) {
+    IdList ids = {0};
+    char   bang_prefix[64] = "";
+
+    int is_dep = (strcmp(keyword, "depends") == 0
+               || strcmp(keyword, "precedes") == 0);
+
+    if (id_kind == KW_TASK && is_dep) {
+        collect_dep_ids(tokens, num_tokens, cursor,
+                        symbols, num_symbols,
+                        extra_pools, extra_counts, num_extra,
+                        id_kind, &ids, bang_prefix);
+    } else {
+        collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
+                        num_extra, id_kind, &ids);
+    }
+
+    int count = 0;
+    for (int i = 0; i < ids.n; i++) {
+        const char *id   = ids.items[i].id;
+        const char *name = ids.items[i].name;
+
+        int id_match   = (!partial[0]) || istarts(id, partial);
+        int name_match = (partial[0]) && icontains(name, partial);
+        if (!id_match && !name_match) continue;
+
+        yyjson_mut_val *item = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strcpy(doc, item, "label",    id);
+        yyjson_mut_obj_add_uint(doc,   item, "kind",     (uint64_t)completion_kind_for(id_kind));
+        yyjson_mut_obj_add_strcpy(doc, item, "detail",   name);
+        yyjson_mut_obj_add_str(doc,    item, "sortText", "0");
+
+        if (name_match && !id_match) {
+            yyjson_mut_obj_add_strcpy(doc, item, "filterText", partial);
+        } else if (bang_prefix[0] && !partial[0]) {
+            char ft[1024];
+            snprintf(ft, sizeof(ft), "%s%s", bang_prefix, id);
+            yyjson_mut_obj_add_strcpy(doc, item, "filterText", ft);
+        }
+
+        yyjson_mut_arr_add_val(items, item);
+        count++;
+    }
+
+    idlist_free(&ids);
+    return count;
+}
+
+/* Build keyword completion items for the current block context.
+ * Returns the number of items added to the items array. */
+static int build_keyword_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
+                                     const TokenSpan *tokens, int num_tokens,
+                                     LspPos cursor, const char *partial,
+                                     char **stack, int stack_n) {
+    int typing = (partial[0] != '\0')
+              || at_statement_start(tokens, num_tokens, cursor);
+    if (!typing) return 0;
+
+    int count = 0;
+    const KwEntry *table = kws_for_stack(stack, stack_n);
+    for (int i = 0; table[i].kw; i++) {
+        if (!partial[0] || istarts(table[i].kw, partial)) {
+            yyjson_mut_val *item = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_str(doc,  item, "label",    table[i].kw);
+            yyjson_mut_obj_add_uint(doc, item, "kind",     CIK_KEYWORD);
+            yyjson_mut_obj_add_str(doc,  item, "detail",   table[i].doc);
+            yyjson_mut_obj_add_str(doc,  item, "sortText", "1");
+            yyjson_mut_arr_add_val(items, item);
+            count++;
+        }
+    }
+    return count;
+}
+
 /* Build the CompletionList JSON response for textDocument/completion.
  * Returns null if there are no applicable completions at cursor.
  * Completions are returned in two mutually exclusive modes:
  *   — ID completions when inside a depends/precedes/allocate/etc. argument
  *   — Keyword completions when at a statement-start position
- *
- * doc         — the mutable JSON document that will own the returned value
- * tokens      — token span array from the ParseResult
- * num_tokens  — number of entries in tokens
- * cursor      — cursor position from the textDocument/completion request
- * symbols     — root-level symbol array for ID completions
- * num_symbols — number of entries in symbols
  */
 yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const TokenSpan *tokens, int num_tokens,
@@ -655,157 +809,53 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const int *extra_counts,
                                         int num_extra,
                                         const char *text) {
-    /* Suppress completions when the cursor is inside a string or scissors block */
+    /* Suppress completions inside strings and scissors blocks */
     if (cursor_in_dquote(text, cursor, tokens, num_tokens)
         || cursor_in_scissors(text, cursor, tokens, num_tokens))
         return yyjson_mut_null(doc);
 
-    int    stack_n = 0;
-    char **stack   = block_stack(tokens, num_tokens, cursor, &stack_n);
-    char  *partial = partial_word(tokens, num_tokens, cursor);
-    char  *fw      = line_first_word(tokens, num_tokens, cursor);
+    /* Gather cursor context: enclosing block stack, partial word, first word */
+    int    stack_n    = 0;
+    char **stack      = block_stack(tokens, num_tokens, cursor, &stack_n);
+    char  *partial    = partial_word(tokens, num_tokens, cursor);
+    char  *first_word = line_first_word(tokens, num_tokens, cursor);
 
     yyjson_mut_val *items = yyjson_mut_arr(doc);
     int item_count = 0;
 
     /* Suppress completions while typing a declaration keyword's id/name */
-    if (fw && (strcmp(fw, "project")    == 0 || strcmp(fw, "task")       == 0
-            || strcmp(fw, "resource")   == 0 || strcmp(fw, "account")    == 0
-            || strcmp(fw, "shift")      == 0 || strcmp(fw, "scenario")   == 0
-            || strcmp(fw, "macro")      == 0 || strcmp(fw, "include")    == 0
-            || strcmp(fw, "supplement") == 0)) {
+    if (is_decl_keyword(first_word))
         goto done;
-    }
 
-    /* ID completions based on active statement keyword */
+    /* Try ID completions (depends, allocate, chargeset, etc.) */
     {
         ActiveContext ac = active_context(tokens, num_tokens, cursor);
-        int id_kind = 0;
-        if (ac.keyword) {
-            if (strcmp(ac.keyword, "depends")  == 0 || strcmp(ac.keyword, "precedes") == 0)
-                id_kind = KW_TASK;
-            else if (strcmp(ac.keyword, "allocate")   == 0
-                  || strcmp(ac.keyword, "responsible") == 0
-                  || strcmp(ac.keyword, "managers")    == 0)
-                id_kind = KW_RESOURCE;
-            else if (strcmp(ac.keyword, "chargeset") == 0
-                  || strcmp(ac.keyword, "balance")   == 0)
-                id_kind = KW_ACCOUNT;
-        }
+        int id_kind = id_kind_for_keyword(ac.keyword);
 
         if (id_kind) {
-            IdList ids = {0};
-            char   bang_prefix[64] = "";
-
-            if (id_kind == KW_TASK
-                    && ac.keyword
-                    && (strcmp(ac.keyword, "depends") == 0
-                     || strcmp(ac.keyword, "precedes") == 0)) {
-                int scope_n = 0;
-                char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
-                int bang_count = count_leading_bangs(tokens, num_tokens, cursor);
-
-                for (int i = 0; i < bang_count; i++)
-                    strncat(bang_prefix, "!", sizeof(bang_prefix) - strlen(bang_prefix) - 1);
-
-                if (scope_n == 0) {
-                    /* Global level: absolute references can target any file */
-                    collect_ids(symbols, num_symbols, id_kind, "", &ids);
-                    for (int e = 0; e < num_extra; e++)
-                        collect_ids(extra_pools[e], extra_counts[e], id_kind, "", &ids);
-                } else if (bang_count == 0) {
-                    /* Scoped (no bangs): collect siblings from current file.
-                     * Also include top-level IDs from other files since
-                     * absolute references are always valid. */
-                    DocSymbol *const *ch;
-                    int               ch_n;
-                    ch = doc_symbol_find_path(symbols, num_symbols,
-                                             (const char **)scope, scope_n, &ch_n);
-                    if (ch) collect_ids(ch, ch_n, id_kind, "", &ids);
-                    for (int e = 0; e < num_extra; e++)
-                        collect_ids(extra_pools[e], extra_counts[e], id_kind, "", &ids);
-                } else if (bang_count <= scope_n) {
-                    /* Bang navigation: relative to current scope, file-local only */
-                    DocSymbol *const *ch;
-                    int               ch_n;
-                    ch = doc_symbol_find_path(symbols, num_symbols,
-                                             (const char **)scope, scope_n - bang_count,
-                                             &ch_n);
-                    if (ch) collect_ids(ch, ch_n, id_kind, "", &ids);
-                }
-                /* bang_count > scope_n: empty (no valid completions) */
-
-                for (int i = 0; i < scope_n; i++) free(scope[i]);
-                free(scope);
-            } else {
-                /* allocate, responsible, chargeset, etc.: flat lookup across all files */
-                collect_ids(symbols, num_symbols, id_kind, "", &ids);
-                for (int e = 0; e < num_extra; e++)
-                    collect_ids(extra_pools[e], extra_counts[e], id_kind, "", &ids);
-            }
-
-            for (int i = 0; i < ids.n; i++) {
-                const char *id   = ids.items[i].id;
-                const char *name = ids.items[i].name;
-
-                int id_match   = (!partial[0]) || istarts(id, partial);
-                int name_match = (partial[0]) && icontains(name, partial);
-
-                if (!id_match && !name_match) continue;
-
-                yyjson_mut_val *item = yyjson_mut_obj(doc);
-                /* Use strcpy variants: id/name come from IdList which is freed
-                 * before make_response, and ft is a local stack buffer. */
-                yyjson_mut_obj_add_strcpy(doc, item, "label",    id);
-                yyjson_mut_obj_add_uint(doc,   item, "kind",     (uint64_t)completion_kind_for(id_kind));
-                yyjson_mut_obj_add_strcpy(doc, item, "detail",   name);
-                yyjson_mut_obj_add_str(doc,    item, "sortText", "0");
-
-                if (name_match && !id_match) {
-                    yyjson_mut_obj_add_strcpy(doc, item, "filterText", partial);
-                } else if (bang_prefix[0] && !partial[0]) {
-                    char ft[1024];
-                    snprintf(ft, sizeof(ft), "%s%s", bang_prefix, id);
-                    yyjson_mut_obj_add_strcpy(doc, item, "filterText", ft);
-                }
-
-                yyjson_mut_arr_add_val(items, item);
-                item_count++;
-            }
-
-            idlist_free(&ids);
+            item_count = build_id_completions(doc, items,
+                                              tokens, num_tokens,
+                                              cursor, partial,
+                                              symbols, num_symbols,
+                                              extra_pools, extra_counts, num_extra,
+                                              id_kind, ac.keyword);
             free(ac.keyword);
-
-            /* Don't mix id completions with keyword completions */
-            goto done;
+            goto done;  /* Don't mix ID completions with keyword completions */
         }
         free(ac.keyword);
     }
 
-    /* Keyword completions: offer context-sensitive keywords when typing at
-     * the start of a statement or when the partial word prefix has no ID match */
-    {
-        int typing = (partial[0] != '\0') || at_statement_start(tokens, num_tokens, cursor);
-        if (typing) {
-            const KwEntry *table = kws_for_stack(stack, stack_n);
-            for (int i = 0; table[i].kw; i++) {
-                if (!partial[0] || istarts(table[i].kw, partial)) {
-                    yyjson_mut_val *item = yyjson_mut_obj(doc);
-                    yyjson_mut_obj_add_str(doc,  item, "label",    table[i].kw);
-                    yyjson_mut_obj_add_uint(doc, item, "kind",     CIK_KEYWORD);
-                    yyjson_mut_obj_add_str(doc,  item, "detail",   table[i].doc);
-                    yyjson_mut_obj_add_str(doc,  item, "sortText", "1");
-                    yyjson_mut_arr_add_val(items, item);
-                    item_count++;
-                }
-            }
-        }
-    }
+    /* Fall back to keyword completions for the current block context */
+    item_count = build_keyword_completions(doc, items,
+                                           tokens, num_tokens,
+                                           cursor, partial,
+                                           stack, stack_n);
 
 done:
+    /* Clean up and wrap items in a CompletionList */
     free_block_stack(stack, stack_n);
     free(partial);
-    free(fw);
+    free(first_word);
 
     if (item_count == 0)
         return yyjson_mut_null(doc);
