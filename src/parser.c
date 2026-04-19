@@ -305,12 +305,15 @@ static void assign_token_owners(ParseResult *r) {
     for (int t = 0; t < r->num_tok_spans; t++) {
         LspPos pos = r->tok_spans[t].start;
 
-        /* Pop frames whose current symbol's range has ended */
+        /* Pop frames whose current symbol's range has ended, or that have
+         * run out of siblings at this level.  The idx >= n check must come
+         * first: after popping and bumping the parent's idx, the parent can
+         * itself be exhausted, and we'd otherwise deref past the end. */
         while (depth > 1) {
             Frame *top = &stack[depth - 1];
-            DocSymbol *sym = top->syms[top->idx];
-            if (pos_cmp(pos, sym->range.end) < 0)
-                break;  /* still inside this symbol */
+            if (top->idx < top->n &&
+                pos_cmp(pos, top->syms[top->idx]->range.end) < 0)
+                break;  /* still inside current sibling at this level */
             /* Back up to parent level and advance to next sibling */
             depth--;
             stack[depth - 1].idx++;
