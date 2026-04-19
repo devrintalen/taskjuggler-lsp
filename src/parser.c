@@ -284,97 +284,91 @@ static void assign_parents(DocSymbol **syms, int n, DocSymbol *parent) {
 
 /* ── Token-to-symbol cross-referencing ──────────────────────────────────── */
 
-/* Assign each token span's owner to the deepest enclosing DocSymbol using
+/* Assign each token span's owner to the innermost enclosing DocSymbol using
  * a single linear sweep.  Both tok_spans[] and symbol ranges are in document
  * order, so we walk them in lockstep with a stack of open symbol scopes.
  *
- * Each stack frame tracks a symbol's children array and the current child
- * index, so we can advance to the next sibling without rescanning.
+ * Each stack frame holds a children array, the next-child index at that level,
+ * and a pointer to the scope symbol we descended into (NULL for the root
+ * frame, which has no enclosing scope).  The owner of a token is the scope
+ * of the deepest currently-open frame.
  *
  * Complexity: O(T + S) where T = num_tok_spans, S = total DocSymbols. */
 static void assign_token_owners(ParseResult *r) {
-    typedef struct { DocSymbol **syms; int n; int idx; } Frame;
+    typedef struct {
+        DocSymbol **children;
+        int         n;
+        int         idx;
+        DocSymbol  *scope;  /* symbol we descended into; NULL at root */
+    } Frame;
+
     int frame_cap = 64;
     Frame *stack = malloc((size_t)frame_cap * sizeof(Frame));
     if (!stack) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    int depth = 0;
-
-    /* Seed with the root-level symbols */
-    stack[depth++] = (Frame){ r->doc_symbols, r->num_doc_symbols, 0 };
+    int depth = 1;
+    stack[0] = (Frame){ r->doc_symbols, r->num_doc_symbols, 0, NULL };
 
     for (int t = 0; t < r->num_tok_spans; t++) {
         LspPos pos = r->tok_spans[t].start;
 
-        /* Pop frames whose current symbol's range has ended, or that have
-         * run out of siblings at this level.  The idx >= n check must come
-         * first: after popping and bumping the parent's idx, the parent can
-         * itself be exhausted, and we'd otherwise deref past the end. */
-        while (depth > 1) {
-            Frame *top = &stack[depth - 1];
-            if (top->idx < top->n &&
-                pos_cmp(pos, top->syms[top->idx]->range.end) < 0)
-                break;  /* still inside current sibling at this level */
-            /* Back up to parent level and advance to next sibling */
+        /* Pop scopes whose range has ended. */
+        while (depth > 1 &&
+               pos_cmp(pos, stack[depth - 1].scope->range.end) >= 0)
             depth--;
-            stack[depth - 1].idx++;
-        }
 
-        /* At each level, advance past siblings whose range has ended,
-         * then descend into the first child that contains pos. */
+        /* Descend as long as the next child at the top frame contains pos. */
         for (;;) {
             Frame *top = &stack[depth - 1];
 
-            /* Skip siblings that ended before this token */
+            /* Advance past siblings that ended before this token */
             while (top->idx < top->n &&
-                   pos_cmp(pos, top->syms[top->idx]->range.end) >= 0)
+                   pos_cmp(pos, top->children[top->idx]->range.end) >= 0)
                 top->idx++;
+            if (top->idx >= top->n) break;
 
-            if (top->idx >= top->n)
-                break;  /* no more siblings at this level */
+            DocSymbol *child = top->children[top->idx];
+            if (pos_cmp(pos, child->range.start) < 0)
+                break;  /* cursor sits before the next sibling */
 
-            DocSymbol *sym = top->syms[top->idx];
-            if (pos_cmp(pos, sym->range.start) < 0)
-                break;  /* token is before next symbol — gap between symbols */
-
-            /* Token is inside sym; descend into its children */
-            if (sym->num_children > 0) {
-                if (depth >= frame_cap) {
-                    frame_cap *= 2;
-                    Frame *tmp = realloc(stack, (size_t)frame_cap * sizeof(Frame));
-                    if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-                    stack = tmp;
-                }
-                stack[depth++] = (Frame){ sym->children, sym->num_children, 0 };
-            } else {
-                break;  /* leaf symbol — this is the deepest */
+            if (depth >= frame_cap) {
+                frame_cap *= 2;
+                Frame *tmp = realloc(stack, (size_t)frame_cap * sizeof(Frame));
+                if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+                stack = tmp;
             }
+            stack[depth++] = (Frame){
+                child->children, child->num_children, 0, child
+            };
         }
 
-        /* Owner is the deepest symbol we're inside, or NULL if outside all */
-        if (depth > 1) {
-            Frame *top = &stack[depth - 1];
-            if (top->idx < top->n) {
-                DocSymbol *sym = top->syms[top->idx];
-                if (pos_cmp(pos, sym->range.start) >= 0 &&
-                    pos_cmp(pos, sym->range.end) < 0) {
-                    r->tok_spans[t].owner = sym;
-                    continue;
-                }
-            }
-            /* Check parent frames — token may be in a parent but between children */
-            for (int d = depth - 2; d >= 1; d--) {
-                DocSymbol *sym = stack[d].syms[stack[d].idx];
-                if (pos_cmp(pos, sym->range.start) >= 0 &&
-                    pos_cmp(pos, sym->range.end) < 0) {
-                    r->tok_spans[t].owner = sym;
-                    break;
-                }
-            }
-        }
-        /* If no frame matched, owner stays NULL (the default) */
+        r->tok_spans[t].owner = (depth > 1) ? stack[depth - 1].scope : NULL;
     }
 
     free(stack);
+}
+
+/* Return the innermost DocSymbol whose range contains pos, using the
+ * precomputed .owner on tok_spans.  Binary-searches for the last token whose
+ * start is at or before pos, then walks up the parent chain until the scope
+ * strictly contains pos (inclusive start, exclusive end).  Returns NULL if
+ * pos is outside every DocSymbol. */
+DocSymbol *symbol_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
+    int lo = 0, hi = num_tokens - 1, found = -1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (tokens[mid].token_kind == TK_EOF) { hi = mid - 1; continue; }
+        if (pos_cmp(tokens[mid].start, pos) <= 0) {
+            found = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if (found < 0) return NULL;
+    DocSymbol *s = tokens[found].owner;
+    while (s && pos_cmp(pos, s->range.end) >= 0)
+        s = s->parent;
+    return s;
 }
 
 /* ── Dependency edge resolution ────────────────────────────────────────── */

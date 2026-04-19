@@ -21,16 +21,16 @@
  *
  * ── Overview ─────────────────────────────────────────────────────────────
  *
- * Find-references is answered from two data structures already in ParseResult:
- *
- *   doc_symbols — the symbol tree; each KW_TASK node has a selection_range
- *                 covering its declaration identifier, and each node may carry
- *                 def_links[] pointing to resolved target DocSymbols
+ * Find-references is answered from ref_links[] arrays on DocSymbols.  Each
+ * KW_TASK node has a selection_range covering its declaration identifier,
+ * and each node may carry ref_links[] pointing to the source locations of
+ * incoming dependency references.
  *
  * At query time, build_references_json():
  *
- *   1. Walks the doc_symbols tree of the cursor document to find the KW_TASK
- *      (task) whose selection_range contains the cursor.  Returns null if none.
+ *   1. Uses symbol_at() to locate the innermost DocSymbol at the cursor,
+ *      walks up to find a KW_TASK whose selection_range contains the cursor.
+ *      Returns null if none.
  *
  *   2. Iterates the target task's ref_links[] to collect all incoming
  *      references (same-document and cross-document).
@@ -59,26 +59,19 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-/* Walk the symbol tree depth-first to find the KW_TASK node whose
- * selection_range contains pos.  Uses each symbol's range to skip
- * subtrees that cannot contain pos.  Returns NULL if no match. */
-static const DocSymbol *find_task_at(DocSymbol *const *syms, int n, LspPos pos) {
-    for (int i = 0; i < n; i++) {
-        if (!pos_in_range(pos, syms[i]->range))
-            continue;
-        if (syms[i]->keyword == KW_TASK
-                && pos_in_range(pos, syms[i]->selection_range))
-            return syms[i];
-        return find_task_at(syms[i]->children, syms[i]->num_children, pos);
-    }
-    return NULL;
-}
-
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
                                        const char *cursor_uri,
-                                       DocSymbol *const *symbols, int num_symbols,
+                                       const TokenSpan *tokens, int num_tokens,
                                        LspPos cursor) {
-    const DocSymbol *task = find_task_at(symbols, num_symbols, cursor);
+    const DocSymbol *task = NULL;
+    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
+         sym != NULL; sym = sym->parent) {
+        if (sym->keyword == KW_TASK
+                && pos_in_range(cursor, sym->selection_range)) {
+            task = sym;
+            break;
+        }
+    }
     if (!task) return NULL;
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);

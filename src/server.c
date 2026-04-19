@@ -1144,7 +1144,7 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
     /* Check whether the cursor is on a resolved dependency/allocation reference.
      * If so, show the target symbol's kind, id, and name instead of keyword docs. */
     const DefinitionLink *hover_link = find_def_link_at(
-        d->parse.doc_symbols, d->parse.num_doc_symbols, pos);
+        d->parse.tok_spans, d->parse.num_tok_spans, pos);
     if (hover_link) {
         const DocSymbol *sym = hover_link->target;
         if (!sym) goto keyword_hover;
@@ -1269,8 +1269,8 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_references_json(doc,
                                                     uri,
-                                                    d->parse.doc_symbols,
-                                                    d->parse.num_doc_symbols,
+                                                    d->parse.tok_spans,
+                                                    d->parse.num_tok_spans,
                                                     pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1326,8 +1326,8 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
 
     LspPos pos         = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_definition_json(doc,
-                                                    d->parse.doc_symbols,
-                                                    d->parse.num_doc_symbols,
+                                                    d->parse.tok_spans,
+                                                    d->parse.num_tok_spans,
                                                     pos, uri);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);

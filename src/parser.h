@@ -400,6 +400,13 @@ void resolve_cross_file_deps(ParseResult *r,
  */
 void clear_cross_file_state(ParseResult *r);
 
+/* Return the innermost DocSymbol whose range contains pos (inclusive start,
+ * exclusive end), using the precomputed .owner field on tok_spans.  Returns
+ * NULL if pos is outside every DocSymbol.  O(log T + D) where T = num_tokens
+ * and D = symbol nesting depth at pos.
+ */
+DocSymbol *symbol_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
+
 /*
  * Navigate the DocSymbol tree by following `path` (an array of `plen`
  * identifier strings).  Returns the children array of the matching node and

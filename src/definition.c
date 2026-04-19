@@ -28,9 +28,10 @@
  * These links are populated by parser.c:resolve_dep_refs() after every
  * document change for every successfully resolved dependency reference.
  *
- * At query time, build_definition_json() walks the symbol tree looking for a
- * DefinitionLink whose source range contains the cursor and, when found,
- * returns a Location object pointing at the target symbol's selection_range.
+ * At query time, build_definition_json() locates the innermost DocSymbol
+ * containing the cursor via symbol_at() and scans its def_links for one
+ * whose source range covers the cursor.  When found, returns a Location
+ * object pointing at the target symbol's selection_range.
  *
  * ── Supported references ─────────────────────────────────────────────────
  *
@@ -51,40 +52,36 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-/* Walk the symbol tree looking for a DefinitionLink whose source range
- * contains the cursor.  Uses each symbol's range to skip subtrees that
- * cannot contain the cursor, then checks only the enclosing symbol's
- * def_links.  Returns a pointer to the matching link, or NULL. */
-const DefinitionLink *find_def_link_at(DocSymbol *const *syms, int n,
+/* Find a DefinitionLink whose source range contains the cursor.  Uses the
+ * precomputed tok_spans[].owner to locate the innermost enclosing DocSymbol
+ * via symbol_at(), then walks up the parent chain checking def_links at
+ * each level.  Returns a pointer to the matching link, or NULL. */
+const DefinitionLink *find_def_link_at(const TokenSpan *tokens, int num_tokens,
                                        LspPos cursor) {
-    for (int i = 0; i < n; i++) {
-        if (!pos_in_range(cursor, syms[i]->range))
-            continue;
-
-        for (int j = 0; j < syms[i]->num_def_links; j++) {
-            if (pos_in_range(cursor, syms[i]->def_links[j].source))
-                return &syms[i]->def_links[j];
+    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
+         sym != NULL; sym = sym->parent) {
+        for (int j = 0; j < sym->num_def_links; j++) {
+            if (pos_in_range(cursor, sym->def_links[j].source))
+                return &sym->def_links[j];
         }
-        return find_def_link_at(syms[i]->children, syms[i]->num_children,
-                                cursor);
     }
     return NULL;
 }
 
 /* Build a Location JSON object for the go-to-definition response.
- * Walks the symbol tree for a DefinitionLink whose source range contains cursor.
+ * Locates a DefinitionLink whose source range contains cursor.
  * Returns NULL if no matching link is found (server will return null to editor).
  *
- * doc         — the mutable JSON document that will own the returned value
- * symbols     — root-level symbol array from the ParseResult
- * num_symbols — number of entries in symbols
- * cursor      — cursor position from the textDocument/definition request
- * uri         — URI of the requesting document, used as fallback target URI
+ * doc        — the mutable JSON document that will own the returned value
+ * tokens     — token span array from the ParseResult (carries .owner links)
+ * num_tokens — number of entries in tokens
+ * cursor     — cursor position from the textDocument/definition request
+ * uri        — URI of the requesting document, used as fallback target URI
  */
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
-                                       DocSymbol *const *symbols, int num_symbols,
+                                       const TokenSpan *tokens, int num_tokens,
                                        LspPos cursor, const char *uri) {
-    const DefinitionLink *link = find_def_link_at(symbols, num_symbols, cursor);
+    const DefinitionLink *link = find_def_link_at(tokens, num_tokens, cursor);
     if (!link) return NULL;
 
     const char *target_uri = link->target_uri ? link->target_uri : uri;

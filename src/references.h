@@ -33,13 +33,13 @@
  *
  * cursor_uri   — URI of the document the cursor is in (used for
  *                same-document references where source_uri is NULL)
- * symbols/num_symbols — symbol tree of the cursor document (used to locate
- *                       the declaration under the cursor)
+ * tokens/num_tokens — token spans of the cursor document (carry .owner links
+ *                     that let symbol_at() locate the declaration under cursor)
  * cursor       — the cursor position
  *
  * Values are allocated in doc; caller owns doc.
  */
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
                                        const char *cursor_uri,
-                                       DocSymbol *const *symbols, int num_symbols,
+                                       const TokenSpan *tokens, int num_tokens,
                                        LspPos cursor);

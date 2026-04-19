@@ -69,22 +69,20 @@ static int range_eq(LspRange a, LspRange b) {
     return pos_cmp(a.start, b.start) == 0 && pos_cmp(a.end, b.end) == 0;
 }
 
-/* Walk the symbol tree depth-first to find any node whose selection_range
- * contains pos.  Uses each symbol's range to skip subtrees that cannot
- * contain pos.  Not filtered by kind — matches all symbol types. */
-static const DocSymbol *find_symbol_at(DocSymbol *const *syms, int n,
+/* Find the innermost DocSymbol at pos whose selection_range contains pos.
+ * Uses symbol_at() for O(log T + D) lookup, then walks up parents checking
+ * selection_range at each level.  Returns NULL if no match. */
+static const DocSymbol *find_symbol_at(const TokenSpan *tokens, int num_tokens,
                                        LspPos pos) {
-    for (int i = 0; i < n; i++) {
-        if (!pos_in_range(pos, syms[i]->range))
-            continue;
-        if (pos_in_range(pos, syms[i]->selection_range))
-            return syms[i];
-        return find_symbol_at(syms[i]->children, syms[i]->num_children, pos);
+    for (DocSymbol *sym = symbol_at(tokens, num_tokens, pos);
+         sym != NULL; sym = sym->parent) {
+        if (pos_in_range(pos, sym->selection_range))
+            return sym;
     }
     return NULL;
 }
 
-/* Walk the symbol tree depth-first to find the first node whose detail
+/* Walk the symbol tree depth-first to find the first node whose id
  * matches the given string.  Used for intermediate segments in dotted
  * dependency paths where no def_link directly targets the segment. */
 static const DocSymbol *find_symbol_by_id(DocSymbol *const *syms, int n,
@@ -99,23 +97,19 @@ static const DocSymbol *find_symbol_by_id(DocSymbol *const *syms, int n,
     return NULL;
 }
 
-/* Walk the symbol tree looking for a same-document DefinitionLink whose
- * source range contains pos.  Uses each symbol's range to skip subtrees
- * that cannot contain pos.  Returns the link's target, or NULL. */
-static const DocSymbol *find_link_target_at(DocSymbol *const *syms, int n,
-                                            LspPos pos) {
-    for (int i = 0; i < n; i++) {
-        if (!pos_in_range(pos, syms[i]->range))
-            continue;
-
-        for (int j = 0; j < syms[i]->num_def_links; j++) {
-            const DefinitionLink *link = &syms[i]->def_links[j];
+/* Find a same-document DefinitionLink whose source range contains pos and
+ * return its target.  Uses symbol_at() to locate the innermost enclosing
+ * symbol, then scans def_links walking up parents on miss. */
+static const DocSymbol *find_link_target_at(const TokenSpan *tokens,
+                                            int num_tokens, LspPos pos) {
+    for (DocSymbol *sym = symbol_at(tokens, num_tokens, pos);
+         sym != NULL; sym = sym->parent) {
+        for (int j = 0; j < sym->num_def_links; j++) {
+            const DefinitionLink *link = &sym->def_links[j];
             if (link->target_uri) continue;
             if (pos_in_range(pos, link->source))
                 return link->target;
         }
-        return find_link_target_at(syms[i]->children, syms[i]->num_children,
-                                   pos);
     }
     return NULL;
 }
@@ -172,12 +166,12 @@ yyjson_mut_val *build_document_highlight_json(
     const DocSymbol *target = NULL;
 
     /* Step 2a: check if cursor is on a definition site. */
-    target = find_symbol_at(symbols, num_symbols, cursor);
+    target = find_symbol_at(tokens, num_tokens, cursor);
 
     /* Step 2b: check if cursor is on a reference site. */
     if (!target) {
         const DocSymbol *link_target =
-            find_link_target_at(symbols, num_symbols, cursor);
+            find_link_target_at(tokens, num_tokens, cursor);
         if (link_target) {
             if (link_target->id && tok.text
                     && strcmp(link_target->id, tok.text) == 0) {

@@ -208,48 +208,35 @@ static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor
     return strdup("");
 }
 
-/* ── Position helpers ────────────────────────────────────────────────────── */
-
-/* Return 1 if cursor falls within range (inclusive of start, exclusive of end). */
-static int range_contains(LspRange range, LspPos cursor) {
-    return pos_cmp(cursor, range.start) >= 0
-        && pos_cmp(cursor, range.end)   <  0;
-}
-
 /* ── Block stack ─────────────────────────────────────────────────────────── */
 
-/* Recursively walk the DocSymbol tree to find the chain of keyword constants
- * for blocks enclosing cursor (outermost first).
- */
-static void block_stack_walk(DocSymbol *const *syms, int n, LspPos cursor,
-                             int **result, int *out_n, int *cap) {
-    for (int i = 0; i < n; i++) {
-        if (!range_contains(syms[i]->range, cursor))
-            continue;
-
-        if (*out_n >= *cap) {
-            *cap = *cap ? *cap * 2 : 8;
-            int *tmp = realloc(*result, *cap * sizeof(int));
-            if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-            *result = tmp;
-        }
-        (*result)[(*out_n)++] = syms[i]->keyword;
-
-        block_stack_walk(syms[i]->children, syms[i]->num_children,
-                         cursor, result, out_n, cap);
-        return;  /* cursor can only be inside one sibling */
-    }
-}
-
-/* Build the stack of block-opener keyword constants enclosing cursor.
+/* Build the stack of block-opener keyword constants enclosing cursor
+ * (outermost first).  Uses symbol_at() to locate the innermost enclosing
+ * DocSymbol, then walks up the parent chain, recording keywords in reverse
+ * order into a scratch array and emitting them outermost-first.
  * Returns a heap-allocated array of KW_* values; caller must free.
  */
-static int *block_stack(DocSymbol *const *symbols, int num_symbols,
+static int *block_stack(const TokenSpan *tokens, int num_tokens,
                         LspPos cursor, int *out_n) {
-    int *result = NULL;
-    int cap = 0;
     *out_n = 0;
-    block_stack_walk(symbols, num_symbols, cursor, &result, out_n, &cap);
+
+    /* Count the chain depth up from the innermost. */
+    int depth = 0;
+    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
+         sym != NULL; sym = sym->parent)
+        depth++;
+    if (depth == 0) return NULL;
+
+    int *result = malloc((size_t)depth * sizeof(int));
+    if (!result) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+
+    /* Fill in reverse so the result reads outermost-first. */
+    int i = depth;
+    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
+         sym != NULL; sym = sym->parent)
+        result[--i] = sym->keyword;
+
+    *out_n = depth;
     return result;
 }
 
@@ -440,44 +427,36 @@ static void collect_ids(DocSymbol *const *syms, int n, int kind,
 
 /* ── Scope-aware helpers ─────────────────────────────────────────────────── */
 
-/* Recursively walk the DocSymbol tree to find the chain of task IDs enclosing
- * cursor.  Appends each enclosing task's id to result (outermost first via
- * pre-order traversal).  Returns the total depth found.
- */
-static int task_scope_walk(DocSymbol *const *syms, int n, LspPos cursor,
-                           char ***result, int *out_n, int *cap) {
-    for (int i = 0; i < n; i++) {
-        if (!range_contains(syms[i]->range, cursor))
-            continue;
-
-        if (syms[i]->keyword == KW_TASK && syms[i]->id && syms[i]->id[0]) {
-            if (*out_n >= *cap) {
-                *cap = *cap ? *cap * 2 : 8;
-                char **tmp = realloc(*result, *cap * sizeof(char *));
-                if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-                *result = tmp;
-            }
-            (*result)[(*out_n)++] = strdup(syms[i]->id);
-        }
-
-        task_scope_walk(syms[i]->children, syms[i]->num_children,
-                        cursor, result, out_n, cap);
-        return 1;  /* cursor can only be inside one sibling */
-    }
-    return 0;
-}
-
 /* Return the ordered list of task IDs enclosing cursor (outermost first).
  * Used to determine the bang-relative dep-ref scope for dependency completions.
+ * Uses symbol_at() + parent walk to locate the enclosing chain, collects
+ * KW_TASK ids in reverse order, then fills the output outermost-first.
  * Returns a heap-allocated array of heap-allocated strings; caller must free
  * each string and the array.
  */
-static char **current_task_scope(DocSymbol *const *symbols, int num_symbols,
+static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
                                  LspPos cursor, int *out_n) {
-    char **result = NULL;
-    int cap = 0;
     *out_n = 0;
-    task_scope_walk(symbols, num_symbols, cursor, &result, out_n, &cap);
+
+    int depth = 0;
+    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
+         sym != NULL; sym = sym->parent) {
+        if (sym->keyword == KW_TASK && sym->id && sym->id[0])
+            depth++;
+    }
+    if (depth == 0) return NULL;
+
+    char **result = malloc((size_t)depth * sizeof(char *));
+    if (!result) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+
+    int i = depth;
+    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
+         sym != NULL; sym = sym->parent) {
+        if (sym->keyword == KW_TASK && sym->id && sym->id[0])
+            result[--i] = strdup(sym->id);
+    }
+
+    *out_n = depth;
     return result;
 }
 
@@ -566,7 +545,7 @@ static void collect_dep_ids(const TokenSpan *tokens, int num_tokens,
                             const int *extra_counts, int num_extra,
                             int id_kind, IdList *ids, char *bang_prefix) {
     int scope_n = 0;
-    char **scope = current_task_scope(symbols, num_symbols, cursor, &scope_n);
+    char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
     int bang_count = count_leading_bangs(tokens, num_tokens, cursor);
 
     for (int i = 0; i < bang_count; i++)
@@ -703,7 +682,7 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
 
     /* Gather cursor context: enclosing block stack, partial word, first word */
     int    stack_n    = 0;
-    int   *stack      = block_stack(symbols, num_symbols, cursor, &stack_n);
+    int   *stack      = block_stack(tokens, num_tokens, cursor, &stack_n);
     char  *partial    = partial_word(tokens, num_tokens, cursor);
     char  *first_word = line_first_word(tokens, num_tokens, cursor);
 
