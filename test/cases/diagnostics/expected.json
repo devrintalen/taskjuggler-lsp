@@ -102,20 +102,6 @@
         {
           "range": {
             "start": {
-              "line": 3,
-              "character": 10
-            },
-            "end": {
-              "line": 3,
-              "character": 21
-            }
-          },
-          "severity": 1,
-          "message": "unresolved task: `nonexistent`"
-        },
-        {
-          "range": {
-            "start": {
               "line": 4,
               "character": 12
             },
@@ -126,6 +112,20 @@
           },
           "severity": 2,
           "message": "dependency reference escapes beyond project root"
+        },
+        {
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 10
+            },
+            "end": {
+              "line": 3,
+              "character": 21
+            }
+          },
+          "severity": 1,
+          "message": "unresolved dependency: nonexistent"
         }
       ]
     }

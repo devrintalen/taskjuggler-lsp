@@ -486,6 +486,7 @@ static void resolve_dep_refs(ParseResult *r) {
         DocSymbol **search_syms = NULL;
         int         search_n    = 0;
 
+        int escaped = 0;
         if (ref->bang_count == 0) {
             search_syms = r->doc_symbols;
             search_n    = r->num_doc_symbols;
@@ -494,19 +495,30 @@ static void resolve_dep_refs(ParseResult *r) {
             for (int b = 0; b < ref->bang_count; b++) {
                 if (!ancestor->parent) {
                     /* Too many bangs — can't go higher than root */
-                    ancestor = NULL;
+                    escaped = 1;
                     break;
                 }
                 ancestor = ancestor->parent;
             }
-            if (ancestor) {
+            if (!escaped) {
                 search_syms = ancestor->children;
                 search_n    = ancestor->num_children;
             }
         }
 
-        if (search_syms && nseg > 0)
+        if (!escaped && search_syms && nseg > 0)
             resolved = find_task(search_syms, search_n, segs, nseg);
+
+        if (escaped) {
+            char *msg = strdup("dependency reference escapes beyond project root");
+            if (msg) {
+                push_diagnostic(r, ref->range, DIAG_WARNING, msg);
+                free(msg);
+            }
+            for (int j = 0; j < nseg; j++) free(segs[j]);
+            free(segs);
+            continue;
+        }
 
         if (!resolved) {
             /* 0-bang refs may still resolve across files; defer to the

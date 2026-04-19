@@ -106,18 +106,8 @@
     "id": 2,
     "result": [
       {
-        "startLine": 0,
-        "endLine": 1,
-        "kind": "comment"
-      },
-      {
-        "startLine": 2,
-        "endLine": 4,
-        "kind": "region"
-      },
-      {
-        "startLine": 7,
-        "endLine": 8,
+        "startLine": 5,
+        "endLine": 12,
         "kind": "region"
       },
       {
@@ -126,13 +116,23 @@
         "kind": "region"
       },
       {
+        "startLine": 7,
+        "endLine": 8,
+        "kind": "region"
+      },
+      {
         "startLine": 10,
         "endLine": 11,
         "kind": "region"
       },
       {
-        "startLine": 5,
-        "endLine": 12,
+        "startLine": 0,
+        "endLine": 1,
+        "kind": "comment"
+      },
+      {
+        "startLine": 2,
+        "endLine": 4,
         "kind": "region"
       }
     ]

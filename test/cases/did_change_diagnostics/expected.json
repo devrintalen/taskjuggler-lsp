@@ -119,7 +119,7 @@
             }
           },
           "severity": 1,
-          "message": "unresolved task: `nonexistent`"
+          "message": "unresolved dependency: nonexistent"
         }
       ]
     }

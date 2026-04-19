@@ -127,7 +127,7 @@
             }
           },
           "severity": 1,
-          "message": "unresolved task: `sibling`"
+          "message": "unresolved dependency: sibling"
         }
       ]
     }
