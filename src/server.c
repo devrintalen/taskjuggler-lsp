@@ -539,16 +539,49 @@ static yyjson_mut_val *make_response(yyjson_mut_doc *doc, yyjson_val *id,
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /*
- * Revalidate dep refs in all open documents using the combined symbol pools
- * from every other open document, then publish updated diagnostics.
+ * Revalidate cross-file dep refs in all open documents, then publish updated
+ * diagnostics.  Called after any document open, change, or close.
  *
- * Called after any document open, change, or close so that cross-file
- * dependency references are resolved against the current workspace state.
+ * Three passes, in order:
+ *   A. Clear any cross-file state accumulated by the previous cycle.  This
+ *      must happen for ALL documents before any resolution — pass B adds
+ *      ref_links to symbols in other documents, so mixing clear and resolve
+ *      would wipe links we just added.
+ *   B. For each document, collect the other open documents' top-level
+ *      symbols and re-resolve cross_file_deps[] against them.
+ *   C. Publish diagnostics.
  */
 static void revalidate_all_docs(void) {
+    /* Pass A: clear cross-file state in all open documents. */
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
-        /* TODO: cross-file dep resolution with extra symbol pools */
+        clear_cross_file_state(&docs[i].parse);
+    }
+
+    /* Pass B: resolve cross-file deps in each document against all others. */
+    DocSymbol *const *extra_roots[MAX_DOCS];
+    int               extra_counts[MAX_DOCS];
+    const char       *extra_uris[MAX_DOCS];
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use) continue;
+
+        int num_extra = 0;
+        for (int j = 0; j < MAX_DOCS; j++) {
+            if (!docs[j].in_use || j == i) continue;
+            extra_roots[num_extra]  = docs[j].parse.doc_symbols;
+            extra_counts[num_extra] = docs[j].parse.num_doc_symbols;
+            extra_uris[num_extra]   = docs[j].uri;
+            num_extra++;
+        }
+
+        resolve_cross_file_deps(&docs[i].parse,
+                                extra_roots, extra_counts, extra_uris,
+                                num_extra, docs[i].uri);
+    }
+
+    /* Pass C: publish diagnostics now that resolution is complete. */
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use) continue;
         publish_diagnostics(docs[i].uri, &docs[i].parse);
     }
 }

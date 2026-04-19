@@ -145,8 +145,10 @@ struct DocSymbol {
  *
  * Two sources of diagnostics are stored together in ParseResult, distinguished
  * by dep_diag_start:
- *   [0 .. dep_diag_start-1]  ->  syntax errors from the bison parser
- *   [dep_diag_start .. end]  ->  semantic errors from dep validation
+ *   [0 .. dep_diag_start-1]  ->  permanent diagnostics emitted during parse()
+ *                                (syntax errors, in-file dep resolution errors)
+ *   [dep_diag_start .. end]  ->  cross-file dep diagnostics, cleared and
+ *                                regenerated on every revalidation cycle
  *
  * Example TJP input with an unresolved dependency:
  *
@@ -285,6 +287,27 @@ struct ReferenceLink {
     char      *source_uri; /* heap-allocated; NULL means same document */
 };
 
+/* ── RawDepRef ───────────────────────────────────────────────────────────── *
+ *
+ * A `depends`/`precedes` reference captured during parsing.  Used transiently
+ * by the grammar→parser resolver (via g_dep_refs[] in parser.c), and also
+ * stored on ParseResult.cross_file_deps[] for 0-bang references that failed
+ * in-file resolution — those are retried each revalidation against other
+ * open documents.
+ *
+ * path is dot-separated (e.g. "deliveries.start") and heap-allocated.
+ * owner points to the DocSymbol that declared the reference; it lives in
+ * the same ParseResult's doc_symbols tree and is freed separately.
+ * range is the source location of the reference expression (for diagnostics
+ * and go-to-definition).
+ */
+typedef struct {
+    int        bang_count;
+    char      *path;       /* dot-separated, heap-allocated */
+    DocSymbol *owner;      /* owning symbol in the same ParseResult */
+    LspRange   range;
+} RawDepRef;
+
 /* ── ParseResult ─────────────────────────────────────────────────────────── *
  *
  * The complete output of a single parse() call.  All dynamic arrays are
@@ -324,7 +347,7 @@ typedef struct {
     Diagnostic     *diagnostics;
     int             num_diagnostics;
     int             diag_cap;
-    int             dep_diag_start; /* diagnostics[0..dep_diag_start-1] are syntax errors */
+    int             dep_diag_start; /* diagnostics[0..dep_diag_start-1] survive revalidation */
     DocSymbol     **doc_symbols;      /* array of pointers to heap-allocated symbols */
     int             num_doc_symbols;
     int             doc_sym_cap;
@@ -335,6 +358,9 @@ typedef struct {
     char          **included_files;   /* unquoted filenames from include statements */
     int             num_included_files;
     int             included_files_cap;
+    RawDepRef      *cross_file_deps;    /* 0-bang refs that failed in-file resolution */
+    int             num_cross_file_deps;
+    int             cross_file_deps_cap;
 } ParseResult;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -348,6 +374,31 @@ void        push_included_file(ParseResult *r, const char *quoted_text);
 void push_dep_ref(int bang_count, const char *path,
                   DocSymbol *owner, LspPos start, LspPos end);
 void dep_refs_reset(void);
+
+/* Resolve r's cross_file_deps[] against the given set of other documents'
+ * top-level symbols.  For each ref: if a match is found, adds a cross-file
+ * DefinitionLink on the owner (with target_uri) and ReferenceLink on the
+ * target (with source_uri = self_uri).  Otherwise emits an "unresolved
+ * dependency" diagnostic onto r->diagnostics.  Matches go through the same
+ * KW_PROJECT-transparent find_task() used for in-file resolution, so only
+ * top-level symbols (as surfaced by include statements) are visible.
+ *
+ * Call clear_cross_file_state(r) before calling this to wipe any cross-file
+ * state left over from a previous resolution pass.
+ */
+void resolve_cross_file_deps(ParseResult *r,
+                             DocSymbol *const *const *extra_roots,
+                             const int *extra_counts,
+                             const char *const *extra_uris,
+                             int num_extra,
+                             const char *self_uri);
+
+/* Strip cross-file state from r: removes def_links entries with a non-NULL
+ * target_uri and ref_links entries with a non-NULL source_uri (freeing the
+ * URI strings), and truncates r->diagnostics back to dep_diag_start.
+ * Called by the server before each cross-file resolution cycle.
+ */
+void clear_cross_file_state(ParseResult *r);
 
 /*
  * Navigate the DocSymbol tree by following `path` (an array of `plen`

@@ -29,15 +29,10 @@
  * grammar.y calls push_dep_ref() for each dependency reference encountered
  * during parsing.  These are stored in a file-local buffer until parse()
  * calls resolve_dep_refs(), which resolves them in place and populates
- * def_links/ref_links on the target DocSymbols.
+ * def_links/ref_links on the target DocSymbols.  The RawDepRef type is
+ * declared in parser.h so that references that failed in-file resolution
+ * can be stashed on ParseResult.cross_file_deps[] for later re-resolution.
  */
-
-typedef struct {
-    int        bang_count;
-    char      *path;       /* dot-separated, heap-allocated */
-    DocSymbol *owner;      /* owning symbol; stable because individually malloc'd */
-    LspRange   range;
-} RawDepRef;
 
 static RawDepRef *g_dep_refs     = NULL;
 static int        g_num_dep_refs = 0;
@@ -186,11 +181,17 @@ void parse_result_free(ParseResult *r) {
         free(r->tok_spans[i].text);
     free(r->tok_spans);
 
-    /* dep_edges are freed by resolve_dep_edges(); nothing to do here */
+    /* g_dep_refs is freed at the end of resolve_dep_refs(); nothing to do
+     * here.  cross_file_deps holds deferred refs that survive parse() and
+     * is freed below. */
 
     for (int i = 0; i < r->num_included_files; i++)
         free(r->included_files[i]);
     free(r->included_files);
+
+    for (int i = 0; i < r->num_cross_file_deps; i++)
+        free(r->cross_file_deps[i].path);
+    free(r->cross_file_deps);
 
     memset(r, 0, sizeof(*r));
 }
@@ -426,8 +427,44 @@ static DocSymbol *find_task(DocSymbol **syms, int n,
     return NULL;
 }
 
-/* Resolve dep refs: split paths, resolve targets, populate def_links/ref_links,
- * emit diagnostics for broken links, then free the global accumulator. */
+/* Build an "unresolved dependency: a.b.c" message from segs[] and push
+ * it onto r->diagnostics at the given range. */
+static void emit_unresolved_dep_diag(ParseResult *r, LspRange range,
+                                     char *const *segs, int nseg) {
+    size_t msg_len = 32; /* "unresolved dependency: " prefix */
+    for (int j = 0; j < nseg; j++) msg_len += strlen(segs[j]) + 1;
+    char *msg = malloc(msg_len);
+    if (!msg) return;
+    strcpy(msg, "unresolved dependency: ");
+    for (int j = 0; j < nseg; j++) {
+        if (j > 0) strcat(msg, ".");
+        strcat(msg, segs[j]);
+    }
+    push_diagnostic(r, range, DIAG_ERROR, msg);
+    free(msg);
+}
+
+/* Append a RawDepRef onto r->cross_file_deps[], taking ownership of path. */
+static void stash_cross_file_dep(ParseResult *r, const RawDepRef *ref) {
+    if (r->num_cross_file_deps >= r->cross_file_deps_cap) {
+        int nc = r->cross_file_deps_cap ? r->cross_file_deps_cap * 2 : 4;
+        RawDepRef *tmp = realloc(r->cross_file_deps,
+                                 (size_t)nc * sizeof(RawDepRef));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        r->cross_file_deps     = tmp;
+        r->cross_file_deps_cap = nc;
+    }
+    RawDepRef *dst = &r->cross_file_deps[r->num_cross_file_deps++];
+    *dst       = *ref;
+    dst->path  = ref->path ? strdup(ref->path) : NULL;
+}
+
+/* Resolve dep refs accumulated by the grammar: split paths, resolve targets
+ * in-file, populate def_links/ref_links on success.  For 0-bang refs that
+ * fail in-file lookup, stash them on r->cross_file_deps[] for the server to
+ * retry against other open documents — no diagnostic yet.  For bang refs,
+ * which are strictly in-file, emit an unresolved-dependency diagnostic on
+ * failure.  Frees the global accumulator at the end. */
 static void resolve_dep_refs(ParseResult *r) {
     for (int i = 0; i < g_num_dep_refs; i++) {
         RawDepRef *ref = &g_dep_refs[i];
@@ -469,19 +506,13 @@ static void resolve_dep_refs(ParseResult *r) {
             resolved = find_task(search_syms, search_n, segs, nseg);
 
         if (!resolved) {
-            /* Build error message: join segs with dots for display */
-            size_t msg_len = 32; /* "unresolved dependency: " prefix */
-            for (int j = 0; j < nseg; j++) msg_len += strlen(segs[j]) + 1;
-            char *msg = malloc(msg_len);
-            if (msg) {
-                strcpy(msg, "unresolved dependency: ");
-                for (int j = 0; j < nseg; j++) {
-                    if (j > 0) strcat(msg, ".");
-                    strcat(msg, segs[j]);
-                }
-                push_diagnostic(r, ref->range, DIAG_ERROR, msg);
-                free(msg);
-            }
+            /* 0-bang refs may still resolve across files; defer to the
+             * server's cross-file pass.  Bang refs are strictly in-file, so
+             * a miss is a hard error now. */
+            if (ref->bang_count == 0)
+                stash_cross_file_dep(r, ref);
+            else
+                emit_unresolved_dep_diag(r, ref->range, segs, nseg);
             for (int j = 0; j < nseg; j++) free(segs[j]);
             free(segs);
             continue;
@@ -509,6 +540,87 @@ static void resolve_dep_refs(ParseResult *r) {
     free_dep_refs();
 }
 
+/* Walk s and its descendants, compacting link arrays in place by dropping
+ * any entry that carries a cross-document URI.  Frees the URI strings. */
+static void strip_cross_file_links(DocSymbol *s) {
+    int keep = 0;
+    for (int i = 0; i < s->num_def_links; i++) {
+        if (s->def_links[i].target_uri) {
+            free(s->def_links[i].target_uri);
+        } else {
+            if (keep != i) s->def_links[keep] = s->def_links[i];
+            keep++;
+        }
+    }
+    s->num_def_links = keep;
+
+    keep = 0;
+    for (int i = 0; i < s->num_ref_links; i++) {
+        if (s->ref_links[i].source_uri) {
+            free(s->ref_links[i].source_uri);
+        } else {
+            if (keep != i) s->ref_links[keep] = s->ref_links[i];
+            keep++;
+        }
+    }
+    s->num_ref_links = keep;
+
+    for (int i = 0; i < s->num_children; i++)
+        strip_cross_file_links(s->children[i]);
+}
+
+void clear_cross_file_state(ParseResult *r) {
+    for (int i = r->dep_diag_start; i < r->num_diagnostics; i++)
+        free(r->diagnostics[i].message);
+    r->num_diagnostics = r->dep_diag_start;
+
+    for (int i = 0; i < r->num_doc_symbols; i++)
+        strip_cross_file_links(r->doc_symbols[i]);
+}
+
+void resolve_cross_file_deps(ParseResult *r,
+                             DocSymbol *const *const *extra_roots,
+                             const int *extra_counts,
+                             const char *const *extra_uris,
+                             int num_extra,
+                             const char *self_uri) {
+    for (int i = 0; i < r->num_cross_file_deps; i++) {
+        RawDepRef *ref = &r->cross_file_deps[i];
+        if (!ref->owner) continue;
+
+        char **segs = NULL;
+        int    nseg = 0;
+        split_path(ref->path, &segs, &nseg);
+        if (nseg == 0) { free(segs); continue; }
+
+        DocSymbol *resolved = NULL;
+        const char *target_uri = NULL;
+        for (int p = 0; p < num_extra; p++) {
+            resolved = find_task((DocSymbol **)extra_roots[p],
+                                 extra_counts[p], segs, nseg);
+            if (resolved) { target_uri = extra_uris[p]; break; }
+        }
+
+        if (!resolved) {
+            emit_unresolved_dep_diag(r, ref->range, segs, nseg);
+        } else {
+            push_def_link(ref->owner, (DefinitionLink){
+                .source     = ref->range,
+                .target     = resolved,
+                .target_uri = strdup(target_uri),
+            });
+            push_ref_link(resolved, (ReferenceLink){
+                .source     = ref->range,
+                .origin     = ref->owner,
+                .source_uri = self_uri ? strdup(self_uri) : NULL,
+            });
+        }
+
+        for (int j = 0; j < nseg; j++) free(segs[j]);
+        free(segs);
+    }
+}
+
 /* ── Public parse() entry point ──────────────────────────────────────────── */
 
 ParseResult parse(const char *src) {
@@ -528,10 +640,6 @@ ParseResult parse(const char *src) {
     yyparse();
     yy_delete_buffer(buf);
 
-    /* Record where dep-validation diagnostics will start (after syntax errors). */
-    result.dep_diag_start = result.num_diagnostics;
-
-
     /* Transfer tok_spans array ownership to the ParseResult */
     result.tok_spans       = g_tok_spans;
     result.num_tok_spans   = g_num_tok_spans;
@@ -548,6 +656,11 @@ ParseResult parse(const char *src) {
     assign_parents(result.doc_symbols, result.num_doc_symbols, NULL);
     assign_token_owners(&result);
     resolve_dep_refs(&result);
+
+    /* Everything up to here is permanent: syntax errors plus in-file dep
+     * diagnostics.  Cross-file diagnostics added later by the server's
+     * revalidation pass start at this index and are truncated each cycle. */
+    result.dep_diag_start = result.num_diagnostics;
 
     return result;
 }
