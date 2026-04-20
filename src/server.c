@@ -355,17 +355,20 @@ static void follow_includes(const char *file_path, const ParseResult *result) {
             full_path = malloc(fname_len + 1);
             if (!full_path) continue;
             memcpy(full_path, filename, fname_len + 1);
-        } else {
-            /* Relative path — resolve against parent directory */
+        } else if (last_slash) {
+            /* Relative path with a parent directory.  dir_len == 0 means the
+             * parent is the filesystem root "/", so we always write one slash
+             * between the prefix and the filename. */
             full_path = malloc(dir_len + 1 + fname_len + 1);
             if (!full_path) continue;
-            if (dir_len > 0) {
-                memcpy(full_path, file_path, dir_len);
-                full_path[dir_len] = '/';
-                memcpy(full_path + dir_len + 1, filename, fname_len + 1);
-            } else {
-                memcpy(full_path, filename, fname_len + 1);
-            }
+            memcpy(full_path, file_path, dir_len);
+            full_path[dir_len] = '/';
+            memcpy(full_path + dir_len + 1, filename, fname_len + 1);
+        } else {
+            /* file_path had no slash — resolve relative to CWD. */
+            full_path = malloc(fname_len + 1);
+            if (!full_path) continue;
+            memcpy(full_path, filename, fname_len + 1);
         }
 
         load_file_from_disk(full_path);
