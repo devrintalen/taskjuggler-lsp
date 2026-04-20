@@ -103,14 +103,6 @@
   },
   {
     "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
     "id": 2,
     "result": [
       {

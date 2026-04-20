@@ -582,9 +582,14 @@ static void revalidate_all_docs(void) {
                                 num_extra, docs[i].uri);
     }
 
-    /* Pass C: publish diagnostics now that resolution is complete. */
+    /* Pass C: publish diagnostics for editor-managed documents only.
+     * disk_only documents are loaded by the workspace scan and by include
+     * resolution; the editor hasn't asked about them, so publishing
+     * diagnostics for them would spam the client with noise (and potentially
+     * huge payloads from unrelated files in the workspace). */
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
+        if (docs[i].disk_only) continue;
         publish_diagnostics(docs[i].uri, &docs[i].parse);
     }
 }
@@ -806,13 +811,12 @@ static void handle_did_change_watched_files(yyjson_val *params) {
         int type = (int)yyjson_get_num(type_item);
 
         if (type == 3) {
-            /* Deleted — remove from store and clear client-side diagnostics.
-             * Skip if the editor has the file open: the editor's in-memory
-             * version stays authoritative until it sends didClose. */
+            /* Deleted — remove from store.  Skip if the editor has the file
+             * open: the editor's in-memory version stays authoritative until
+             * it sends didClose.  No publish needed — disk_only documents
+             * never had diagnostics published to the client. */
             Document *document = doc_find(uri);
             if (document && document->disk_only) {
-                ParseResult empty = {0};
-                publish_diagnostics(uri, &empty);
                 doc_free(document);
                 changed = 1;
             }
@@ -869,11 +873,14 @@ static void handle_did_rename_files(yyjson_val *params) {
         const char *new_uri = json_str(file_item, "newUri");
         if (!old_uri || !new_uri) continue;
 
-        /* Remove old URI */
+        /* Remove old URI.  Only publish empty if the editor had this file
+         * open — disk_only documents never had diagnostics on the client. */
         Document *old_doc = doc_find(old_uri);
         if (old_doc) {
-            ParseResult empty = {0};
-            publish_diagnostics(old_uri, &empty);
+            if (!old_doc->disk_only) {
+                ParseResult empty = {0};
+                publish_diagnostics(old_uri, &empty);
+            }
             doc_free(old_doc);
             changed = 1;
         }
@@ -922,10 +929,13 @@ static void handle_didopen(yyjson_val *params) {
     if (d) {
         if (!d->disk_only) return; /* duplicate open: LSP spec client error */
         /* File was pre-loaded from disk.
-         * If the editor text matches the disk content, just promote the document
-         * to editor-managed — the existing parse and diagnostics are already current. */
+         * If the editor text matches the disk content, just promote the
+         * document to editor-managed and publish — we skipped the publish
+         * during the workspace scan so the editor has never seen diagnostics
+         * for this file. */
         if (d->text && strcmp(d->text, text) == 0) {
             d->disk_only = 0;
+            revalidate_all_docs();
             return;
         }
         /* Text differs from disk — replace with authoritative editor content */
