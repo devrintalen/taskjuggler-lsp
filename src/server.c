@@ -1374,12 +1374,16 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    /* Gather symbol pools from all other open documents */
+    /* Gather symbol pools from other editor-managed documents.  disk_only
+     * documents (workspace scan + include follows) are excluded: the
+     * workspace may contain large unrelated .tjp files, and recursing
+     * their symbol trees would produce enormous completion responses. */
     DocSymbol *const *extra_pools[MAX_DOCS];
     int               extra_counts[MAX_DOCS];
     int               num_extra = 0;
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use || &docs[i] == d) continue;
+        if (docs[i].disk_only) continue;
         extra_pools[num_extra]  = docs[i].parse.doc_symbols;
         extra_counts[num_extra] = docs[i].parse.num_doc_symbols;
         num_extra++;
