@@ -803,9 +803,11 @@ static void handle_did_change_watched_files(yyjson_val *params) {
         int type = (int)yyjson_get_num(type_item);
 
         if (type == 3) {
-            /* Deleted — remove from store and clear client-side diagnostics */
+            /* Deleted — remove from store and clear client-side diagnostics.
+             * Skip if the editor has the file open: the editor's in-memory
+             * version stays authoritative until it sends didClose. */
             Document *document = doc_find(uri);
-            if (document) {
+            if (document && document->disk_only) {
                 ParseResult empty = {0};
                 publish_diagnostics(uri, &empty);
                 doc_free(document);
