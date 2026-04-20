@@ -68,13 +68,6 @@ typedef struct {
 
 void token_free(Token *t);
 
-/* ── DocSymbol kinds (LSP SymbolKind values) ─────────────────────────────── */
-
-#define SK_MODULE   2
-#define SK_FUNCTION 12
-#define SK_VARIABLE 13
-#define SK_OBJECT   19
-#define SK_EVENT    24
 
 /* ── DocSymbol ───────────────────────────────────────────────────────────── *
  *
@@ -83,7 +76,7 @@ void token_free(Token *t);
  * textDocument/documentSymbol, completion identifiers, and dep validation.
  *
  * name is the human-readable label (the quoted string after the identifier in
- * TJP).  detail is the short identifier used in dependency paths and cross-
+ * TJP).  id is the short identifier used in dependency paths and cross-
  * references.  Both are heap-allocated.
  *
  * range covers the full declaration including its body; selection_range covers
@@ -99,7 +92,7 @@ void token_free(Token *t);
  *
  *   DocSymbol {
  *     .name           = "Specification",
- *     .detail         = "spec",
+ *     .id         = "spec",
  *     .kind           = SK_FUNCTION,
  *     .range          = { {0,0}, {3,1} },   // full task block
  *     .selection_range= { {0,5}, {0,9} },   // just "spec"
@@ -107,7 +100,7 @@ void token_free(Token *t);
  *     .children       = [
  *       DocSymbol {
  *         .name           = "GUI",
- *         .detail         = "gui",
+ *         .id         = "gui",
  *         .kind           = SK_FUNCTION,
  *         .range          = { {2,4}, {2,22} },
  *         .selection_range= { {2,9}, {2,12} },
@@ -117,64 +110,28 @@ void token_free(Token *t);
  *   }
  */
 typedef struct DocSymbol DocSymbol;
+typedef struct DefinitionLink DefinitionLink;
+typedef struct ReferenceLink ReferenceLink;
+
+
+
 struct DocSymbol {
     char      *name;           /* display name, heap-allocated */
-    char      *detail;         /* TJP identifier, heap-allocated */
-    int        kind;           /* SK_* constant */
+    char      *id;             /* TJP identifier, heap-allocated */
+    int        keyword;        /* KW_* constant from grammar.tab.h */
     LspRange   range;
     LspRange   selection_range;
-    DocSymbol *children;       /* dynamic array */
+    DocSymbol *parent;         /* parent node; NULL for root-level symbols */
+    DocSymbol **children;      /* array of pointers to heap-allocated children */
     int        num_children;
     int        children_cap;
+    DefinitionLink *def_links; /* outgoing resolved references */
+    int        num_def_links;
+    int        def_links_cap;
+    ReferenceLink *ref_links;  /* incoming references from other symbols */
+    int        num_ref_links;
+    int        ref_links_cap;
 };
-
-/* ── DepRef ──────────────────────────────────────────────────────────────── *
- *
- * A raw dependency reference captured during parsing.  Stored in ParseResult
- * for cross-file revalidation by diagnostics.c:revalidate_dep_refs().
- *
- * bang_count counts leading '!' tokens, which shift the lookup root up the
- * scope chain.  segs[] is the dot-split path after the bangs.  scope[] is a
- * snapshot of the enclosing task identifier chain at the point of capture, used
- * by the validator to reproduce the relative-lookup algorithm at any time.
- *
- * Lookup rule: given scope depth k = scope_n and bang_count n,
- *   n == 0  ->  global (root-level) lookup
- *   n >= 1  ->  start at scope[0..k-n-1] (navigate n levels up), then
- *               search children for segs[0], then segs[1], etc.
- *   n > k   ->  invalid (too many bangs)
- *
- * Example TJP input (cursor task path = ["spec", "gui"], k=2):
- *
- *   task spec "Specification" {
- *       task database "Database" {}
- *       task gui "GUI" {
- *           depends !database       <- line 3, characters 12-21
- *       }
- *   }
- *
- * Produces:
- *
- *   DepRef {
- *     .bang_count = 1,
- *     .segs       = ["database"],
- *     .nseg       = 1,
- *     .scope      = ["spec", "gui"],
- *     .scope_n    = 2,
- *     .range      = { {3,12}, {3,21} },  // "!database"
- *   }
- *
- * The validator resolves this as: navigate to scope[0..0] = ["spec"], then
- * find "database" among spec's children -> spec.database. Valid.
- */
-typedef struct {
-    int       bang_count;
-    char    **segs;       /* dot-split path segments, heap-allocated */
-    int       nseg;
-    char    **scope;      /* task scope snapshot at parse time, heap-allocated */
-    int       scope_n;
-    LspRange  range;
-} DepRef;
 
 /* ── Diagnostic severity ─────────────────────────────────────────────────── */
 
@@ -188,8 +145,10 @@ typedef struct {
  *
  * Two sources of diagnostics are stored together in ParseResult, distinguished
  * by dep_diag_start:
- *   [0 .. dep_diag_start-1]  ->  syntax errors from the bison parser
- *   [dep_diag_start .. end]  ->  semantic errors from dep validation
+ *   [0 .. dep_diag_start-1]  ->  permanent diagnostics emitted during parse()
+ *                                (syntax errors, in-file dep resolution errors)
+ *   [dep_diag_start .. end]  ->  cross-file dep diagnostics, cleared and
+ *                                regenerated on every revalidation cycle
  *
  * Example TJP input with an unresolved dependency:
  *
@@ -248,18 +207,19 @@ typedef struct {
 typedef struct {
     int    token_kind;
     LspPos start, end;
-    char  *text;   /* heap-allocated; may be NULL */
+    char  *text;       /* heap-allocated; may be NULL */
+    DocSymbol *owner;  /* enclosing symbol node; NULL if outside any symbol */
 } TokenSpan;
 
 /* ── DefinitionLink ──────────────────────────────────────────────────────── *
  *
- * A resolved reference in the document.  source is the range of the
- * reference expression (e.g. a dependency path), target is the
- * selection_range of the symbol being referred to.
+ * A resolved reference stored on the DocSymbol that declared the dependency.
+ * source is the range of the reference expression (e.g. a dependency path),
+ * target points to the DocSymbol being referred to.
  *
  * Populated by revalidate_dep_refs() for every successfully resolved
- * dependency reference so that textDocument/definition can answer without
- * re-parsing.
+ * dependency reference.  Each link is owned by the declaring DocSymbol
+ * (the task containing the `depends` or `precedes` clause).
  *
  * target_uri is heap-allocated and is NULL when the target is in the same
  * document as the source.  For cross-file references it holds the URI of
@@ -272,22 +232,81 @@ typedef struct {
  *       depends database            <- line 2; "database" is at {2,16}..{2,24}
  *   }
  *
- * After revalidate_dep_refs() resolves the dependency, it emits:
+ * After revalidate_dep_refs() resolves the dependency, gui's def_links[]
+ * contains:
  *
  *   DefinitionLink {
  *     .source     = { {2,16}, {2,24} },   // range of "database" in depends expr
- *     .target     = { {0,5},  {0,13} },   // selection_range of the task symbol
+ *     .target     = &database_sym,         // resolved target DocSymbol
  *     .target_uri = NULL,                  // same document
  *   }
  *
  * When the user invokes go-to-definition with the cursor anywhere in source,
- * the server finds this link and jumps the editor to target.
+ * the server finds this link and jumps the editor to the target's
+ * selection_range.
+ */
+struct DefinitionLink {
+    LspRange   source;     /* range of the reference expression */
+    DocSymbol *target;     /* resolved target symbol */
+    char      *target_uri; /* heap-allocated; NULL means same document */
+};
+
+/* ── ReferenceLink ──────────────────────────────────────────────────────── *
+ *
+ * An incoming reference to a DocSymbol — the inverse of DefinitionLink.
+ * While DefinitionLink lives on the *declaring* symbol and points outward
+ * to the target, ReferenceLink lives on the *target* symbol and points
+ * back to each site that references it.
+ *
+ * source is the range of the reference expression at the call site.
+ * origin points to the DocSymbol that made the reference (the owner of
+ * the corresponding DefinitionLink).
+ *
+ * source_uri is heap-allocated and is NULL when the reference originates
+ * from the same document as the target.  For cross-file references it
+ * holds the URI of the file containing the reference.
+ *
+ * Example TJP input:
+ *
+ *   task database "Database" {}     <- line 0
+ *   task gui "GUI" {
+ *       depends database            <- line 2; "database" is at {2,16}..{2,24}
+ *   }
+ *
+ * After resolution, database's ref_links[] contains:
+ *
+ *   ReferenceLink {
+ *     .source     = { {2,16}, {2,24} },   // range of "database" in depends expr
+ *     .origin     = &gui_sym,              // the symbol that declared the dep
+ *     .source_uri = NULL,                  // same document
+ *   }
+ */
+struct ReferenceLink {
+    LspRange   source;     /* range of the reference expression */
+    DocSymbol *origin;     /* symbol that contains the reference */
+    char      *source_uri; /* heap-allocated; NULL means same document */
+};
+
+/* ── RawDepRef ───────────────────────────────────────────────────────────── *
+ *
+ * A `depends`/`precedes` reference captured during parsing.  Used transiently
+ * by the grammar→parser resolver (via g_dep_refs[] in parser.c), and also
+ * stored on ParseResult.cross_file_deps[] for 0-bang references that failed
+ * in-file resolution — those are retried each revalidation against other
+ * open documents.
+ *
+ * path is dot-separated (e.g. "deliveries.start") and heap-allocated.
+ * owner points to the DocSymbol that declared the reference; it lives in
+ * the same ParseResult's doc_symbols tree and is freed separately.
+ * range is the source location of the reference expression (for diagnostics
+ * and go-to-definition).
  */
 typedef struct {
-    LspRange  source;     /* range of the reference expression */
-    LspRange  target;     /* selection_range of the target symbol */
-    char     *target_uri; /* heap-allocated; NULL means same document */
-} DefinitionLink;
+    int        bang_count;
+    char      *path;       /* dot-separated, heap-allocated */
+    DocSymbol *owner;      /* owning symbol in the same ParseResult */
+    LspRange   range;
+} RawDepRef;
 
 /* ── ParseResult ─────────────────────────────────────────────────────────── *
  *
@@ -301,33 +320,26 @@ typedef struct {
  *       depends database
  *   }
  *
- * After parse() and revalidate_dep_refs():
+ * After parse():
  *
  *   ParseResult {
  *     .num_diagnostics = 0,          // no errors
  *     .dep_diag_start  = 0,
  *
  *     .doc_symbols = [               // two top-level tasks
- *       DocSymbol { .detail="database", ... },
- *       DocSymbol { .detail="gui", ... },
+ *       DocSymbol { .id="database", .keyword=KW_TASK, ... },
+ *       DocSymbol { .id="gui", .keyword=KW_TASK, ... },
  *     ],
  *     .num_doc_symbols = 2,
  *
- *     .tok_spans = [                 // every token in the file, in order
- *       {KW_TASK,"task",...}, {TK_IDENT,"database",...}, ...
- *       {KW_DEPENDS,"depends",...}, {TK_IDENT,"database",...}, ...
+ *     .tok_spans = [                 // every token, in order; each has owner
+ *       {KW_TASK,"task", .owner=&database_sym, ...}, ...
  *     ],
  *     .num_tok_spans = N,
  *
- *     .def_links = [                 // one resolved dependency
- *       DefinitionLink { .source={2,16..24}, .target={0,5..13}, .target_uri=NULL },
- *     ],
- *     .num_def_links = 1,
- *
- *     .raw_dep_refs = [              // same dep, stored for revalidation
- *       DepRef { .bang_count=0, .segs=["database"], .scope=["gui"], ... },
- *     ],
- *     .num_raw_dep_refs = 1,
+ *     // dep_edges are resolved and freed during parse(); after return,
+ *     // def_links/ref_links on each DocSymbol hold the resolved links
+ *     // and diagnostics[] contains errors for any broken references.
  *   }
  */
 
@@ -335,23 +347,20 @@ typedef struct {
     Diagnostic     *diagnostics;
     int             num_diagnostics;
     int             diag_cap;
-    int             dep_diag_start; /* diagnostics[0..dep_diag_start-1] are syntax errors */
-    DocSymbol      *doc_symbols;
+    int             dep_diag_start; /* diagnostics[0..dep_diag_start-1] survive revalidation */
+    DocSymbol     **doc_symbols;      /* array of pointers to heap-allocated symbols */
     int             num_doc_symbols;
     int             doc_sym_cap;
     TokenSpan      *tok_spans;
     int             num_tok_spans;
     int             tok_span_cap;
-    DefinitionLink *def_links;
-    int             num_def_links;
-    int             def_link_cap;
-    DepRef         *raw_dep_refs;     /* captured dep refs for cross-file revalidation */
-    int             num_raw_dep_refs;
-    int             raw_dep_ref_cap;
     int             num_sem_entries;  /* upper bound on push_entry calls for semantic tokens */
     char          **included_files;   /* unquoted filenames from include statements */
     int             num_included_files;
     int             included_files_cap;
+    RawDepRef      *cross_file_deps;    /* 0-bang refs that failed in-file resolution */
+    int             num_cross_file_deps;
+    int             cross_file_deps_cap;
 } ParseResult;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -361,15 +370,52 @@ void        parse_result_free(ParseResult *r);
 void        doc_symbol_free(DocSymbol *s);
 void        push_included_file(ParseResult *r, const char *quoted_text);
 
+/* Raw dependency reference accumulation (called from grammar.y) */
+void push_dep_ref(int bang_count, const char *path,
+                  DocSymbol *owner, LspPos start, LspPos end);
+void dep_refs_reset(void);
+
+/* Resolve r's cross_file_deps[] against the given set of other documents'
+ * top-level symbols.  For each ref: if a match is found, adds a cross-file
+ * DefinitionLink on the owner (with target_uri) and ReferenceLink on the
+ * target (with source_uri = self_uri).  Otherwise emits an "unresolved
+ * dependency" diagnostic onto r->diagnostics.  Matches go through the same
+ * KW_PROJECT-transparent find_task() used for in-file resolution, so only
+ * top-level symbols (as surfaced by include statements) are visible.
+ *
+ * Call clear_cross_file_state(r) before calling this to wipe any cross-file
+ * state left over from a previous resolution pass.
+ */
+void resolve_cross_file_deps(ParseResult *r,
+                             DocSymbol *const *const *extra_roots,
+                             const int *extra_counts,
+                             const char *const *extra_uris,
+                             int num_extra,
+                             const char *self_uri);
+
+/* Strip cross-file state from r: removes def_links entries with a non-NULL
+ * target_uri and ref_links entries with a non-NULL source_uri (freeing the
+ * URI strings), and truncates r->diagnostics back to dep_diag_start.
+ * Called by the server before each cross-file resolution cycle.
+ */
+void clear_cross_file_state(ParseResult *r);
+
+/* Return the innermost DocSymbol whose range contains pos (inclusive start,
+ * exclusive end), using the precomputed .owner field on tok_spans.  Returns
+ * NULL if pos is outside every DocSymbol.  O(log T + D) where T = num_tokens
+ * and D = symbol nesting depth at pos.
+ */
+DocSymbol *symbol_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
+
 /*
  * Navigate the DocSymbol tree by following `path` (an array of `plen`
  * identifier strings).  Returns the children array of the matching node and
  * sets *out_n to its length, or NULL / *out_n=0 if the path is not found.
  * Only SK_FUNCTION nodes are traversed (i.e. tasks).
  */
-const DocSymbol *doc_symbol_find_path(const DocSymbol *syms, int n,
-                                      const char **path, int plen,
-                                      int *out_n);
+DocSymbol *const *doc_symbol_find_path(DocSymbol *const *syms, int n,
+                                       const char **path, int plen,
+                                       int *out_n);
 
 /* Compare two positions. Returns -1, 0, or 1. */
 static inline int pos_cmp(LspPos a, LspPos b) {

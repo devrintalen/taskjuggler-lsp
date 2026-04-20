@@ -21,19 +21,17 @@
  *
  * ── Overview ─────────────────────────────────────────────────────────────
  *
- * Go-to-definition is answered from the DefinitionLink array stored in
- * ParseResult.  Each DefinitionLink records a pair of ranges:
+ * Go-to-definition is answered from DefinitionLink arrays stored on each
+ * DocSymbol.  Each DefinitionLink records a source range (the reference
+ * expression) and a target pointer (the resolved DocSymbol).
  *
- *   source — the range of a reference expression in the document (e.g. a
- *             dependency path in a `depends` or `precedes` clause)
- *   target — the selection_range of the symbol being referred to
+ * These links are populated by parser.c:resolve_dep_refs() after every
+ * document change for every successfully resolved dependency reference.
  *
- * These links are populated by diagnostics.c:revalidate_dep_refs() after
- * every document change for every successfully resolved dependency reference.
- *
- * At query time, build_definition_json() scans the link array for an entry
- * whose source range contains the cursor and, when found, returns a Location
- * object pointing at the target symbol's selection_range in the same document.
+ * At query time, build_definition_json() locates the innermost DocSymbol
+ * containing the cursor via symbol_at() and scans its def_links for one
+ * whose source range covers the cursor.  When found, returns a Location
+ * object pointing at the target symbol's selection_range.
  *
  * ── Supported references ─────────────────────────────────────────────────
  *
@@ -54,28 +52,42 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-/* Build a Location JSON object for the go-to-definition response.
- * Scans links[] for one whose source range contains cursor.
- * Returns NULL if no matching link is found (server will return null to editor).
- *
- * doc       — the mutable JSON document that will own the returned value
- * links     — array of resolved definition links from the ParseResult
- * num_links — number of entries in links
- * cursor    — cursor position from the textDocument/definition request
- * uri       — URI of the requesting document, used as fallback target URI
- */
-yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
-                                       const DefinitionLink *links, int num_links,
-                                       LspPos cursor, const char *uri) {
-    for (int i = 0; i < num_links; i++) {
-        if (pos_in_range(cursor, links[i].source)) {
-            const char *target_uri = links[i].target_uri ? links[i].target_uri : uri;
-            yyjson_mut_val *location = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_str(doc, location, "uri", target_uri);
-            yyjson_mut_obj_add_val(doc, location, "range",
-                                   range_json(doc, links[i].target));
-            return location;
+/* Find a DefinitionLink whose source range contains the cursor.  Uses the
+ * precomputed tok_spans[].owner to locate the innermost enclosing DocSymbol
+ * via symbol_at(), then walks up the parent chain checking def_links at
+ * each level.  Returns a pointer to the matching link, or NULL. */
+const DefinitionLink *find_def_link_at(const TokenSpan *tokens, int num_tokens,
+                                       LspPos cursor) {
+    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
+         sym != NULL; sym = sym->parent) {
+        for (int j = 0; j < sym->num_def_links; j++) {
+            if (pos_in_range(cursor, sym->def_links[j].source))
+                return &sym->def_links[j];
         }
     }
     return NULL;
+}
+
+/* Build a Location JSON object for the go-to-definition response.
+ * Locates a DefinitionLink whose source range contains cursor.
+ * Returns NULL if no matching link is found (server will return null to editor).
+ *
+ * doc        — the mutable JSON document that will own the returned value
+ * tokens     — token span array from the ParseResult (carries .owner links)
+ * num_tokens — number of entries in tokens
+ * cursor     — cursor position from the textDocument/definition request
+ * uri        — URI of the requesting document, used as fallback target URI
+ */
+yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
+                                       const TokenSpan *tokens, int num_tokens,
+                                       LspPos cursor, const char *uri) {
+    const DefinitionLink *link = find_def_link_at(tokens, num_tokens, cursor);
+    if (!link) return NULL;
+
+    const char *target_uri = link->target_uri ? link->target_uri : uri;
+    yyjson_mut_val *location = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, location, "uri", target_uri);
+    yyjson_mut_obj_add_val(doc, location, "range",
+                           range_json(doc, link->target->selection_range));
+    return location;
 }

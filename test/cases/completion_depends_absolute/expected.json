@@ -97,60 +97,34 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file:///test/tasks.tji",
+      "uri": "file:///test/p.tjp",
       "diagnostics": []
     }
   },
   {
     "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/tasks.tji",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/project.tjp",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/tasks.tji",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/project.tjp",
-      "diagnostics": [
+    "id": 2,
+    "result": {
+      "isIncomplete": true,
+      "items": [
         {
-          "range": {
-            "start": {
-              "line": 2,
-              "character": 10
-            },
-            "end": {
-              "line": 2,
-              "character": 14
-            }
-          },
-          "severity": 1,
-          "message": "unresolved dependency: spec"
+          "label": "spec",
+          "kind": 3,
+          "detail": "\"Specification\"",
+          "sortText": "0"
+        },
+        {
+          "label": "build",
+          "kind": 3,
+          "detail": "\"Build\"",
+          "sortText": "0"
         }
       ]
     }
   },
   {
     "jsonrpc": "2.0",
-    "id": 2,
+    "id": 3,
     "result": null
   }
 ]

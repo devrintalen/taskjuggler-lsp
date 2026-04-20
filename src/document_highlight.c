@@ -24,11 +24,8 @@
  * Document-highlight is answered from three data structures in ParseResult:
  *
  *   doc_symbols — the symbol tree; each node has a selection_range covering
- *                 its declaration identifier, and a detail field with the
- *                 identifier text
- *   def_links   — the DefinitionLink array populated by revalidate_dep_refs();
- *                 each entry maps a reference's source range to the target
- *                 symbol's selection_range
+ *                 its declaration identifier, an id field with the
+ *                 identifier text, and def_links[] with resolved references
  *   tok_spans   — flat ordered token array used to identify the token at the
  *                 cursor and to find per-segment ranges within dotted paths
  *
@@ -38,7 +35,8 @@
  *
  *   2. Resolves the target symbol — either the cursor is on a definition
  *      site (matched via doc_symbols) or on a reference site (matched via
- *      def_links).  For dotted paths, each segment is resolved independently.
+ *      def_links on the enclosing symbol).  For dotted paths, each segment
+ *      is resolved independently.
  *
  *   3. Collects highlights: the definition as Write (kind 3) and all
  *      same-document references as Read (kind 2).
@@ -71,48 +69,47 @@ static int range_eq(LspRange a, LspRange b) {
     return pos_cmp(a.start, b.start) == 0 && pos_cmp(a.end, b.end) == 0;
 }
 
-/* Walk the symbol tree depth-first to find any node whose selection_range
- * contains pos.  Unlike find_task_at in references.c, this is not filtered
- * by kind — it matches tasks, resources, accounts, and all other symbols. */
-static const DocSymbol *find_symbol_at(const DocSymbol *syms, int n,
+/* Find the innermost DocSymbol at pos whose selection_range contains pos.
+ * Uses symbol_at() for O(log T + D) lookup, then walks up parents checking
+ * selection_range at each level.  Returns NULL if no match. */
+static const DocSymbol *find_symbol_at(const TokenSpan *tokens, int num_tokens,
                                        LspPos pos) {
-    for (int i = 0; i < n; i++) {
-        if (pos_in_range(pos, syms[i].selection_range))
-            return &syms[i];
-        const DocSymbol *found =
-            find_symbol_at(syms[i].children, syms[i].num_children, pos);
-        if (found) return found;
+    for (DocSymbol *sym = symbol_at(tokens, num_tokens, pos);
+         sym != NULL; sym = sym->parent) {
+        if (pos_in_range(pos, sym->selection_range))
+            return sym;
     }
     return NULL;
 }
 
-/* Walk the symbol tree depth-first to find a node whose selection_range
- * matches sel exactly.  Used to resolve a def_link target back to the
- * corresponding DocSymbol. */
-static const DocSymbol *find_symbol_by_range(const DocSymbol *syms, int n,
-                                             LspRange sel) {
-    for (int i = 0; i < n; i++) {
-        if (range_eq(syms[i].selection_range, sel))
-            return &syms[i];
-        const DocSymbol *found =
-            find_symbol_by_range(syms[i].children, syms[i].num_children, sel);
-        if (found) return found;
-    }
-    return NULL;
-}
-
-/* Walk the symbol tree depth-first to find the first node whose detail
+/* Walk the symbol tree depth-first to find the first node whose id
  * matches the given string.  Used for intermediate segments in dotted
  * dependency paths where no def_link directly targets the segment. */
-static const DocSymbol *find_symbol_by_detail(const DocSymbol *syms, int n,
-                                              const char *detail) {
+static const DocSymbol *find_symbol_by_id(DocSymbol *const *syms, int n,
+                                          const char *id) {
     for (int i = 0; i < n; i++) {
-        if (syms[i].detail && strcmp(syms[i].detail, detail) == 0)
-            return &syms[i];
+        if (syms[i]->id && strcmp(syms[i]->id, id) == 0)
+            return syms[i];
         const DocSymbol *found =
-            find_symbol_by_detail(syms[i].children, syms[i].num_children,
-                                  detail);
+            find_symbol_by_id(syms[i]->children, syms[i]->num_children, id);
         if (found) return found;
+    }
+    return NULL;
+}
+
+/* Find a same-document DefinitionLink whose source range contains pos and
+ * return its target.  Uses symbol_at() to locate the innermost enclosing
+ * symbol, then scans def_links walking up parents on miss. */
+static const DocSymbol *find_link_target_at(const TokenSpan *tokens,
+                                            int num_tokens, LspPos pos) {
+    for (DocSymbol *sym = symbol_at(tokens, num_tokens, pos);
+         sym != NULL; sym = sym->parent) {
+        for (int j = 0; j < sym->num_def_links; j++) {
+            const DefinitionLink *link = &sym->def_links[j];
+            if (link->target_uri) continue;
+            if (pos_in_range(pos, link->source))
+                return link->target;
+        }
     }
     return NULL;
 }
@@ -127,10 +124,35 @@ static void push_highlight(yyjson_mut_doc *doc, yyjson_mut_val *arr,
     yyjson_mut_arr_add_val(arr, obj);
 }
 
+/* Collect Read highlights from the target symbol's ref_links.
+ * For each same-document reference, find the specific token within the
+ * ref source range that matches the target's id. */
+static void collect_ref_highlights(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                                   const DocSymbol *target,
+                                   const TokenSpan *tokens, int num_tokens) {
+    for (int i = 0; i < target->num_ref_links; i++) {
+        const ReferenceLink *ref = &target->ref_links[i];
+        if (ref->source_uri) continue;
+
+        /* Scan only tokens within the ref source range */
+        for (int t = 0; t < num_tokens; t++) {
+            if (pos_cmp(tokens[t].start, ref->source.end) > 0) break;
+            if (pos_cmp(tokens[t].end, ref->source.start) < 0) continue;
+            if (tokens[t].token_kind != TK_IDENT) continue;
+            if (!tokens[t].text) continue;
+            if (strcmp(tokens[t].text, target->id) != 0) continue;
+
+            LspRange token_range = { tokens[t].start, tokens[t].end };
+            if (range_eq(token_range, target->selection_range)) continue;
+
+            push_highlight(doc, arr, token_range, 2);
+        }
+    }
+}
+
 yyjson_mut_val *build_document_highlight_json(
     yyjson_mut_doc *doc,
-    const DefinitionLink *links, int num_links,
-    const DocSymbol *symbols, int num_symbols,
+    DocSymbol *const *symbols, int num_symbols,
     const TokenSpan *tokens, int num_tokens,
     LspPos cursor) {
 
@@ -144,31 +166,25 @@ yyjson_mut_val *build_document_highlight_json(
     const DocSymbol *target = NULL;
 
     /* Step 2a: check if cursor is on a definition site. */
-    target = find_symbol_at(symbols, num_symbols, cursor);
+    target = find_symbol_at(tokens, num_tokens, cursor);
 
     /* Step 2b: check if cursor is on a reference site. */
     if (!target) {
-        for (int i = 0; i < num_links; i++) {
-            if (links[i].target_uri) continue;
-            if (!pos_in_range(cursor, links[i].source)) continue;
-
-            const DocSymbol *link_target =
-                find_symbol_by_range(symbols, num_symbols, links[i].target);
-            if (!link_target) continue;
-
-            if (link_target->detail && tok.text
-                    && strcmp(link_target->detail, tok.text) == 0) {
+        const DocSymbol *link_target =
+            find_link_target_at(tokens, num_tokens, cursor);
+        if (link_target) {
+            if (link_target->id && tok.text
+                    && strcmp(link_target->id, tok.text) == 0) {
                 target = link_target;
             } else {
-                target = find_symbol_by_detail(symbols, num_symbols, tok.text);
+                target = find_symbol_by_id(symbols, num_symbols, tok.text);
             }
-            break;
         }
     }
 
     free(tok.text);
 
-    if (!target || !target->detail) return NULL;
+    if (!target || !target->id) return NULL;
 
     /* Step 3: collect highlights. */
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
@@ -176,39 +192,8 @@ yyjson_mut_val *build_document_highlight_json(
     /* 3a: definition site — Write. */
     push_highlight(doc, arr, target->selection_range, 3);
 
-    /* 3b: reference sites — Read.
-     * Scan all same-document def_links.  For each, find TK_IDENT tokens
-     * within the link's source range whose text matches the target detail.
-     * This handles both direct targets and intermediate dotted-path segments.
-     */
-    for (int i = 0; i < num_links; i++) {
-        if (links[i].target_uri) continue;
-
-        int link_relevant = range_eq(links[i].target, target->selection_range);
-
-        for (int t = 0; t < num_tokens; t++) {
-            if (tokens[t].token_kind != TK_IDENT) continue;
-            if (!tokens[t].text) continue;
-            if (strcmp(tokens[t].text, target->detail) != 0) continue;
-
-            LspRange token_range = { tokens[t].start, tokens[t].end };
-
-            /* Token must fall within this link's source range. */
-            if (!pos_in_range(tokens[t].start, links[i].source)) continue;
-
-            /* Skip if this token range is the definition itself. */
-            if (range_eq(token_range, target->selection_range)) continue;
-
-            if (link_relevant) {
-                push_highlight(doc, arr, token_range, 2);
-            } else {
-                /* Intermediate segment: the link's target is a different
-                 * symbol, but the token text matches our target detail and
-                 * falls within a dep reference expression. */
-                push_highlight(doc, arr, token_range, 2);
-            }
-        }
-    }
+    /* 3b: reference sites — Read. */
+    collect_ref_highlights(doc, arr, target, tokens, num_tokens);
 
     return arr;
 }

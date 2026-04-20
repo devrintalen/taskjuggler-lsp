@@ -111,7 +111,7 @@
             }
           },
           "severity": 1,
-          "message": "unresolved task: `spec`"
+          "message": "unresolved dependency: spec"
         }
       ]
     }

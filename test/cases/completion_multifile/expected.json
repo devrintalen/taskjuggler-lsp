@@ -124,6 +124,18 @@
       "isIncomplete": true,
       "items": [
         {
+          "label": "spec",
+          "kind": 3,
+          "detail": "\"Specification\"",
+          "sortText": "0"
+        },
+        {
+          "label": "build",
+          "kind": 3,
+          "detail": "\"Build\"",
+          "sortText": "0"
+        },
+        {
           "label": "doc",
           "kind": 3,
           "detail": "\"Documentation\"",

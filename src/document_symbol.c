@@ -17,9 +17,27 @@
  */
 
 #include "document_symbol.h"
+#include "grammar.tab.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+
+/* LSP SymbolKind values — only used for JSON serialization. */
+#define SK_MODULE   2
+#define SK_FUNCTION 12
+#define SK_VARIABLE 13
+#define SK_OBJECT   19
+#define SK_EVENT    24
+
+int symbol_kind_for(int keyword) {
+    switch (keyword) {
+    case KW_PROJECT:  return SK_MODULE;
+    case KW_RESOURCE: return SK_OBJECT;
+    case KW_ACCOUNT:  return SK_VARIABLE;
+    case KW_SHIFT:    return SK_EVENT;
+    default:          return SK_FUNCTION;
+    }
+}
 
 /* Convenience macro: push a string literal without calling strlen at runtime. */
 #define PUSH_LIT(b, s) buf_push((b), (s), sizeof(s) - 1)
@@ -132,9 +150,9 @@ static void write_sym_buf(Buf *b, const DocSymbol *sym) {
     PUSH_LIT(b, "{\"name\":");
     buf_push_json_str(b, sym->name   ? sym->name   : "");
     PUSH_LIT(b, ",\"detail\":");
-    buf_push_json_str(b, sym->detail ? sym->detail : "");
+    buf_push_json_str(b, sym->id ? sym->id : "");
     PUSH_LIT(b, ",\"kind\":");
-    buf_push_uint(b, (uint32_t)sym->kind);
+    buf_push_uint(b, (uint32_t)symbol_kind_for(sym->keyword));
     PUSH_LIT(b, ",\"range\":");
     write_range_buf(b, sym->range);
     PUSH_LIT(b, ",\"selectionRange\":");
@@ -143,7 +161,7 @@ static void write_sym_buf(Buf *b, const DocSymbol *sym) {
         PUSH_LIT(b, ",\"children\":[");
         for (int i = 0; i < sym->num_children; i++) {
             if (i > 0) buf_push(b, ",", 1);
-            write_sym_buf(b, &sym->children[i]);
+            write_sym_buf(b, sym->children[i]);
         }
         buf_push(b, "]", 1);
     }
@@ -161,12 +179,12 @@ static void write_sym_buf(Buf *b, const DocSymbol *sym) {
  * n       — number of entries in syms
  * out_len — receives the byte count of the returned string
  */
-char *build_document_symbols_json(const DocSymbol *syms, int n, size_t *out_len) {
+char *build_document_symbols_json(DocSymbol *const *syms, int n, size_t *out_len) {
     Buf b = {0};
     buf_push(&b, "[", 1);
     for (int i = 0; i < n; i++) {
         if (i > 0) buf_push(&b, ",", 1);
-        write_sym_buf(&b, &syms[i]);
+        write_sym_buf(&b, syms[i]);
     }
     buf_push(&b, "]", 1);
     *out_len = b.len;

@@ -21,39 +21,33 @@
  *
  * ── Overview ─────────────────────────────────────────────────────────────
  *
- * Find-references is answered from two data structures already in ParseResult:
- *
- *   doc_symbols — the symbol tree; each SK_FUNCTION node has a selection_range
- *                 covering its declaration identifier
- *   def_links   — the DefinitionLink array populated by revalidate_dep_refs();
- *                 each entry maps a reference's source range to the target
- *                 symbol's selection_range
+ * Find-references is answered from ref_links[] arrays on DocSymbols.  Each
+ * KW_TASK node has a selection_range covering its declaration identifier,
+ * and each node may carry ref_links[] pointing to the source locations of
+ * incoming dependency references.
  *
  * At query time, build_references_json():
  *
- *   1. Walks the doc_symbols tree of the cursor document to find the SK_FUNCTION
- *      (task) whose selection_range contains the cursor.  Returns null if none.
+ *   1. Uses symbol_at() to locate the innermost DocSymbol at the cursor,
+ *      walks up to find a KW_TASK whose selection_range contains the cursor.
+ *      Returns null if none.
  *
- *   2. Scans def_links from EVERY supplied document for entries whose resolved
- *      target points to the task found in step 1.  A def_link in document D
- *      targets the declaration in cursor_uri when:
- *        • link.target_uri == cursor_uri  (explicit cross-file pointer), or
- *        • link.target_uri == NULL and D.uri == cursor_uri (same-file link)
- *      and link.target range-equals the task's selection_range.
+ *   2. Iterates the target task's ref_links[] to collect all incoming
+ *      references (same-document and cross-document).
  *
- *   3. Returns a JSON array of Location objects, one per matching link.
- *      The array may be empty if no dependency references point to the task
- *      across the whole workspace.
+ *   3. Returns a JSON array of Location objects, one per reference.
+ *      The array may be empty if no dependency references point to the task.
  *
  * ── Trigger constraint ───────────────────────────────────────────────────
  *
- * Only task declaration identifiers (SK_FUNCTION selection_range) trigger a
+ * Only task declaration identifiers (KW_TASK selection_range) trigger a
  * response.  Positioning the cursor on a reference in a depends/precedes
  * clause, on a keyword, or on a non-task symbol returns null.
  */
 
 #include "references.h"
 #include "document_symbol.h"
+#include "grammar.tab.h"
 #include <string.h>
 
 /* Returns 1 if position p falls within range r (both endpoints inclusive). */
@@ -65,64 +59,31 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-/* Returns 1 if ranges a and b have identical start and end positions. */
-static int range_eq(LspRange a, LspRange b) {
-    return pos_cmp(a.start, b.start) == 0 && pos_cmp(a.end, b.end) == 0;
-}
-
-/* Walk the symbol tree depth-first to find the SK_FUNCTION node whose
- * selection_range contains pos.  Returns NULL if no such node exists. */
-static const DocSymbol *find_task_at(const DocSymbol *syms, int n, LspPos pos) {
-    for (int i = 0; i < n; i++) {
-        if (syms[i].kind == SK_FUNCTION
-                && pos_in_range(pos, syms[i].selection_range))
-            return &syms[i];
-        const DocSymbol *found =
-            find_task_at(syms[i].children, syms[i].num_children, pos);
-        if (found) return found;
-    }
-    return NULL;
-}
-
-/* Build the JSON array for a textDocument/references response.
- * Finds the task declaration at cursor in cursor_uri, then collects every
- * dep_ref link — across all supplied documents — that resolves to it.
- *
- * doc          — the mutable JSON document that will own the returned value
- * cursor_uri   — URI of the document the cursor is in
- * symbols      — root-level symbol array of the cursor document
- * num_symbols  — number of entries in symbols
- * all_docs     — one entry per open document; all are searched for references
- * num_docs     — number of entries in all_docs
- * cursor       — cursor position from the textDocument/references request
- */
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
                                        const char *cursor_uri,
-                                       const DocSymbol *symbols, int num_symbols,
-                                       const RefDocLinks *all_docs, int num_docs,
+                                       const TokenSpan *tokens, int num_tokens,
                                        LspPos cursor) {
-    const DocSymbol *task = find_task_at(symbols, num_symbols, cursor);
+    const DocSymbol *task = NULL;
+    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
+         sym != NULL; sym = sym->parent) {
+        if (sym->keyword == KW_TASK
+                && pos_in_range(cursor, sym->selection_range)) {
+            task = sym;
+            break;
+        }
+    }
     if (!task) return NULL;
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    for (int d = 0; d < num_docs; d++) {
-        const RefDocLinks *rdl = &all_docs[d];
-        for (int i = 0; i < rdl->num_links; i++) {
-            const DefinitionLink *link = &rdl->links[i];
-            /* Determine the URI of the file that contains the target symbol.
-             * target_uri == NULL means the target is in the same file as the
-             * reference (i.e. rdl->uri). */
-            const char *effective_target_uri =
-                link->target_uri ? link->target_uri : rdl->uri;
-            if (strcmp(effective_target_uri, cursor_uri) != 0) continue;
-            if (!range_eq(link->target, task->selection_range))  continue;
+    for (int i = 0; i < task->num_ref_links; i++) {
+        const ReferenceLink *ref = &task->ref_links[i];
+        const char *uri = ref->source_uri ? ref->source_uri : cursor_uri;
 
-            yyjson_mut_val *location = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_str(doc, location, "uri", rdl->uri);
-            yyjson_mut_obj_add_val(doc, location, "range",
-                                   range_json(doc, link->source));
-            yyjson_mut_arr_add_val(arr, location);
-        }
+        yyjson_mut_val *location = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc, location, "uri", uri);
+        yyjson_mut_obj_add_val(doc, location, "range",
+                               range_json(doc, ref->source));
+        yyjson_mut_arr_add_val(arr, location);
     }
     return arr;
 }

@@ -75,12 +75,6 @@
  *       │  for each document, gathers doc_symbols[] from all *other* open
  *       │  documents as extra symbol pools, then calls:
  *       │
- *       ├─► revalidate_dep_refs(&parse, extra_pools, …)   ← diagnostics.c
- *       │       resolves each raw_dep_ref against the local + extra pools:
- *       │         success → appends a DefinitionLink to def_links[]
- *       │         failure → appends an error Diagnostic to diagnostics[]
- *       │                   (starting at dep_diag_start)
- *       │
  *       └─► publish_diagnostics(uri, &parse)              ← diagnostics.c
  *               serialises diagnostics[] and pushes a
  *               textDocument/publishDiagnostics notification to the editor
@@ -98,26 +92,25 @@
  *   tok_spans[]          hover              → active_keyword_at() (fallback)
  *                        signature_help     → active_context()
  *                        completion         → build_completions_json()
- *                        folding_range      → build_folding_ranges_json()
+ *                        folding_range      → build_folding_ranges_json() (brackets, comments)
  *                        semantic_tokens    → build_semantic_tokens_json()
  *                        document_highlight → build_document_highlight_json()
  *
  *   doc_symbols[]        document_symbol    → build_document_symbols_json()
  *                        workspace_symbol   → collect_workspace_symbols()
  *                        completion         → build_completions_json() (IDs)
- *                        references         → build_references_json()
+ *                        folding_range      → build_folding_ranges_json() (brace blocks)
  *                        document_highlight → build_document_highlight_json()
  *
  *   def_links[]          definition         → build_definition_json()
- *                        references         → build_references_json()
- *                        hover              → resolved-ref hover (primary path)
+ *   (on DocSymbol)       hover              → resolved-ref hover (primary path)
+ *
+ *   ref_links[]          references         → build_references_json()
  *                        document_highlight → build_document_highlight_json()
  *
  *   diagnostics[]        (pushed proactively via publish_diagnostics;
  *                         never queried on demand)
  *
- *   raw_dep_refs[]       (consumed only by revalidate_dep_refs;
- *                         not read by any query handler)
  *
  * OUTBOUND (server → editor)
  * ──────────────────────────
@@ -362,17 +355,20 @@ static void follow_includes(const char *file_path, const ParseResult *result) {
             full_path = malloc(fname_len + 1);
             if (!full_path) continue;
             memcpy(full_path, filename, fname_len + 1);
-        } else {
-            /* Relative path — resolve against parent directory */
+        } else if (last_slash) {
+            /* Relative path with a parent directory.  dir_len == 0 means the
+             * parent is the filesystem root "/", so we always write one slash
+             * between the prefix and the filename. */
             full_path = malloc(dir_len + 1 + fname_len + 1);
             if (!full_path) continue;
-            if (dir_len > 0) {
-                memcpy(full_path, file_path, dir_len);
-                full_path[dir_len] = '/';
-                memcpy(full_path + dir_len + 1, filename, fname_len + 1);
-            } else {
-                memcpy(full_path, filename, fname_len + 1);
-            }
+            memcpy(full_path, file_path, dir_len);
+            full_path[dir_len] = '/';
+            memcpy(full_path + dir_len + 1, filename, fname_len + 1);
+        } else {
+            /* file_path had no slash — resolve relative to CWD. */
+            full_path = malloc(fname_len + 1);
+            if (!full_path) continue;
+            memcpy(full_path, filename, fname_len + 1);
         }
 
         load_file_from_disk(full_path);
@@ -546,32 +542,54 @@ static yyjson_mut_val *make_response(yyjson_mut_doc *doc, yyjson_val *id,
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /*
- * Revalidate dep refs in all open documents using the combined symbol pools
- * from every other open document, then publish updated diagnostics.
+ * Revalidate cross-file dep refs in all open documents, then publish updated
+ * diagnostics.  Called after any document open, change, or close.
  *
- * Called after any document open, change, or close so that cross-file
- * dependency references are resolved against the current workspace state.
+ * Three passes, in order:
+ *   A. Clear any cross-file state accumulated by the previous cycle.  This
+ *      must happen for ALL documents before any resolution — pass B adds
+ *      ref_links to symbols in other documents, so mixing clear and resolve
+ *      would wipe links we just added.
+ *   B. For each document, collect the other open documents' top-level
+ *      symbols and re-resolve cross_file_deps[] against them.
+ *   C. Publish diagnostics.
  */
 static void revalidate_all_docs(void) {
-    const DocSymbol *extra_pools[MAX_DOCS];
-    int              extra_counts[MAX_DOCS];
-    const char      *extra_uris[MAX_DOCS];
+    /* Pass A: clear cross-file state in all open documents. */
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use) continue;
+        clear_cross_file_state(&docs[i].parse);
+    }
 
+    /* Pass B: resolve cross-file deps in each document against all others. */
+    DocSymbol *const *extra_roots[MAX_DOCS];
+    int               extra_counts[MAX_DOCS];
+    const char       *extra_uris[MAX_DOCS];
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
 
         int num_extra = 0;
         for (int j = 0; j < MAX_DOCS; j++) {
             if (!docs[j].in_use || j == i) continue;
-            extra_pools[num_extra]  = docs[j].parse.doc_symbols;
+            extra_roots[num_extra]  = docs[j].parse.doc_symbols;
             extra_counts[num_extra] = docs[j].parse.num_doc_symbols;
             extra_uris[num_extra]   = docs[j].uri;
             num_extra++;
         }
 
-        revalidate_dep_refs(&docs[i].parse,
-                            extra_pools, extra_counts, extra_uris,
-                            num_extra);
+        resolve_cross_file_deps(&docs[i].parse,
+                                extra_roots, extra_counts, extra_uris,
+                                num_extra, docs[i].uri);
+    }
+
+    /* Pass C: publish diagnostics for editor-managed documents only.
+     * disk_only documents are loaded by the workspace scan and by include
+     * resolution; the editor hasn't asked about them, so publishing
+     * diagnostics for them would spam the client with noise (and potentially
+     * huge payloads from unrelated files in the workspace). */
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use) continue;
+        if (docs[i].disk_only) continue;
         publish_diagnostics(docs[i].uri, &docs[i].parse);
     }
 }
@@ -793,11 +811,12 @@ static void handle_did_change_watched_files(yyjson_val *params) {
         int type = (int)yyjson_get_num(type_item);
 
         if (type == 3) {
-            /* Deleted — remove from store and clear client-side diagnostics */
+            /* Deleted — remove from store.  Skip if the editor has the file
+             * open: the editor's in-memory version stays authoritative until
+             * it sends didClose.  No publish needed — disk_only documents
+             * never had diagnostics published to the client. */
             Document *document = doc_find(uri);
-            if (document) {
-                ParseResult empty = {0};
-                publish_diagnostics(uri, &empty);
+            if (document && document->disk_only) {
                 doc_free(document);
                 changed = 1;
             }
@@ -854,11 +873,14 @@ static void handle_did_rename_files(yyjson_val *params) {
         const char *new_uri = json_str(file_item, "newUri");
         if (!old_uri || !new_uri) continue;
 
-        /* Remove old URI */
+        /* Remove old URI.  Only publish empty if the editor had this file
+         * open — disk_only documents never had diagnostics on the client. */
         Document *old_doc = doc_find(old_uri);
         if (old_doc) {
-            ParseResult empty = {0};
-            publish_diagnostics(old_uri, &empty);
+            if (!old_doc->disk_only) {
+                ParseResult empty = {0};
+                publish_diagnostics(old_uri, &empty);
+            }
             doc_free(old_doc);
             changed = 1;
         }
@@ -907,10 +929,13 @@ static void handle_didopen(yyjson_val *params) {
     if (d) {
         if (!d->disk_only) return; /* duplicate open: LSP spec client error */
         /* File was pre-loaded from disk.
-         * If the editor text matches the disk content, just promote the document
-         * to editor-managed — the existing parse and diagnostics are already current. */
+         * If the editor text matches the disk content, just promote the
+         * document to editor-managed and publish — we skipped the publish
+         * during the workspace scan so the editor has never seen diagnostics
+         * for this file. */
         if (d->text && strcmp(d->text, text) == 0) {
             d->disk_only = 0;
+            revalidate_all_docs();
             return;
         }
         /* Text differs from disk — replace with authoritative editor content */
@@ -1083,32 +1108,20 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
 
     yyjson_mut_val *arr = build_folding_ranges_json(doc,
                                                      d->parse.tok_spans,
-                                                     d->parse.num_tok_spans);
+                                                     d->parse.num_tok_spans,
+                                                     d->parse.doc_symbols,
+                                                     d->parse.num_doc_symbols);
     return make_response(doc, id, arr);
 }
 
-/* Recursively search syms[n] for a DocSymbol whose selection_range.start
- * matches pos.  Returns a pointer into the array (not a copy); NULL if not found.
- */
-static const DocSymbol *find_sym_at_pos(const DocSymbol *syms, int n, LspPos pos) {
-    for (int i = 0; i < n; i++) {
-        if (pos_cmp(syms[i].selection_range.start, pos) == 0)
-            return &syms[i];
-        const DocSymbol *child = find_sym_at_pos(syms[i].children,
-                                                  syms[i].num_children, pos);
-        if (child) return child;
-    }
-    return NULL;
-}
-
-/* Return a human-readable label for a DocSymbol kind. */
-static const char *sym_kind_label(int kind) {
-    switch (kind) {
-    case SK_FUNCTION: return "Task";
-    case SK_OBJECT:   return "Resource";
-    case SK_VARIABLE: return "Account";
-    case SK_EVENT:    return "Shift";
-    case SK_MODULE:   return "Project";
+/* Return a human-readable label for a DocSymbol keyword. */
+static const char *sym_kind_label(int keyword) {
+    switch (keyword) {
+    case KW_TASK:     return "Task";
+    case KW_RESOURCE: return "Resource";
+    case KW_ACCOUNT:  return "Account";
+    case KW_SHIFT:    return "Shift";
+    case KW_PROJECT:  return "Project";
     default:          return "Symbol";
     }
 }
@@ -1145,24 +1158,15 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
     /* Check whether the cursor is on a resolved dependency/allocation reference.
      * If so, show the target symbol's kind, id, and name instead of keyword docs. */
-    for (int i = 0; i < d->parse.num_def_links; i++) {
-        DefinitionLink *link = &d->parse.def_links[i];
-        if (pos_cmp(link->source.start, pos) > 0) continue;
-        if (pos_cmp(pos, link->source.end)   > 0) continue;
-
-        /* Cursor is within this definition link's source range */
-        const char *target_uri = link->target_uri ? link->target_uri : uri;
-        Document   *tgt        = doc_find(target_uri);
-        if (!tgt) break;
-
-        const DocSymbol *sym = find_sym_at_pos(tgt->parse.doc_symbols,
-                                               tgt->parse.num_doc_symbols,
-                                               link->target.start);
-        if (!sym) break;
+    const DefinitionLink *hover_link = find_def_link_at(
+        d->parse.tok_spans, d->parse.num_tok_spans, pos);
+    if (hover_link) {
+        const DocSymbol *sym = hover_link->target;
+        if (!sym) goto keyword_hover;
 
         /* Build: "**<Kind> `<id>`** — <name>" */
-        const char *label    = sym_kind_label(sym->kind);
-        const char *sym_id   = sym->detail ? sym->detail : "";
+        const char *label    = sym_kind_label(sym->keyword);
+        const char *sym_id   = sym->id ? sym->id : "";
         const char *sym_name = sym->name   ? sym->name   : "";
         /* Stack buffer — label(≤8) + id + name + 32 bytes punctuation */
         char hover_text[512];
@@ -1175,10 +1179,11 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
         yyjson_mut_val *hover = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_val(doc, hover, "contents", contents);
-        yyjson_mut_obj_add_val(doc, hover, "range",    range_json(doc, link->source));
+        yyjson_mut_obj_add_val(doc, hover, "range",    range_json(doc, hover_link->source));
         return make_response(doc, id, hover);
     }
 
+keyword_hover:;
     /* Fall back to keyword documentation */
     ActiveKeyword ak = active_keyword_at(d->parse.tok_spans, d->parse.num_tok_spans, pos);
     if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));
@@ -1276,24 +1281,11 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    /* Collect def_links from every open document so that references in files
-     * other than the cursor document are included in the result. */
-    RefDocLinks all_docs[MAX_DOCS];
-    int num_docs = 0;
-    for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use) continue;
-        all_docs[num_docs].uri       = docs[i].uri;
-        all_docs[num_docs].links     = docs[i].parse.def_links;
-        all_docs[num_docs].num_links = docs[i].parse.num_def_links;
-        num_docs++;
-    }
-
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_references_json(doc,
                                                     uri,
-                                                    d->parse.doc_symbols,
-                                                    d->parse.num_doc_symbols,
-                                                    all_docs, num_docs,
+                                                    d->parse.tok_spans,
+                                                    d->parse.num_tok_spans,
                                                     pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1320,8 +1312,6 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
 
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_document_highlight_json(doc,
-                                                            d->parse.def_links,
-                                                            d->parse.num_def_links,
                                                             d->parse.doc_symbols,
                                                             d->parse.num_doc_symbols,
                                                             d->parse.tok_spans,
@@ -1351,8 +1341,8 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
 
     LspPos pos         = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_definition_json(doc,
-                                                    d->parse.def_links,
-                                                    d->parse.num_def_links,
+                                                    d->parse.tok_spans,
+                                                    d->parse.num_tok_spans,
                                                     pos, uri);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1384,12 +1374,16 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    /* Gather symbol pools from all other open documents */
-    const DocSymbol *extra_pools[MAX_DOCS];
-    int              extra_counts[MAX_DOCS];
-    int              num_extra = 0;
+    /* Gather symbol pools from other editor-managed documents.  disk_only
+     * documents (workspace scan + include follows) are excluded: the
+     * workspace may contain large unrelated .tjp files, and recursing
+     * their symbol trees would produce enormous completion responses. */
+    DocSymbol *const *extra_pools[MAX_DOCS];
+    int               extra_counts[MAX_DOCS];
+    int               num_extra = 0;
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use || &docs[i] == d) continue;
+        if (docs[i].disk_only) continue;
         extra_pools[num_extra]  = docs[i].parse.doc_symbols;
         extra_counts[num_extra] = docs[i].parse.num_doc_symbols;
         num_extra++;

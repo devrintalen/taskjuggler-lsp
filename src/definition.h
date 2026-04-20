@@ -24,8 +24,9 @@
 /*
  * Build a Location JSON object for textDocument/definition.
  *
- * Searches def_links for a link whose source range contains cursor.  When
- * found, returns a JSON object of the form:
+ * Locates a DefinitionLink whose source range contains cursor via
+ * symbol_at() + parent-chain walk.  When found, returns a JSON object
+ * of the form:
  *
  *   { "uri": "<uri>", "range": <selection_range of target symbol> }
  *
@@ -33,5 +34,14 @@
  * Values are allocated in doc; caller owns doc.
  */
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
-                                       const DefinitionLink *links, int num_links,
+                                       const TokenSpan *tokens, int num_tokens,
                                        LspPos cursor, const char *uri);
+
+/*
+ * Find a DefinitionLink whose source range contains the cursor.  Uses
+ * symbol_at() to locate the innermost enclosing DocSymbol and scans its
+ * def_links, walking parents on miss.  Returns a pointer to the matching
+ * link, or NULL.
+ */
+const DefinitionLink *find_def_link_at(const TokenSpan *tokens, int num_tokens,
+                                       LspPos cursor);
