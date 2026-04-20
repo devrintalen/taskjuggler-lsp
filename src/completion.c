@@ -551,20 +551,12 @@ static void collect_dep_ids(const TokenSpan *tokens, int num_tokens,
     for (int i = 0; i < bang_count; i++)
         strncat(bang_prefix, "!", 64 - strlen(bang_prefix) - 1);
 
-    if (scope_n == 0) {
-        /* Global level: absolute references can target any file */
+    if (bang_count == 0) {
+        /* No bangs — absolute lookup from the file root.  Suggestions are
+         * every task in the current file (fully-qualified paths) plus the
+         * top-level tasks of every other open file. */
         collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
                         num_extra, id_kind, ids);
-    } else if (bang_count == 0) {
-        /* Scoped (no bangs): collect siblings from current file.
-         * Also include top-level IDs from other files since
-         * absolute references are always valid. */
-        int ch_n;
-        DocSymbol *const *ch = doc_symbol_find_path(
-            symbols, num_symbols, (const char **)scope, scope_n, &ch_n);
-        if (ch) collect_ids(ch, ch_n, id_kind, "", ids);
-        for (int e = 0; e < num_extra; e++)
-            collect_ids(extra_pools[e], extra_counts[e], id_kind, "", ids);
     } else if (bang_count <= scope_n) {
         /* Bang navigation: relative to current scope, file-local only */
         int ch_n;
