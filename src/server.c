@@ -1032,10 +1032,19 @@ static void handle_didchange(yyjson_val *params) {
 
     free(d->text);
     free(d->doc_symbols_json);
-    d->doc_symbols_json = NULL;
+    d->doc_symbols_json     = NULL;
+    d->doc_symbols_json_len = 0;
     d->text = current;
     parse_result_free(&d->parse);
     d->parse = parse(d->text);
+
+    /* Pick up any new `include` directives the edit introduced. */
+    char *path = uri_to_path(uri);
+    if (path) {
+        follow_includes(path, &d->parse);
+        free(path);
+    }
+
     revalidate_all_docs();
 }
 
