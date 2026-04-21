@@ -29,6 +29,7 @@
 #include "completion.h"
 #include "semantic_tokens.h"
 #include "workspace_symbol.h"
+#include "version.h"
 
 #include <yyjson.h>
 #include <ctype.h>
@@ -660,12 +661,11 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
         }
     }
 
-    /* Server info */
+    /* Server info — LSP InitializeResult.serverInfo.
+     * Per LSP spec, both fields are strings, not arrays. */
     yyjson_mut_val *server_info = yyjson_mut_obj(doc);
-    yyjson_mut_val *sn = yyjson_mut_arr(doc);
-    // TODO add server version, with program version macro so it is always up to date
-    yyjson_mut_arr_add_str(doc, sn, "taskjuggler-lsp");
-    yyjson_mut_obj_add_val(doc, server_info, "name", sn);
+    yyjson_mut_obj_add_str(doc, server_info, "name",    "taskjuggler-lsp");
+    yyjson_mut_obj_add_str(doc, server_info, "version", VERSION_STRING);
 
     /* Completion options */
     yyjson_mut_val *comp_triggers = yyjson_mut_arr(doc);
