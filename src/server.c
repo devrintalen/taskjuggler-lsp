@@ -303,6 +303,17 @@ static char *read_file(const char *path) {
 }
 
 /*
+ * Canonicalize a filesystem path: resolve ".", "..", duplicate slashes,
+ * and symlinks via realpath(3).  Returns a heap-allocated canonical path,
+ * or NULL if the path does not exist or cannot be resolved.
+ * Caller must free.
+ */
+static char *canonicalize_path(const char *path) {
+    if (!path) return NULL;
+    return realpath(path, NULL);
+}
+
+/*
  * Load a single file from disk into the document store.
  * If the URI is already present, it is skipped (does not overwrite
  * editor-managed documents with stale disk content).
@@ -312,20 +323,27 @@ static char *read_file(const char *path) {
 static void follow_includes(const char *file_path, const ParseResult *parse);
 
 static void load_file_from_disk(const char *path) {
-    char *uri = path_to_uri(path);
-    if (doc_find(uri)) { free(uri); return; }
+    /* Canonicalize so that different spellings of the same file (e.g.
+     * "a/./b.tji" and "a/b.tji", or trailing-slash workspace roots) resolve
+     * to the same URI and don't double-load. */
+    char *canon = canonicalize_path(path);
+    const char *load_path = canon ? canon : path;
 
-    char *text = read_file(path);
-    if (!text) { free(uri); return; }
+    char *uri = path_to_uri(load_path);
+    if (doc_find(uri)) { free(uri); free(canon); return; }
+
+    char *text = read_file(load_path);
+    if (!text) { free(uri); free(canon); return; }
 
     Document *document = doc_alloc(uri);
     free(uri);
-    if (!document) { free(text); return; }
+    if (!document) { free(text); free(canon); return; }
 
     document->text      = text;
     document->disk_only = 1;
     document->parse     = parse(text);
-    follow_includes(path, &document->parse);
+    follow_includes(load_path, &document->parse);
+    free(canon);
 }
 
 /*
