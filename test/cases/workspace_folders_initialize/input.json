@@ -1,0 +1,33 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": "file://${CASE_DIR}/workspace_a",
+      "workspaceFolders": [
+        { "uri": "file://${CASE_DIR}/workspace_a", "name": "a" },
+        { "uri": "file://${CASE_DIR}/workspace_b", "name": "b" }
+      ],
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "workspace/symbol",
+    "params": { "query": "" }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "shutdown",
+    "params": {}
+  }
+]
