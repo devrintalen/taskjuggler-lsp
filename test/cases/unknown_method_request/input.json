@@ -1,0 +1,44 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 42,
+    "method": "textDocument/rename",
+    "params": {
+      "textDocument": { "uri": "file:///test/nope.tjp" },
+      "position": { "line": 0, "character": 0 },
+      "newName": "renamed"
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "workspace/somethingUnknown",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": "custom-1",
+    "method": "$/customRequest",
+    "params": { "foo": "bar" }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 99,
+    "method": "shutdown",
+    "params": {}
+  }
+]
