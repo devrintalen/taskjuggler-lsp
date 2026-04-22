@@ -1,0 +1,65 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "workspace/symbol",
+    "params": { "query": "" }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "workspace/didChangeWatchedFiles",
+    "params": {
+      "changes": [
+        {
+          "uri": "file://${CASE_DIR}/appeared.tjp",
+          "type": 1
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "workspace/symbol",
+    "params": { "query": "" }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "workspace/didChangeWatchedFiles",
+    "params": {
+      "changes": [
+        {
+          "uri": "file://${CASE_DIR}/appeared.tjp",
+          "type": 3
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "workspace/symbol",
+    "params": { "query": "" }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 5,
+    "method": "shutdown",
+    "params": {}
+  }
+]

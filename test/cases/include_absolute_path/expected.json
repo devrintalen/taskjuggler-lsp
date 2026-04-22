@@ -1,0 +1,165 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "capabilities": {
+        "textDocumentSync": {
+          "change": 2,
+          "openClose": true
+        },
+        "documentSymbolProvider": true,
+        "foldingRangeProvider": true,
+        "hoverProvider": true,
+        "definitionProvider": true,
+        "referencesProvider": true,
+        "documentHighlightProvider": true,
+        "signatureHelpProvider": {
+          "triggerCharacters": [
+            " "
+          ]
+        },
+        "completionProvider": {
+          "triggerCharacters": [
+            ",",
+            " ",
+            "!"
+          ],
+          "resolveProvider": false
+        },
+        "semanticTokensProvider": {
+          "legend": {
+            "tokenTypes": [
+              "keyword",
+              "comment",
+              "string",
+              "number",
+              "variable",
+              "function"
+            ],
+            "tokenModifiers": [
+              "declaration"
+            ]
+          },
+          "full": true
+        },
+        "workspaceSymbolProvider": true,
+        "workspace": {
+          "fileOperations": {
+            "didRename": {
+              "filters": [
+                {
+                  "pattern": {
+                    "glob": "**/*.tjp"
+                  }
+                },
+                {
+                  "pattern": {
+                    "glob": "**/*.tji"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "serverInfo": {
+        "name": "taskjuggler-lsp",
+        "version": "0.5.0"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": "watcher-reg",
+    "method": "client/registerCapability",
+    "params": {
+      "registrations": [
+        {
+          "id": "file-watcher",
+          "method": "workspace/didChangeWatchedFiles",
+          "registerOptions": {
+            "watchers": [
+              {
+                "globPattern": "**/*.tjp"
+              },
+              {
+                "globPattern": "**/*.tji"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/main.tjp",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": [
+      {
+        "name": "\"P\"",
+        "kind": 2,
+        "location": {
+          "uri": "file:///test/main.tjp",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 8
+            },
+            "end": {
+              "line": 0,
+              "character": 9
+            }
+          }
+        }
+      },
+      {
+        "name": "\"Host\"",
+        "kind": 12,
+        "location": {
+          "uri": "file:///test/main.tjp",
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 5
+            },
+            "end": {
+              "line": 3,
+              "character": 9
+            }
+          }
+        }
+      },
+      {
+        "name": "\"AbsoluteIncluded\"",
+        "kind": 12,
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/shared.tji",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 5
+            },
+            "end": {
+              "line": 0,
+              "character": 22
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": null
+  }
+]

@@ -29,6 +29,7 @@
 #include "completion.h"
 #include "semantic_tokens.h"
 #include "workspace_symbol.h"
+#include "version.h"
 
 #include <yyjson.h>
 #include <ctype.h>
@@ -151,28 +152,53 @@ static Document docs[MAX_DOCS];
 static char *g_workspace_roots[MAX_WORKSPACE_ROOTS];
 static int   g_num_workspace_roots = 0;
 
-/* Find the open document with the given URI, or return NULL if not found. */
+/* Forward declaration — doc_find / doc_alloc normalize URIs internally so that
+ * different spellings of the same file (trailing slashes, "./", symlinks) map
+ * to the same document slot. */
+static char *normalize_uri(const char *raw_uri);
+
+/* Find the open document with the given URI, or return NULL if not found.
+ * Fast-path exact match first (clients overwhelmingly send the canonical URI
+ * we already stored); falls back to normalizing and retrying so that
+ * non-canonical URI spellings still hit the stored canonical key. */
 static Document *doc_find(const char *uri) {
+    if (!uri) return NULL;
     for (int i = 0; i < MAX_DOCS; i++)
         if (docs[i].in_use && strcmp(docs[i].uri, uri) == 0)
             return &docs[i];
-    return NULL;
+
+    char *canon = normalize_uri(uri);
+    if (!canon) return NULL;
+    Document *found = NULL;
+    if (strcmp(canon, uri) != 0) {
+        for (int i = 0; i < MAX_DOCS; i++)
+            if (docs[i].in_use && strcmp(docs[i].uri, canon) == 0) {
+                found = &docs[i];
+                break;
+            }
+    }
+    free(canon);
+    return found;
 }
 
 /* Claim a free Document slot for uri and return it, or NULL if the store
- * is full.  The returned slot has in_use=1 and uri set; all other fields
- * are zeroed.
+ * is full.  The stored URI is always canonical (see normalize_uri) so the
+ * document store is deduplicated regardless of how the URI was spelled.
+ * The returned slot has in_use=1 and uri set; all other fields are zeroed.
  */
 static Document *doc_alloc(const char *uri) {
+    char *canon = normalize_uri(uri);
+    if (!canon) return NULL;
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) {
             docs[i].in_use = 1;
-            docs[i].uri    = strdup(uri);
+            docs[i].uri    = canon; /* ownership transferred */
             docs[i].text   = NULL;
             memset(&docs[i].parse, 0, sizeof(docs[i].parse));
             return &docs[i];
         }
     }
+    free(canon);
     return NULL; /* shouldn't happen in practice */
 }
 
@@ -284,6 +310,65 @@ static char *path_to_uri(const char *path) {
 }
 
 /*
+ * Lexically normalize a filesystem path: collapse "//" runs, drop "." segments,
+ * strip trailing slashes.  Does not touch ".." or resolve symlinks — the caller
+ * uses this as a fallback when realpath(3) fails (file doesn't exist yet).
+ * Returns a heap-allocated string; caller must free.
+ */
+static char *lexical_normalize_path(const char *path) {
+    if (!path) return NULL;
+    size_t len = strlen(path);
+    char *out = malloc(len + 2); /* worst case: original + leading '/' + NUL */
+    if (!out) return NULL;
+
+    int absolute = (len > 0 && path[0] == '/');
+    size_t wi = 0;
+    if (absolute) out[wi++] = '/';
+
+    size_t i = 0;
+    int wrote_segment = 0;
+    while (i < len) {
+        while (i < len && path[i] == '/') i++;
+        if (i >= len) break;
+        size_t seg_start = i;
+        while (i < len && path[i] != '/') i++;
+        size_t seg_len = i - seg_start;
+        if (seg_len == 1 && path[seg_start] == '.') continue; /* drop "." */
+        if (wrote_segment) out[wi++] = '/';
+        memcpy(out + wi, path + seg_start, seg_len);
+        wi += seg_len;
+        wrote_segment = 1;
+    }
+    out[wi] = '\0';
+    return out;
+}
+
+/*
+ * Normalize a URI into the canonical key used by the document store.
+ * For file:// URIs, runs realpath(3) to collapse ".", "..", "//", and
+ * symlinks when the file exists; falls back to lexical_normalize_path()
+ * for URIs whose backing file does not exist yet.  Non-file URIs are
+ * passed through unchanged.
+ * Returns a heap-allocated URI; caller must free.
+ */
+static char *normalize_uri(const char *raw_uri) {
+    if (!raw_uri) return NULL;
+    if (strncmp(raw_uri, "file://", 7) != 0) return strdup(raw_uri);
+
+    char *path = uri_to_path(raw_uri);
+    if (!path) return strdup(raw_uri);
+
+    char *canon = realpath(path, NULL);
+    if (!canon) canon = lexical_normalize_path(path);
+    free(path);
+    if (!canon) return NULL;
+
+    char *uri = path_to_uri(canon);
+    free(canon);
+    return uri;
+}
+
+/*
  * Read an entire file into a heap-allocated, NUL-terminated string.
  * Returns NULL on any error.  Caller must free.
  */
@@ -305,7 +390,9 @@ static char *read_file(const char *path) {
 /*
  * Load a single file from disk into the document store.
  * If the URI is already present, it is skipped (does not overwrite
- * editor-managed documents with stale disk content).
+ * editor-managed documents with stale disk content).  URI dedup —
+ * covering "./"-prefixed, trailing-slash, and symlinked spellings — is
+ * handled inside doc_find / doc_alloc via normalize_uri().
  */
 /* Forward declaration — follow_includes() and load_file_from_disk() are
  * mutually recursive: loading a file may trigger following its includes. */
@@ -642,12 +729,11 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
         }
     }
 
-    /* Server info */
+    /* Server info — LSP InitializeResult.serverInfo.
+     * Per LSP spec, both fields are strings, not arrays. */
     yyjson_mut_val *server_info = yyjson_mut_obj(doc);
-    yyjson_mut_val *sn = yyjson_mut_arr(doc);
-    // TODO add server version, with program version macro so it is always up to date
-    yyjson_mut_arr_add_str(doc, sn, "taskjuggler-lsp");
-    yyjson_mut_obj_add_val(doc, server_info, "name", sn);
+    yyjson_mut_obj_add_str(doc, server_info, "name",    "taskjuggler-lsp");
+    yyjson_mut_obj_add_str(doc, server_info, "version", VERSION_STRING);
 
     /* Completion options */
     yyjson_mut_val *comp_triggers = yyjson_mut_arr(doc);
@@ -980,8 +1066,10 @@ static void handle_didchange(yyjson_val *params) {
 
     if (yyjson_arr_size(changes) == 0) return;
 
+    /* LSP requires didOpen before any didChange for a given URI.  If we have
+     * no record of this document, the client is violating the protocol —
+     * ignore the notification rather than silently synthesising an open. */
     Document *d = doc_find(uri);
-    if (!d) d = doc_alloc(uri);
     if (!d) return;
 
     /* Start with the current document text (may be NULL for a fresh slot). */
@@ -1014,10 +1102,19 @@ static void handle_didchange(yyjson_val *params) {
 
     free(d->text);
     free(d->doc_symbols_json);
-    d->doc_symbols_json = NULL;
+    d->doc_symbols_json     = NULL;
+    d->doc_symbols_json_len = 0;
     d->text = current;
     parse_result_free(&d->parse);
     d->parse = parse(d->text);
+
+    /* Pick up any new `include` directives the edit introduced. */
+    char *path = uri_to_path(uri);
+    if (path) {
+        follow_includes(path, &d->parse);
+        free(path);
+    }
+
     revalidate_all_docs();
 }
 

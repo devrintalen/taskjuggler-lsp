@@ -1,0 +1,145 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "capabilities": {
+        "textDocumentSync": {
+          "change": 2,
+          "openClose": true
+        },
+        "documentSymbolProvider": true,
+        "foldingRangeProvider": true,
+        "hoverProvider": true,
+        "definitionProvider": true,
+        "referencesProvider": true,
+        "documentHighlightProvider": true,
+        "signatureHelpProvider": {
+          "triggerCharacters": [
+            " "
+          ]
+        },
+        "completionProvider": {
+          "triggerCharacters": [
+            ",",
+            " ",
+            "!"
+          ],
+          "resolveProvider": false
+        },
+        "semanticTokensProvider": {
+          "legend": {
+            "tokenTypes": [
+              "keyword",
+              "comment",
+              "string",
+              "number",
+              "variable",
+              "function"
+            ],
+            "tokenModifiers": [
+              "declaration"
+            ]
+          },
+          "full": true
+        },
+        "workspaceSymbolProvider": true,
+        "workspace": {
+          "fileOperations": {
+            "didRename": {
+              "filters": [
+                {
+                  "pattern": {
+                    "glob": "**/*.tjp"
+                  }
+                },
+                {
+                  "pattern": {
+                    "glob": "**/*.tji"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "serverInfo": {
+        "name": "taskjuggler-lsp",
+        "version": "0.5.0"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": "watcher-reg",
+    "method": "client/registerCapability",
+    "params": {
+      "registrations": [
+        {
+          "id": "file-watcher",
+          "method": "workspace/didChangeWatchedFiles",
+          "registerOptions": {
+            "watchers": [
+              {
+                "globPattern": "**/*.tjp"
+              },
+              {
+                "globPattern": "**/*.tji"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 5,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 6,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 7,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 8,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 9,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 10,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 11,
+    "result": null
+  }
+]

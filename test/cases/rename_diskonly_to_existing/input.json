@@ -1,0 +1,47 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": "file://${CASE_DIR}/workspace",
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "workspace/symbol",
+    "params": { "query": "" }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "workspace/didRenameFiles",
+    "params": {
+      "files": [
+        {
+          "oldUri": "file://${CASE_DIR}/workspace/apple.tjp",
+          "newUri": "file://${CASE_DIR}/workspace/banana.tjp"
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "workspace/symbol",
+    "params": { "query": "" }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "shutdown",
+    "params": {}
+  }
+]
