@@ -1,4 +1,4 @@
-VERSION = 0.5.0
+VERSION = 0.5.2
 
 CC      = gcc
 CFLAGS  = -Wall -Wextra -std=c11 -O2 -D_DEFAULT_SOURCE

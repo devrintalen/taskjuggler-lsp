@@ -43,3 +43,18 @@ information for TaskJuggler. The command "tj3man <keyword>" will
 return detailed information on keywords and concepts. "tj3man" without
 any arguments will return a full list of available pages.
 
+## Release Checklist
+
+When cutting a new release, perform every step below:
+
+1. Bump `VERSION_MAJOR` / `VERSION_MINOR` / `VERSION_PATCH` and
+   `VERSION_STRING` in `src/version.h`.
+2. Bump `VERSION` in the `Makefile` to match.
+3. Rebuild (`make`) and run the full test suite:
+   `python3 tools/lsp_test.py ./taskjuggler-lsp --all test/cases`.
+   The `initialize` response embeds `VERSION_STRING` in `serverInfo`,
+   so every `expected.json` that captures an initialize reply must be
+   updated to the new version. Use `--record` to regenerate them, or
+   update the `"version": "X.Y.Z"` string in place.
+4. Commit the version bump together with the updated test snapshots.
+
