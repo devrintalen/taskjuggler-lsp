@@ -679,7 +679,14 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
     if (is_decl_keyword(first_word))
         goto done;
 
-    /* Try ID completions (depends, allocate, chargeset, etc.) */
+    /* Try ID completions (depends, allocate, chargeset, etc.).
+     *
+     * Skip when the partial is the first token on its line: that means we're
+     * starting a new statement, not filling arguments of a keyword from a
+     * previous line.  (Keywords like `charge` have token_kind > KW_SIG_END so
+     * scan_kw_stack treats them as arguments of the preceding keyword, which
+     * would incorrectly return e.g. `depends` as the active context.) */
+    if (!first_word || !partial[0] || strcmp(first_word, partial) != 0)
     {
         ActiveContext ac = active_context(tokens, num_tokens, cursor);
         int id_kind = id_kind_for_keyword(ac.keyword);
