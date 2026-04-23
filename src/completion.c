@@ -536,9 +536,86 @@ static void collect_all_ids(DocSymbol *const *symbols, int num_symbols,
         collect_ids(extra_pools[e], extra_counts[e], id_kind, "", ids);
 }
 
-/* Collect dep IDs for depends/precedes, applying scope and bang navigation.
- * Writes the bang prefix string into bang_prefix (must be at least 64 bytes). */
-static void collect_dep_ids(const TokenSpan *tokens, int num_tokens,
+/* Scan backwards from cursor to find the dotted path prefix before the cursor's
+ * leaf token (a partial TK_IDENT or a TK_DOT that the cursor lands on).
+ * Returns a heap-allocated outermost-first array of segment strings (each
+ * heap-allocated), sets *out_n to the count.  Returns NULL / *out_n=0 when
+ * there is no dotted prefix.
+ *
+ * Examples (cursor position in brackets):
+ *   "AcSo.[|]"     → ["AcSo"],          n=1  (cursor after dot)
+ *   "AcSo.soft[|]" → ["AcSo"],          n=1  (cursor inside ident leaf)
+ *   "AcSo.sw.g[|]" → ["AcSo","sw"],     n=2
+ *   "AcSo[|]"      → NULL,              n=0  (no dot in path)
+ */
+static char **scan_dot_prefix(const TokenSpan *tokens, int num_tokens,
+                               LspPos cursor, int *out_n) {
+    *out_n = 0;
+
+    /* Find the last non-comment token at or before cursor. */
+    int last = -1;
+    for (int i = 0; i < num_tokens; i++) {
+        if (tokens[i].token_kind == TK_EOF) break;
+        if (pos_cmp(cursor, tokens[i].start) < 0) break;
+        if (tokens[i].token_kind != TK_LINE_COMMENT &&
+            tokens[i].token_kind != TK_BLOCK_COMMENT)
+            last = i;
+    }
+    if (last < 0) return NULL;
+
+    /* Find the TK_DOT that anchors the prefix.  If the cursor is on a partial
+     * TK_IDENT leaf, the dot comes before it; if the cursor is on a TK_DOT
+     * itself, that dot is the anchor. */
+    int dot_idx = last;
+    if (tokens[dot_idx].token_kind == TK_IDENT ||
+        tokens[dot_idx].token_kind == KW_START) {
+        dot_idx--;
+        if (dot_idx < 0 || tokens[dot_idx].token_kind != TK_DOT)
+            return NULL;
+    } else if (tokens[dot_idx].token_kind == TK_DOT) {
+        /* cursor is right after a dot, dot_idx is already set */
+    } else {
+        return NULL;
+    }
+
+    /* Walk backwards collecting alternating TK_DOT / TK_IDENT pairs. */
+    int cap = 8, count = 0;
+    char **segs = malloc((size_t)cap * sizeof(char *));
+    if (!segs) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+
+    for (int i = dot_idx; i >= 1; ) {
+        if (tokens[i].token_kind != TK_DOT) break;
+        i--;
+        if (tokens[i].token_kind != TK_IDENT &&
+            tokens[i].token_kind != KW_START) break;
+        if (count >= cap) {
+            cap *= 2;
+            char **tmp = realloc(segs, (size_t)cap * sizeof(char *));
+            if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+            segs = tmp;
+        }
+        segs[count++] = strdup(tokens[i].text ? tokens[i].text : "");
+        i--;
+    }
+
+    if (count == 0) { free(segs); return NULL; }
+
+    /* Collected innermost-first; reverse to get outermost-first. */
+    for (int j = 0; j < count / 2; j++) {
+        char *tmp = segs[j];
+        segs[j] = segs[count - 1 - j];
+        segs[count - 1 - j] = tmp;
+    }
+
+    *out_n = count;
+    return segs;
+}
+
+/* Collect dep IDs for depends/precedes, applying scope, bang, and dot navigation.
+ * Writes the bang prefix string into bang_prefix (must be at least 64 bytes).
+ * Returns 1 if dot-prefix navigation was used (items are relative to the
+ * navigated node, labels are short), 0 for absolute or bang-relative results. */
+static int collect_dep_ids(const TokenSpan *tokens, int num_tokens,
                             LspPos cursor,
                             DocSymbol *const *symbols, int num_symbols,
                             DocSymbol *const **extra_pools,
@@ -551,12 +628,45 @@ static void collect_dep_ids(const TokenSpan *tokens, int num_tokens,
     for (int i = 0; i < bang_count; i++)
         strncat(bang_prefix, "!", 64 - strlen(bang_prefix) - 1);
 
+    int dot_navigated = 0;
+
     if (bang_count == 0) {
-        /* No bangs — absolute lookup from the file root.  Suggestions are
-         * every task in the current file (fully-qualified paths) plus the
-         * top-level tasks of every other open file. */
-        collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
-                        num_extra, id_kind, ids);
+        /* Check for a dotted path prefix before the cursor (e.g. "AcSo."). */
+        int dot_seg_n = 0;
+        char **dot_segs = scan_dot_prefix(tokens, num_tokens, cursor, &dot_seg_n);
+
+        if (dot_seg_n > 0) {
+            /* Dot-prefix navigation: descend to the named subtree and return
+             * its children with short (relative) IDs.  File-local only.
+             * First try an absolute root lookup; if that fails, try each
+             * scope-relative ancestor (same bang-navigation semantics) so
+             * that a bare segment like "deliveries." resolves even when the
+             * matching task is not at the root level. */
+            int ch_n = 0;
+            DocSymbol *const *ch = doc_symbol_find_path(
+                symbols, num_symbols,
+                (const char **)dot_segs, dot_seg_n, &ch_n);
+            for (int b = 1; !ch && b <= scope_n; b++) {
+                int anc_n = 0;
+                DocSymbol *const *anc = doc_symbol_find_path(
+                    symbols, num_symbols,
+                    (const char **)scope, scope_n - b, &anc_n);
+                if (anc)
+                    ch = doc_symbol_find_path(anc, anc_n,
+                        (const char **)dot_segs, dot_seg_n, &ch_n);
+            }
+            if (ch) collect_ids(ch, ch_n, id_kind, "", ids);
+            dot_navigated = 1;
+        } else {
+            /* No bangs, no dots — absolute lookup from the file root.
+             * Include every task in the current file plus top-level tasks
+             * of every other open file. */
+            collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
+                            num_extra, id_kind, ids);
+        }
+
+        for (int i = 0; i < dot_seg_n; i++) free(dot_segs[i]);
+        free(dot_segs);
     } else if (bang_count <= scope_n) {
         /* Bang navigation: relative to current scope, file-local only */
         int ch_n;
@@ -569,6 +679,7 @@ static void collect_dep_ids(const TokenSpan *tokens, int num_tokens,
 
     for (int i = 0; i < scope_n; i++) free(scope[i]);
     free(scope);
+    return dot_navigated;
 }
 
 /* Add bang-relative hint items for dep completion when no bangs are present.
@@ -647,11 +758,12 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
     int is_dep = (strcmp(keyword, "depends") == 0
                || strcmp(keyword, "precedes") == 0);
 
+    int dot_navigated = 0;
     if (id_kind == KW_TASK && is_dep) {
-        collect_dep_ids(tokens, num_tokens, cursor,
-                        symbols, num_symbols,
-                        extra_pools, extra_counts, num_extra,
-                        id_kind, &ids, bang_prefix);
+        dot_navigated = collect_dep_ids(tokens, num_tokens, cursor,
+                                        symbols, num_symbols,
+                                        extra_pools, extra_counts, num_extra,
+                                        id_kind, &ids, bang_prefix);
     } else {
         collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
                         num_extra, id_kind, &ids);
@@ -690,7 +802,7 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
     /* When no bangs are present and no partial is typed, eagerly include
      * bang-relative hints so the client can find them by filtering on "!",
      * "!!", etc. even without issuing a fresh server request. */
-    if (is_dep && !bang_prefix[0] && !partial[0])
+    if (is_dep && !bang_prefix[0] && !partial[0] && !dot_navigated)
         count += add_bang_hint_items(doc, items, tokens, num_tokens, cursor,
                                      symbols, num_symbols, id_kind);
 
