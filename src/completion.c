@@ -571,6 +571,67 @@ static void collect_dep_ids(const TokenSpan *tokens, int num_tokens,
     free(scope);
 }
 
+/* Add bang-relative hint items for dep completion when no bangs are present.
+ *
+ * When the cursor is in a dep argument with no leading bangs and no partial
+ * text, the server returns absolute-path completions.  If the LSP client has
+ * cached that list and the user then types "!" without triggering a fresh
+ * server request, the client filters the stale list by "!" and finds nothing.
+ *
+ * To handle this, we eagerly include one item per relative-path bang level
+ * (1..scope_n) with label and filterText "!<id>", "!!<id>", etc.  The client
+ * will show these items when the user types "!" and select them correctly.
+ *
+ * Bang navigation is file-local (same semantics as the existing bang-count > 0
+ * path in collect_dep_ids).  Returns the number of hint items added. */
+static int add_bang_hint_items(yyjson_mut_doc *doc, yyjson_mut_val *items,
+                               const TokenSpan *tokens, int num_tokens,
+                               LspPos cursor,
+                               DocSymbol *const *symbols, int num_symbols,
+                               int id_kind) {
+    int scope_n = 0;
+    char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
+    if (!scope_n) { free(scope); return 0; }
+
+    int count = 0;
+    for (int n = 1; n <= scope_n; n++) {
+        char bang_pfx[64] = "";
+        for (int i = 0; i < n && (int)strlen(bang_pfx) < 63; i++)
+            strcat(bang_pfx, "!");
+
+        int ch_n = 0;
+        DocSymbol *const *ch = doc_symbol_find_path(
+            symbols, num_symbols,
+            (const char **)scope, scope_n - n, &ch_n);
+        if (!ch) continue;
+
+        IdList ids = {0};
+        collect_ids(ch, ch_n, id_kind, "", &ids);
+
+        for (int i = 0; i < ids.n; i++) {
+            const char *id   = ids.items[i].id;
+            const char *name = ids.items[i].name;
+            char ft[1024];
+            snprintf(ft, sizeof(ft), "%s%s", bang_pfx, id);
+
+            yyjson_mut_val *item = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, item, "label",      ft);
+            yyjson_mut_obj_add_uint(doc,   item, "kind",       (uint64_t)completion_kind_for(id_kind));
+            yyjson_mut_obj_add_strcpy(doc, item, "detail",     name);
+            yyjson_mut_obj_add_str(doc,    item, "sortText",   "1");
+            yyjson_mut_obj_add_strcpy(doc, item, "filterText", ft);
+            yyjson_mut_arr_add_val(items, item);
+            count++;
+        }
+
+        idlist_free(&ids);
+    }
+
+    for (int i = 0; i < scope_n; i++) free(scope[i]);
+    free(scope);
+    return count;
+}
+
 /* Build ID completion items for a depends/allocate/chargeset/etc. argument.
  * Returns the number of items added to the items array. */
 static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
@@ -625,6 +686,14 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
     }
 
     idlist_free(&ids);
+
+    /* When no bangs are present and no partial is typed, eagerly include
+     * bang-relative hints so the client can find them by filtering on "!",
+     * "!!", etc. even without issuing a fresh server request. */
+    if (is_dep && !bang_prefix[0] && !partial[0])
+        count += add_bang_hint_items(doc, items, tokens, num_tokens, cursor,
+                                     symbols, num_symbols, id_kind);
+
     return count;
 }
 
