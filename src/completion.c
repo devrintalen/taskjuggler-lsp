@@ -601,9 +601,10 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
         const char *id   = ids.items[i].id;
         const char *name = ids.items[i].name;
 
-        int id_match   = (!partial[0]) || istarts(id, partial);
-        int name_match = (partial[0]) && icontains(name, partial);
-        if (!id_match && !name_match) continue;
+        int id_prefix_match = (!partial[0]) || istarts(id, partial);
+        int id_seg_match    = partial[0] && !id_prefix_match && icontains(id, partial);
+        int name_match      = partial[0] && icontains(name, partial);
+        if (!id_prefix_match && !id_seg_match && !name_match) continue;
 
         yyjson_mut_val *item = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_strcpy(doc, item, "label",    id);
@@ -611,7 +612,7 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
         yyjson_mut_obj_add_strcpy(doc, item, "detail",   name);
         yyjson_mut_obj_add_str(doc,    item, "sortText", "0");
 
-        if (name_match && !id_match) {
+        if ((id_seg_match || name_match) && !id_prefix_match) {
             yyjson_mut_obj_add_strcpy(doc, item, "filterText", partial);
         } else if (bang_prefix[0] && !partial[0]) {
             char ft[1024];
