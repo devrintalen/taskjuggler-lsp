@@ -21,9 +21,8 @@
         },
         "completionProvider": {
           "triggerCharacters": [
-            ",",
-            " ",
-            "!"
+            "!",
+            "."
           ],
           "resolveProvider": false
         },

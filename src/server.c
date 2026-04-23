@@ -737,9 +737,8 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
 
     /* Completion options */
     yyjson_mut_val *comp_triggers = yyjson_mut_arr(doc);
-    yyjson_mut_arr_add_str(doc, comp_triggers, ",");
-    yyjson_mut_arr_add_str(doc, comp_triggers, " ");
     yyjson_mut_arr_add_str(doc, comp_triggers, "!");
+    yyjson_mut_arr_add_str(doc, comp_triggers, ".");
     yyjson_mut_val *comp_opts = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc,  comp_opts, "triggerCharacters", comp_triggers);
     yyjson_mut_obj_add_bool(doc, comp_opts, "resolveProvider", false);

@@ -34,24 +34,6 @@
 
 /* ── String utilities ────────────────────────────────────────────────────── */
 
-/* Returns 1 if needle is a case-insensitive substring of haystack. */
-static int icontains(const char *haystack, const char *needle) {
-    if (!haystack || !needle) return 0;
-    size_t hn = strlen(haystack), nn = strlen(needle);
-    if (nn > hn) return 0;
-    for (size_t i = 0; i <= hn - nn; i++) {
-        int match = 1;
-        for (size_t j = 0; j < nn; j++) {
-            if (tolower((unsigned char)haystack[i + j]) != tolower((unsigned char)needle[j])) {
-                match = 0;
-                break;
-            }
-        }
-        if (match) return 1;
-    }
-    return 0;
-}
-
 /* Returns 1 if s begins with prefix (case-insensitive). */
 static int istarts(const char *s, const char *prefix) {
     if (!s || !prefix) return 0;
@@ -438,9 +420,10 @@ static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
                                  LspPos cursor, int *out_n) {
     *out_n = 0;
 
+    DocSymbol *innermost = symbol_at(tokens, num_tokens, cursor);
+
     int depth = 0;
-    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
-         sym != NULL; sym = sym->parent) {
+    for (DocSymbol *sym = innermost; sym != NULL; sym = sym->parent) {
         if (sym->keyword == KW_TASK && sym->id && sym->id[0])
             depth++;
     }
@@ -450,8 +433,7 @@ static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
     if (!result) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
 
     int i = depth;
-    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
-         sym != NULL; sym = sym->parent) {
+    for (DocSymbol *sym = innermost; sym != NULL; sym = sym->parent) {
         if (sym->keyword == KW_TASK && sym->id && sym->id[0])
             result[--i] = strdup(sym->id);
     }
@@ -536,90 +518,102 @@ static void collect_all_ids(DocSymbol *const *symbols, int num_symbols,
         collect_ids(extra_pools[e], extra_counts[e], id_kind, "", ids);
 }
 
-/* Collect dep IDs for depends/precedes, applying scope and bang navigation.
- * Writes the bang prefix string into bang_prefix (must be at least 64 bytes). */
-static void collect_dep_ids(const TokenSpan *tokens, int num_tokens,
-                            LspPos cursor,
-                            DocSymbol *const *symbols, int num_symbols,
-                            DocSymbol *const **extra_pools,
-                            const int *extra_counts, int num_extra,
-                            int id_kind, IdList *ids, char *bang_prefix) {
-    int scope_n = 0;
-    char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
-    int bang_count = count_leading_bangs(tokens, num_tokens, cursor);
-
-    for (int i = 0; i < bang_count; i++)
-        strncat(bang_prefix, "!", 64 - strlen(bang_prefix) - 1);
-
-    if (bang_count == 0) {
-        /* No bangs — absolute lookup from the file root.  Suggestions are
-         * every task in the current file (fully-qualified paths) plus the
-         * top-level tasks of every other open file. */
-        collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
-                        num_extra, id_kind, ids);
-    } else if (bang_count <= scope_n) {
-        /* Bang navigation: relative to current scope, file-local only */
-        int ch_n;
-        DocSymbol *const *ch = doc_symbol_find_path(
-            symbols, num_symbols,
-            (const char **)scope, scope_n - bang_count, &ch_n);
-        if (ch) collect_ids(ch, ch_n, id_kind, "", ids);
+/* Append one ID completion item to items.  When filter_prefix is non-empty,
+ * filterText is set to filter_prefix+id so the client matches the full typed
+ * text (e.g. "!fo" against filterText "!foo.bar"). */
+static void emit_id_item(yyjson_mut_doc *doc, yyjson_mut_val *items,
+                          const char *id, const char *name, int id_kind,
+                          const char *filter_prefix) {
+    yyjson_mut_val *item = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, item, "label",    id);
+    yyjson_mut_obj_add_uint(doc,   item, "kind",     (uint64_t)completion_kind_for(id_kind));
+    yyjson_mut_obj_add_strcpy(doc, item, "detail",   name);
+    yyjson_mut_obj_add_str(doc,    item, "sortText", "0");
+    if (filter_prefix && filter_prefix[0]) {
+        char ft[1024];
+        snprintf(ft, sizeof(ft), "%s%s", filter_prefix, id);
+        yyjson_mut_obj_add_strcpy(doc, item, "filterText", ft);
     }
-    /* bang_count > scope_n: no valid completions */
-
-    for (int i = 0; i < scope_n; i++) free(scope[i]);
-    free(scope);
+    yyjson_mut_arr_add_val(items, item);
 }
 
-/* Build ID completion items for a depends/allocate/chargeset/etc. argument.
- * Returns the number of items added to the items array. */
-static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
-                                const TokenSpan *tokens, int num_tokens,
-                                LspPos cursor, const char *partial,
-                                DocSymbol *const *symbols, int num_symbols,
-                                DocSymbol *const **extra_pools,
-                                const int *extra_counts, int num_extra,
-                                int id_kind, const char *keyword) {
+/* Build dep completion items for depends/precedes.
+ *
+ * If no leading bangs: return all absolute task IDs from all open files.
+ * If leading bangs:    navigate to the bang-relative scope level and return
+ *                      all task IDs reachable from there, with filterText
+ *                      set to bang_prefix+id so the client can match against
+ *                      what the user typed (e.g. "!fo" matches "!foo.bar").
+ *
+ * Client-side filtering narrows the list; we return the full candidate set.
+ */
+static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
+                                  const TokenSpan *tokens, int num_tokens,
+                                  LspPos cursor,
+                                  DocSymbol *const *symbols, int num_symbols,
+                                  DocSymbol *const **extra_pools,
+                                  const int *extra_counts, int num_extra,
+                                  int id_kind) {
+    int bang_count = count_leading_bangs(tokens, num_tokens, cursor);
     IdList ids = {0};
-    char   bang_prefix[64] = "";
+    char bang_prefix[64] = "";
 
-    int is_dep = (strcmp(keyword, "depends") == 0
-               || strcmp(keyword, "precedes") == 0);
-
-    if (id_kind == KW_TASK && is_dep) {
-        collect_dep_ids(tokens, num_tokens, cursor,
-                        symbols, num_symbols,
-                        extra_pools, extra_counts, num_extra,
-                        id_kind, &ids, bang_prefix);
-    } else {
+    if (bang_count == 0) {
         collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
                         num_extra, id_kind, &ids);
+    } else {
+        int scope_n = 0;
+        char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
+
+        if (bang_count <= scope_n) {
+            int ch_n = 0;
+            DocSymbol *const *ch = doc_symbol_find_path(
+                symbols, num_symbols,
+                (const char **)scope, scope_n - bang_count, &ch_n);
+            if (ch) collect_ids(ch, ch_n, id_kind, "", &ids);
+        }
+
+        memset(bang_prefix, '!', (size_t)bang_count);
+        bang_prefix[bang_count] = '\0';
+
+        for (int i = 0; i < scope_n; i++) free(scope[i]);
+        free(scope);
     }
 
     int count = 0;
     for (int i = 0; i < ids.n; i++) {
-        const char *id   = ids.items[i].id;
-        const char *name = ids.items[i].name;
+        emit_id_item(doc, items, ids.items[i].id, ids.items[i].name,
+                     id_kind, bang_prefix);
+        count++;
+    }
 
-        int id_match   = (!partial[0]) || istarts(id, partial);
-        int name_match = (partial[0]) && icontains(name, partial);
-        if (!id_match && !name_match) continue;
+    idlist_free(&ids);
+    return count;
+}
 
-        yyjson_mut_val *item = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_strcpy(doc, item, "label",    id);
-        yyjson_mut_obj_add_uint(doc,   item, "kind",     (uint64_t)completion_kind_for(id_kind));
-        yyjson_mut_obj_add_strcpy(doc, item, "detail",   name);
-        yyjson_mut_obj_add_str(doc,    item, "sortText", "0");
+/* Build ID completion items for an allocate/chargeset/etc. argument.
+ * Returns the full candidate list; client-side filtering narrows it. */
+static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
+                                const TokenSpan *tokens, int num_tokens,
+                                LspPos cursor,
+                                DocSymbol *const *symbols, int num_symbols,
+                                DocSymbol *const **extra_pools,
+                                const int *extra_counts, int num_extra,
+                                int id_kind) {
+    if (id_kind == KW_TASK)
+        return build_dep_completions(doc, items, tokens, num_tokens, cursor,
+                                     symbols, num_symbols,
+                                     extra_pools, extra_counts, num_extra,
+                                     id_kind);
 
-        if (name_match && !id_match) {
-            yyjson_mut_obj_add_strcpy(doc, item, "filterText", partial);
-        } else if (bang_prefix[0] && !partial[0]) {
-            char ft[1024];
-            snprintf(ft, sizeof(ft), "%s%s", bang_prefix, id);
-            yyjson_mut_obj_add_strcpy(doc, item, "filterText", ft);
-        }
+    IdList ids = {0};
+    collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
+                    num_extra, id_kind, &ids);
 
-        yyjson_mut_arr_add_val(items, item);
+    int count = 0;
+    for (int i = 0; i < ids.n; i++) {
+        emit_id_item(doc, items, ids.items[i].id, ids.items[i].name,
+                     id_kind, NULL);
         count++;
     }
 
@@ -685,7 +679,14 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
     if (is_decl_keyword(first_word))
         goto done;
 
-    /* Try ID completions (depends, allocate, chargeset, etc.) */
+    /* Try ID completions (depends, allocate, chargeset, etc.).
+     *
+     * Skip when the partial is the first token on its line: that means we're
+     * starting a new statement, not filling arguments of a keyword from a
+     * previous line.  (Keywords like `charge` have token_kind > KW_SIG_END so
+     * scan_kw_stack treats them as arguments of the preceding keyword, which
+     * would incorrectly return e.g. `depends` as the active context.) */
+    if (!first_word || !partial[0] || strcmp(first_word, partial) != 0)
     {
         ActiveContext ac = active_context(tokens, num_tokens, cursor);
         int id_kind = id_kind_for_keyword(ac.keyword);
@@ -693,10 +694,10 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
         if (id_kind) {
             item_count = build_id_completions(doc, items,
                                               tokens, num_tokens,
-                                              cursor, partial,
+                                              cursor,
                                               symbols, num_symbols,
                                               extra_pools, extra_counts, num_extra,
-                                              id_kind, ac.keyword);
+                                              id_kind);
             free(ac.keyword);
             goto done;  /* Don't mix ID completions with keyword completions */
         }
