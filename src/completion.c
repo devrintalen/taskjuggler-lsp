@@ -34,24 +34,6 @@
 
 /* ── String utilities ────────────────────────────────────────────────────── */
 
-/* Returns 1 if needle is a case-insensitive substring of haystack. */
-static int icontains(const char *haystack, const char *needle) {
-    if (!haystack || !needle) return 0;
-    size_t hn = strlen(haystack), nn = strlen(needle);
-    if (nn > hn) return 0;
-    for (size_t i = 0; i <= hn - nn; i++) {
-        int match = 1;
-        for (size_t j = 0; j < nn; j++) {
-            if (tolower((unsigned char)haystack[i + j]) != tolower((unsigned char)needle[j])) {
-                match = 0;
-                break;
-            }
-        }
-        if (match) return 1;
-    }
-    return 0;
-}
-
 /* Returns 1 if s begins with prefix (case-insensitive). */
 static int istarts(const char *s, const char *prefix) {
     if (!s || !prefix) return 0;
@@ -536,237 +518,47 @@ static void collect_all_ids(DocSymbol *const *symbols, int num_symbols,
         collect_ids(extra_pools[e], extra_counts[e], id_kind, "", ids);
 }
 
-/* Scan backwards from cursor to find the dotted path prefix before the cursor's
- * leaf token (a partial TK_IDENT or a TK_DOT that the cursor lands on).
- * Returns a heap-allocated outermost-first array of segment strings (each
- * heap-allocated), sets *out_n to the count.  Returns NULL / *out_n=0 when
- * there is no dotted prefix.
+/* Build dep completion items for depends/precedes.
  *
- * Examples (cursor position in brackets):
- *   "AcSo.[|]"     → ["AcSo"],          n=1  (cursor after dot)
- *   "AcSo.soft[|]" → ["AcSo"],          n=1  (cursor inside ident leaf)
- *   "AcSo.sw.g[|]" → ["AcSo","sw"],     n=2
- *   "AcSo[|]"      → NULL,              n=0  (no dot in path)
+ * If no leading bangs: return all absolute task IDs from all open files.
+ * If leading bangs:    navigate to the bang-relative scope level and return
+ *                      all task IDs reachable from there, with filterText
+ *                      set to bang_prefix+id so the client can match against
+ *                      what the user typed (e.g. "!fo" matches "!foo.bar").
+ *
+ * Client-side filtering narrows the list; we return the full candidate set.
  */
-static char **scan_dot_prefix(const TokenSpan *tokens, int num_tokens,
-                               LspPos cursor, int *out_n) {
-    *out_n = 0;
-
-    /* Find the last non-comment token at or before cursor. */
-    int last = -1;
-    for (int i = 0; i < num_tokens; i++) {
-        if (tokens[i].token_kind == TK_EOF) break;
-        if (pos_cmp(cursor, tokens[i].start) < 0) break;
-        if (tokens[i].token_kind != TK_LINE_COMMENT &&
-            tokens[i].token_kind != TK_BLOCK_COMMENT)
-            last = i;
-    }
-    if (last < 0) return NULL;
-
-    /* Find the TK_DOT that anchors the prefix.  If the cursor is on a partial
-     * TK_IDENT leaf, the dot comes before it; if the cursor is on a TK_DOT
-     * itself, that dot is the anchor. */
-    int dot_idx = last;
-    if (tokens[dot_idx].token_kind == TK_IDENT ||
-        tokens[dot_idx].token_kind == KW_START) {
-        dot_idx--;
-        if (dot_idx < 0 || tokens[dot_idx].token_kind != TK_DOT)
-            return NULL;
-    } else if (tokens[dot_idx].token_kind == TK_DOT) {
-        /* cursor is right after a dot, dot_idx is already set */
-    } else {
-        return NULL;
-    }
-
-    /* Walk backwards collecting alternating TK_DOT / TK_IDENT pairs. */
-    int cap = 8, count = 0;
-    char **segs = malloc((size_t)cap * sizeof(char *));
-    if (!segs) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-
-    for (int i = dot_idx; i >= 1; ) {
-        if (tokens[i].token_kind != TK_DOT) break;
-        i--;
-        if (tokens[i].token_kind != TK_IDENT &&
-            tokens[i].token_kind != KW_START) break;
-        if (count >= cap) {
-            cap *= 2;
-            char **tmp = realloc(segs, (size_t)cap * sizeof(char *));
-            if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-            segs = tmp;
-        }
-        segs[count++] = strdup(tokens[i].text ? tokens[i].text : "");
-        i--;
-    }
-
-    if (count == 0) { free(segs); return NULL; }
-
-    /* Collected innermost-first; reverse to get outermost-first. */
-    for (int j = 0; j < count / 2; j++) {
-        char *tmp = segs[j];
-        segs[j] = segs[count - 1 - j];
-        segs[count - 1 - j] = tmp;
-    }
-
-    *out_n = count;
-    return segs;
-}
-
-/* Collect dep IDs for depends/precedes, applying scope, bang, and dot navigation.
- * Writes the bang prefix string into bang_prefix (must be at least 64 bytes).
- * Returns 1 if dot-prefix navigation was used (items are relative to the
- * navigated node, labels are short), 0 for absolute or bang-relative results. */
-static int collect_dep_ids(const TokenSpan *tokens, int num_tokens,
-                            LspPos cursor,
-                            DocSymbol *const *symbols, int num_symbols,
-                            DocSymbol *const **extra_pools,
-                            const int *extra_counts, int num_extra,
-                            int id_kind, IdList *ids, char *bang_prefix) {
-    int scope_n = 0;
-    char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
+static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
+                                  const TokenSpan *tokens, int num_tokens,
+                                  LspPos cursor,
+                                  DocSymbol *const *symbols, int num_symbols,
+                                  DocSymbol *const **extra_pools,
+                                  const int *extra_counts, int num_extra,
+                                  int id_kind) {
     int bang_count = count_leading_bangs(tokens, num_tokens, cursor);
-
-    for (int i = 0; i < bang_count; i++)
-        strncat(bang_prefix, "!", 64 - strlen(bang_prefix) - 1);
-
-    int dot_navigated = 0;
+    IdList ids = {0};
+    char bang_prefix[64] = "";
 
     if (bang_count == 0) {
-        /* Check for a dotted path prefix before the cursor (e.g. "AcSo."). */
-        int dot_seg_n = 0;
-        char **dot_segs = scan_dot_prefix(tokens, num_tokens, cursor, &dot_seg_n);
+        collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
+                        num_extra, id_kind, &ids);
+    } else {
+        int scope_n = 0;
+        char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
 
-        if (dot_seg_n > 0) {
-            /* Dot-prefix navigation: descend to the named subtree and return
-             * its children with short (relative) IDs.  File-local only.
-             * First try an absolute root lookup; if that fails, try each
-             * scope-relative ancestor (same bang-navigation semantics) so
-             * that a bare segment like "deliveries." resolves even when the
-             * matching task is not at the root level. */
+        if (bang_count <= scope_n) {
             int ch_n = 0;
             DocSymbol *const *ch = doc_symbol_find_path(
                 symbols, num_symbols,
-                (const char **)dot_segs, dot_seg_n, &ch_n);
-            for (int b = 1; !ch && b <= scope_n; b++) {
-                int anc_n = 0;
-                DocSymbol *const *anc = doc_symbol_find_path(
-                    symbols, num_symbols,
-                    (const char **)scope, scope_n - b, &anc_n);
-                if (anc)
-                    ch = doc_symbol_find_path(anc, anc_n,
-                        (const char **)dot_segs, dot_seg_n, &ch_n);
-            }
-            if (ch) collect_ids(ch, ch_n, id_kind, "", ids);
-            dot_navigated = 1;
-        } else {
-            /* No bangs, no dots — absolute lookup from the file root.
-             * Include every task in the current file plus top-level tasks
-             * of every other open file. */
-            collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
-                            num_extra, id_kind, ids);
+                (const char **)scope, scope_n - bang_count, &ch_n);
+            if (ch) collect_ids(ch, ch_n, id_kind, "", &ids);
         }
 
-        for (int i = 0; i < dot_seg_n; i++) free(dot_segs[i]);
-        free(dot_segs);
-    } else if (bang_count <= scope_n) {
-        /* Bang navigation: relative to current scope, file-local only */
-        int ch_n;
-        DocSymbol *const *ch = doc_symbol_find_path(
-            symbols, num_symbols,
-            (const char **)scope, scope_n - bang_count, &ch_n);
-        if (ch) collect_ids(ch, ch_n, id_kind, "", ids);
-    }
-    /* bang_count > scope_n: no valid completions */
+        for (int i = 0; i < bang_count; i++)
+            strncat(bang_prefix, "!", sizeof(bang_prefix) - strlen(bang_prefix) - 1);
 
-    for (int i = 0; i < scope_n; i++) free(scope[i]);
-    free(scope);
-    return dot_navigated;
-}
-
-/* Add bang-relative hint items for dep completion when no bangs are present.
- *
- * When the cursor is in a dep argument with no leading bangs and no partial
- * text, the server returns absolute-path completions.  If the LSP client has
- * cached that list and the user then types "!" without triggering a fresh
- * server request, the client filters the stale list by "!" and finds nothing.
- *
- * To handle this, we eagerly include one item per relative-path bang level
- * (1..scope_n) with label and filterText "!<id>", "!!<id>", etc.  The client
- * will show these items when the user types "!" and select them correctly.
- *
- * Bang navigation is file-local (same semantics as the existing bang-count > 0
- * path in collect_dep_ids).  Returns the number of hint items added. */
-static int add_bang_hint_items(yyjson_mut_doc *doc, yyjson_mut_val *items,
-                               const TokenSpan *tokens, int num_tokens,
-                               LspPos cursor,
-                               DocSymbol *const *symbols, int num_symbols,
-                               int id_kind) {
-    int scope_n = 0;
-    char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
-    if (!scope_n) { free(scope); return 0; }
-
-    int count = 0;
-    for (int n = 1; n <= scope_n; n++) {
-        char bang_pfx[64] = "";
-        for (int i = 0; i < n && (int)strlen(bang_pfx) < 63; i++)
-            strcat(bang_pfx, "!");
-
-        int ch_n = 0;
-        DocSymbol *const *ch = doc_symbol_find_path(
-            symbols, num_symbols,
-            (const char **)scope, scope_n - n, &ch_n);
-        if (!ch) continue;
-
-        IdList ids = {0};
-        collect_ids(ch, ch_n, id_kind, "", &ids);
-
-        for (int i = 0; i < ids.n; i++) {
-            const char *id   = ids.items[i].id;
-            const char *name = ids.items[i].name;
-            char ft[1024];
-            snprintf(ft, sizeof(ft), "%s%s", bang_pfx, id);
-
-            yyjson_mut_val *item = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_strcpy(doc, item, "label",      ft);
-            yyjson_mut_obj_add_uint(doc,   item, "kind",       (uint64_t)completion_kind_for(id_kind));
-            yyjson_mut_obj_add_strcpy(doc, item, "detail",     name);
-            yyjson_mut_obj_add_str(doc,    item, "sortText",   "1");
-            yyjson_mut_obj_add_strcpy(doc, item, "filterText", ft);
-            yyjson_mut_arr_add_val(items, item);
-            count++;
-        }
-
-        idlist_free(&ids);
-    }
-
-    for (int i = 0; i < scope_n; i++) free(scope[i]);
-    free(scope);
-    return count;
-}
-
-/* Build ID completion items for a depends/allocate/chargeset/etc. argument.
- * Returns the number of items added to the items array. */
-static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
-                                const TokenSpan *tokens, int num_tokens,
-                                LspPos cursor, const char *partial,
-                                DocSymbol *const *symbols, int num_symbols,
-                                DocSymbol *const **extra_pools,
-                                const int *extra_counts, int num_extra,
-                                int id_kind, const char *keyword) {
-    IdList ids = {0};
-    char   bang_prefix[64] = "";
-
-    int is_dep = (strcmp(keyword, "depends") == 0
-               || strcmp(keyword, "precedes") == 0);
-
-    int dot_navigated = 0;
-    if (id_kind == KW_TASK && is_dep) {
-        dot_navigated = collect_dep_ids(tokens, num_tokens, cursor,
-                                        symbols, num_symbols,
-                                        extra_pools, extra_counts, num_extra,
-                                        id_kind, &ids, bang_prefix);
-    } else {
-        collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
-                        num_extra, id_kind, &ids);
+        for (int i = 0; i < scope_n; i++) free(scope[i]);
+        free(scope);
     }
 
     int count = 0;
@@ -774,20 +566,13 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
         const char *id   = ids.items[i].id;
         const char *name = ids.items[i].name;
 
-        int id_prefix_match = (!partial[0]) || istarts(id, partial);
-        int id_seg_match    = partial[0] && !id_prefix_match && icontains(id, partial);
-        int name_match      = partial[0] && icontains(name, partial);
-        if (!id_prefix_match && !id_seg_match && !name_match) continue;
-
         yyjson_mut_val *item = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_strcpy(doc, item, "label",    id);
         yyjson_mut_obj_add_uint(doc,   item, "kind",     (uint64_t)completion_kind_for(id_kind));
         yyjson_mut_obj_add_strcpy(doc, item, "detail",   name);
         yyjson_mut_obj_add_str(doc,    item, "sortText", "0");
 
-        if ((id_seg_match || name_match) && !id_prefix_match) {
-            yyjson_mut_obj_add_strcpy(doc, item, "filterText", partial);
-        } else if (bang_prefix[0] && !partial[0]) {
+        if (bang_prefix[0]) {
             char ft[1024];
             snprintf(ft, sizeof(ft), "%s%s", bang_prefix, id);
             yyjson_mut_obj_add_strcpy(doc, item, "filterText", ft);
@@ -798,14 +583,43 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
     }
 
     idlist_free(&ids);
+    return count;
+}
 
-    /* When no bangs are present and no partial is typed, eagerly include
-     * bang-relative hints so the client can find them by filtering on "!",
-     * "!!", etc. even without issuing a fresh server request. */
-    if (is_dep && !bang_prefix[0] && !partial[0] && !dot_navigated)
-        count += add_bang_hint_items(doc, items, tokens, num_tokens, cursor,
-                                     symbols, num_symbols, id_kind);
+/* Build ID completion items for an allocate/chargeset/etc. argument.
+ * Returns the full candidate list; client-side filtering narrows it. */
+static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
+                                const TokenSpan *tokens, int num_tokens,
+                                LspPos cursor,
+                                DocSymbol *const *symbols, int num_symbols,
+                                DocSymbol *const **extra_pools,
+                                const int *extra_counts, int num_extra,
+                                int id_kind, const char *keyword) {
+    int is_dep = (strcmp(keyword, "depends") == 0
+               || strcmp(keyword, "precedes") == 0);
 
+    if (is_dep && id_kind == KW_TASK)
+        return build_dep_completions(doc, items, tokens, num_tokens, cursor,
+                                     symbols, num_symbols,
+                                     extra_pools, extra_counts, num_extra,
+                                     id_kind);
+
+    IdList ids = {0};
+    collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
+                    num_extra, id_kind, &ids);
+
+    int count = 0;
+    for (int i = 0; i < ids.n; i++) {
+        yyjson_mut_val *item = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strcpy(doc, item, "label",    ids.items[i].id);
+        yyjson_mut_obj_add_uint(doc,   item, "kind",     (uint64_t)completion_kind_for(id_kind));
+        yyjson_mut_obj_add_strcpy(doc, item, "detail",   ids.items[i].name);
+        yyjson_mut_obj_add_str(doc,    item, "sortText", "0");
+        yyjson_mut_arr_add_val(items, item);
+        count++;
+    }
+
+    idlist_free(&ids);
     return count;
 }
 
@@ -875,7 +689,7 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
         if (id_kind) {
             item_count = build_id_completions(doc, items,
                                               tokens, num_tokens,
-                                              cursor, partial,
+                                              cursor,
                                               symbols, num_symbols,
                                               extra_pools, extra_counts, num_extra,
                                               id_kind, ac.keyword);
