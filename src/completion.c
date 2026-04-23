@@ -420,9 +420,10 @@ static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
                                  LspPos cursor, int *out_n) {
     *out_n = 0;
 
+    DocSymbol *innermost = symbol_at(tokens, num_tokens, cursor);
+
     int depth = 0;
-    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
-         sym != NULL; sym = sym->parent) {
+    for (DocSymbol *sym = innermost; sym != NULL; sym = sym->parent) {
         if (sym->keyword == KW_TASK && sym->id && sym->id[0])
             depth++;
     }
@@ -432,8 +433,7 @@ static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
     if (!result) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
 
     int i = depth;
-    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
-         sym != NULL; sym = sym->parent) {
+    for (DocSymbol *sym = innermost; sym != NULL; sym = sym->parent) {
         if (sym->keyword == KW_TASK && sym->id && sym->id[0])
             result[--i] = strdup(sym->id);
     }
@@ -518,6 +518,25 @@ static void collect_all_ids(DocSymbol *const *symbols, int num_symbols,
         collect_ids(extra_pools[e], extra_counts[e], id_kind, "", ids);
 }
 
+/* Append one ID completion item to items.  When filter_prefix is non-empty,
+ * filterText is set to filter_prefix+id so the client matches the full typed
+ * text (e.g. "!fo" against filterText "!foo.bar"). */
+static void emit_id_item(yyjson_mut_doc *doc, yyjson_mut_val *items,
+                          const char *id, const char *name, int id_kind,
+                          const char *filter_prefix) {
+    yyjson_mut_val *item = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, item, "label",    id);
+    yyjson_mut_obj_add_uint(doc,   item, "kind",     (uint64_t)completion_kind_for(id_kind));
+    yyjson_mut_obj_add_strcpy(doc, item, "detail",   name);
+    yyjson_mut_obj_add_str(doc,    item, "sortText", "0");
+    if (filter_prefix && filter_prefix[0]) {
+        char ft[1024];
+        snprintf(ft, sizeof(ft), "%s%s", filter_prefix, id);
+        yyjson_mut_obj_add_strcpy(doc, item, "filterText", ft);
+    }
+    yyjson_mut_arr_add_val(items, item);
+}
+
 /* Build dep completion items for depends/precedes.
  *
  * If no leading bangs: return all absolute task IDs from all open files.
@@ -554,8 +573,8 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
             if (ch) collect_ids(ch, ch_n, id_kind, "", &ids);
         }
 
-        for (int i = 0; i < bang_count; i++)
-            strncat(bang_prefix, "!", sizeof(bang_prefix) - strlen(bang_prefix) - 1);
+        memset(bang_prefix, '!', (size_t)bang_count);
+        bang_prefix[bang_count] = '\0';
 
         for (int i = 0; i < scope_n; i++) free(scope[i]);
         free(scope);
@@ -563,22 +582,8 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
 
     int count = 0;
     for (int i = 0; i < ids.n; i++) {
-        const char *id   = ids.items[i].id;
-        const char *name = ids.items[i].name;
-
-        yyjson_mut_val *item = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_strcpy(doc, item, "label",    id);
-        yyjson_mut_obj_add_uint(doc,   item, "kind",     (uint64_t)completion_kind_for(id_kind));
-        yyjson_mut_obj_add_strcpy(doc, item, "detail",   name);
-        yyjson_mut_obj_add_str(doc,    item, "sortText", "0");
-
-        if (bang_prefix[0]) {
-            char ft[1024];
-            snprintf(ft, sizeof(ft), "%s%s", bang_prefix, id);
-            yyjson_mut_obj_add_strcpy(doc, item, "filterText", ft);
-        }
-
-        yyjson_mut_arr_add_val(items, item);
+        emit_id_item(doc, items, ids.items[i].id, ids.items[i].name,
+                     id_kind, bang_prefix);
         count++;
     }
 
@@ -594,11 +599,8 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                 DocSymbol *const *symbols, int num_symbols,
                                 DocSymbol *const **extra_pools,
                                 const int *extra_counts, int num_extra,
-                                int id_kind, const char *keyword) {
-    int is_dep = (strcmp(keyword, "depends") == 0
-               || strcmp(keyword, "precedes") == 0);
-
-    if (is_dep && id_kind == KW_TASK)
+                                int id_kind) {
+    if (id_kind == KW_TASK)
         return build_dep_completions(doc, items, tokens, num_tokens, cursor,
                                      symbols, num_symbols,
                                      extra_pools, extra_counts, num_extra,
@@ -610,12 +612,8 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
 
     int count = 0;
     for (int i = 0; i < ids.n; i++) {
-        yyjson_mut_val *item = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_strcpy(doc, item, "label",    ids.items[i].id);
-        yyjson_mut_obj_add_uint(doc,   item, "kind",     (uint64_t)completion_kind_for(id_kind));
-        yyjson_mut_obj_add_strcpy(doc, item, "detail",   ids.items[i].name);
-        yyjson_mut_obj_add_str(doc,    item, "sortText", "0");
-        yyjson_mut_arr_add_val(items, item);
+        emit_id_item(doc, items, ids.items[i].id, ids.items[i].name,
+                     id_kind, NULL);
         count++;
     }
 
@@ -692,7 +690,7 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                               cursor,
                                               symbols, num_symbols,
                                               extra_pools, extra_counts, num_extra,
-                                              id_kind, ac.keyword);
+                                              id_kind);
             free(ac.keyword);
             goto done;  /* Don't mix ID completions with keyword completions */
         }
