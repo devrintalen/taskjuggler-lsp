@@ -549,14 +549,21 @@ static void emit_id_item(yyjson_mut_doc *doc, yyjson_mut_val *items,
     yyjson_mut_obj_add_str(doc, item, "sortText", "0");
 
     if (bang_prefix && bang_prefix[0]) {
+        size_t prefix_len = strlen(bang_prefix);
+        size_t id_len = strlen(id);
         char labeled[1024];
-        snprintf(labeled, sizeof(labeled), "%s%s", bang_prefix, id);
-        yyjson_mut_obj_add_strcpy(doc, item, "label", labeled);
-        yyjson_mut_val *edit = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_val(doc, edit, "range",
-                               range_json(doc, (LspRange){first_bang_pos, cursor}));
-        yyjson_mut_obj_add_strcpy(doc, edit, "newText", labeled);
-        yyjson_mut_obj_add_val(doc, item, "textEdit", edit);
+        if (prefix_len + id_len + 1 > sizeof(labeled)) {
+            yyjson_mut_obj_add_strcpy(doc, item, "label", id);
+        } else {
+            memcpy(labeled, bang_prefix, prefix_len);
+            memcpy(labeled + prefix_len, id, id_len + 1);
+            yyjson_mut_obj_add_strcpy(doc, item, "label", labeled);
+            yyjson_mut_val *edit = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_val(doc, edit, "range",
+                                   range_json(doc, (LspRange){first_bang_pos, cursor}));
+            yyjson_mut_obj_add_strcpy(doc, edit, "newText", labeled);
+            yyjson_mut_obj_add_val(doc, item, "textEdit", edit);
+        }
     } else {
         yyjson_mut_obj_add_strcpy(doc, item, "label", id);
     }
@@ -645,11 +652,10 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
     collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
                     num_extra, id_kind, &ids);
 
-    LspPos zero = {0, 0};
     int count = 0;
     for (int i = 0; i < ids.n; i++) {
         emit_id_item(doc, items, ids.items[i].id, ids.items[i].name,
-                     id_kind, NULL, zero, zero);
+                     id_kind, NULL, (LspPos){0, 0}, (LspPos){0, 0});
         count++;
     }
 
@@ -743,8 +749,7 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
         free(ac.keyword);
     }
 
-    /* Fall back to keyword completions for the current block context.
-     * Keyword tables are complete for the block, so is_incomplete stays 0. */
+    /* Fall back to keyword completions for the current block context */
     item_count = build_keyword_completions(doc, items,
                                            tokens, num_tokens,
                                            cursor, partial,
@@ -760,7 +765,7 @@ done:
         return yyjson_mut_null(doc);
 
     yyjson_mut_val *list = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_bool(doc, list, "isIncomplete", is_incomplete ? true : false);
+    yyjson_mut_obj_add_bool(doc, list, "isIncomplete", (bool)is_incomplete);
     yyjson_mut_obj_add_val(doc, list, "items", items);
     return list;
 }

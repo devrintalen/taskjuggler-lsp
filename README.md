@@ -97,7 +97,7 @@ In Emacs, which I use with `lsp-mode`, this looks like this:
     :hook ((taskjuggler-mode . lsp))
     :commands lsp
     :config
-    (setq lsp-completion-filter-on-incomplete nil))
+    (setq lsp-completion-no-cache t))
 
   (use-package lsp-ui
     :hook (lsp-mode . lsp-ui-mode)
@@ -113,6 +113,13 @@ In Emacs, which I use with `lsp-mode`, this looks like this:
       :server-id 'taskjuggler-lsp)))
 
 ```
+
+`lsp-completion-no-cache t` is recommended so that dependency
+completions refresh correctly when the user types additional `!`
+characters. Each extra `!` widens the reference scope rather than
+narrowing the list, so lsp-mode's same-session cache would otherwise
+keep the previous (narrower) result set and hide the newly relevant
+items.
 
 This initialization code depends on [`taskjuggler-mode.el`][], which
 is an Emacs major mode for TaskJuggler that I am working on.
