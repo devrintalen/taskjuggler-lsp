@@ -103,19 +103,45 @@
     "jsonrpc": "2.0",
     "id": 2,
     "result": {
-      "isIncomplete": false,
+      "isIncomplete": true,
       "items": [
         {
           "kind": 3,
-          "detail": "\"Specification\"",
+          "detail": "\"Inner 1\"",
           "sortText": "0",
-          "label": "spec"
+          "label": "!inner1",
+          "textEdit": {
+            "range": {
+              "start": {
+                "line": 4,
+                "character": 14
+              },
+              "end": {
+                "line": 4,
+                "character": 15
+              }
+            },
+            "newText": "!inner1"
+          }
         },
         {
           "kind": 3,
-          "detail": "\"Build\"",
+          "detail": "\"Inner 2\"",
           "sortText": "0",
-          "label": "build"
+          "label": "!inner2",
+          "textEdit": {
+            "range": {
+              "start": {
+                "line": 4,
+                "character": 14
+              },
+              "end": {
+                "line": 4,
+                "character": 15
+              }
+            },
+            "newText": "!inner2"
+          }
         }
       ]
     }

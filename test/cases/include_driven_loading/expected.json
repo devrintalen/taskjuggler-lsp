@@ -160,7 +160,7 @@
     "jsonrpc": "2.0",
     "id": 3,
     "result": {
-      "isIncomplete": true,
+      "isIncomplete": false,
       "items": [
         {
           "label": "project",

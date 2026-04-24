@@ -134,7 +134,7 @@
     "jsonrpc": "2.0",
     "id": 5,
     "result": {
-      "isIncomplete": true,
+      "isIncomplete": false,
       "items": [
         {
           "label": "scenario",

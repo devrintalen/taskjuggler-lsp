@@ -102,23 +102,7 @@
   {
     "jsonrpc": "2.0",
     "id": 2,
-    "result": {
-      "isIncomplete": false,
-      "items": [
-        {
-          "kind": 3,
-          "detail": "\"Specification\"",
-          "sortText": "0",
-          "label": "spec"
-        },
-        {
-          "kind": 3,
-          "detail": "\"Build\"",
-          "sortText": "0",
-          "label": "build"
-        }
-      ]
-    }
+    "result": null
   },
   {
     "jsonrpc": "2.0",
