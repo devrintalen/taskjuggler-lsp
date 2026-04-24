@@ -1,0 +1,119 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/p.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "project p \"P\" 2024-01-01 +3m {\n  task A \"A\" {\n    task A1 \"A1\" {\n      task leaf \"Leaf\" {\n        depends \n      }\n      task sib \"Sibling\" {}\n    }\n    task aleaf \"A-Leaf\" {}\n  }\n  task B \"B\" {}\n}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "textDocument/completion",
+    "params": {
+      "textDocument": { "uri": "file:///test/p.tjp" },
+      "position": { "line": 4, "character": 16 }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didChange",
+    "params": {
+      "textDocument": { "uri": "file:///test/p.tjp", "version": 2 },
+      "contentChanges": [
+        {
+          "range": {
+            "start": { "line": 4, "character": 16 },
+            "end":   { "line": 4, "character": 16 }
+          },
+          "text": "!"
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "textDocument/completion",
+    "params": {
+      "textDocument": { "uri": "file:///test/p.tjp" },
+      "position": { "line": 4, "character": 17 }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didChange",
+    "params": {
+      "textDocument": { "uri": "file:///test/p.tjp", "version": 3 },
+      "contentChanges": [
+        {
+          "range": {
+            "start": { "line": 4, "character": 17 },
+            "end":   { "line": 4, "character": 17 }
+          },
+          "text": "!"
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "textDocument/completion",
+    "params": {
+      "textDocument": { "uri": "file:///test/p.tjp" },
+      "position": { "line": 4, "character": 18 }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didChange",
+    "params": {
+      "textDocument": { "uri": "file:///test/p.tjp", "version": 4 },
+      "contentChanges": [
+        {
+          "range": {
+            "start": { "line": 4, "character": 18 },
+            "end":   { "line": 4, "character": 18 }
+          },
+          "text": "!"
+        }
+      ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 5,
+    "method": "textDocument/completion",
+    "params": {
+      "textDocument": { "uri": "file:///test/p.tjp" },
+      "position": { "line": 4, "character": 19 }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 6,
+    "method": "shutdown",
+    "params": {}
+  }
+]
