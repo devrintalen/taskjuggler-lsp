@@ -119,25 +119,25 @@
     "jsonrpc": "2.0",
     "id": 2,
     "result": {
-      "isIncomplete": true,
+      "isIncomplete": false,
       "items": [
         {
-          "label": "spec",
           "kind": 3,
           "detail": "\"Specification\"",
-          "sortText": "0"
+          "sortText": "0",
+          "label": "spec"
         },
         {
-          "label": "build",
           "kind": 3,
           "detail": "\"Build\"",
-          "sortText": "0"
+          "sortText": "0",
+          "label": "build"
         },
         {
-          "label": "doc",
           "kind": 3,
           "detail": "\"Documentation\"",
-          "sortText": "0"
+          "sortText": "0",
+          "label": "doc"
         }
       ]
     }
@@ -146,7 +146,7 @@
     "jsonrpc": "2.0",
     "id": 3,
     "result": {
-      "isIncomplete": true,
+      "isIncomplete": false,
       "items": [
         {
           "label": "effort",

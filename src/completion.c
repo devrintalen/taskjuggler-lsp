@@ -17,6 +17,7 @@
  */
 
 #include "completion.h"
+#include "document_symbol.h"
 #include "hover.h"
 #include "signature.h"
 
@@ -445,8 +446,12 @@ static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
 /* Count the number of consecutive `!` tokens immediately before the cursor,
  * skipping any trailing partial identifier and any comments.
  * Used to determine the bang depth for dep-ref scope navigation.
+ *
+ * When out_first_bang_pos is non-NULL and the count is > 0, writes the start
+ * position of the earliest consecutive bang.  Otherwise leaves it untouched.
  */
-static int count_leading_bangs(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
+static int count_leading_bangs(const TokenSpan *tokens, int num_tokens,
+                               LspPos cursor, LspPos *out_first_bang_pos) {
     /* Find index past the last non-comment token before (or at) cursor */
     int last = -1;
     for (int i = 0; i < num_tokens; i++) {
@@ -459,14 +464,19 @@ static int count_leading_bangs(const TokenSpan *tokens, int num_tokens, LspPos c
     /* Skip trailing ident (partial word being typed) */
     if (last >= 0 && tokens[last].token_kind == TK_IDENT) last--;
 
-    /* Count consecutive bangs scanning backwards, skipping comments */
+    /* Count consecutive bangs scanning backwards, skipping comments, and
+     * track the earliest bang's start position. */
     int count = 0;
+    LspPos first = {0, 0};
     for (int i = last; i >= 0; i--) {
         if (tokens[i].token_kind == TK_LINE_COMMENT || tokens[i].token_kind == TK_BLOCK_COMMENT)
             continue;
         if (tokens[i].token_kind != TK_BANG) break;
+        first = tokens[i].start;
         count++;
     }
+    if (count > 0 && out_first_bang_pos)
+        *out_first_bang_pos = first;
     return count;
 }
 
@@ -518,34 +528,57 @@ static void collect_all_ids(DocSymbol *const *symbols, int num_symbols,
         collect_ids(extra_pools[e], extra_counts[e], id_kind, "", ids);
 }
 
-/* Append one ID completion item to items.  When filter_prefix is non-empty,
- * filterText is set to filter_prefix+id so the client matches the full typed
- * text (e.g. "!fo" against filterText "!foo.bar"). */
+/* Append one ID completion item to items.
+ *
+ * When bang_prefix is non-empty, the label and insertion text include the
+ * leading bangs (so the popup shows e.g. "!!alice.foo") and a textEdit
+ * replaces the user-typed bang run from first_bang_pos through cursor.
+ * This keeps insertion idempotent regardless of how the client treats `!`
+ * in its word-boundary rules.
+ *
+ * When bang_prefix is empty or NULL, the plain id is used as the label with
+ * default client insertion semantics.
+ */
 static void emit_id_item(yyjson_mut_doc *doc, yyjson_mut_val *items,
                           const char *id, const char *name, int id_kind,
-                          const char *filter_prefix) {
+                          const char *bang_prefix,
+                          LspPos first_bang_pos, LspPos cursor) {
     yyjson_mut_val *item = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_strcpy(doc, item, "label",    id);
-    yyjson_mut_obj_add_uint(doc,   item, "kind",     (uint64_t)completion_kind_for(id_kind));
-    yyjson_mut_obj_add_strcpy(doc, item, "detail",   name);
-    yyjson_mut_obj_add_str(doc,    item, "sortText", "0");
-    if (filter_prefix && filter_prefix[0]) {
-        char ft[1024];
-        snprintf(ft, sizeof(ft), "%s%s", filter_prefix, id);
-        yyjson_mut_obj_add_strcpy(doc, item, "filterText", ft);
+    yyjson_mut_obj_add_uint(doc, item, "kind", (uint64_t)completion_kind_for(id_kind));
+    yyjson_mut_obj_add_strcpy(doc, item, "detail", name);
+    yyjson_mut_obj_add_str(doc, item, "sortText", "0");
+
+    if (bang_prefix && bang_prefix[0]) {
+        size_t prefix_len = strlen(bang_prefix);
+        size_t id_len = strlen(id);
+        char labeled[1024];
+        if (prefix_len + id_len + 1 > sizeof(labeled)) {
+            yyjson_mut_obj_add_strcpy(doc, item, "label", id);
+        } else {
+            memcpy(labeled, bang_prefix, prefix_len);
+            memcpy(labeled + prefix_len, id, id_len + 1);
+            yyjson_mut_obj_add_strcpy(doc, item, "label", labeled);
+            yyjson_mut_val *edit = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_val(doc, edit, "range",
+                                   range_json(doc, (LspRange){first_bang_pos, cursor}));
+            yyjson_mut_obj_add_strcpy(doc, edit, "newText", labeled);
+            yyjson_mut_obj_add_val(doc, item, "textEdit", edit);
+        }
+    } else {
+        yyjson_mut_obj_add_strcpy(doc, item, "label", id);
     }
     yyjson_mut_arr_add_val(items, item);
 }
 
 /* Build dep completion items for depends/precedes.
  *
- * If no leading bangs: return all absolute task IDs from all open files.
+ * If no leading bangs: return all absolute task IDs from all open files.  The
+ * result is complete — *out_incomplete is set to 0.
  * If leading bangs:    navigate to the bang-relative scope level and return
- *                      all task IDs reachable from there, with filterText
- *                      set to bang_prefix+id so the client can match against
- *                      what the user typed (e.g. "!fo" matches "!foo.bar").
- *
- * Client-side filtering narrows the list; we return the full candidate set.
+ *                      all task IDs reachable from there.  Labels include the
+ *                      bang run and a textEdit replaces the typed bangs.
+ *                      Typing an additional `!` widens the scope, so
+ *                      *out_incomplete is set to 1 to force a re-request.
  */
 static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                   const TokenSpan *tokens, int num_tokens,
@@ -553,8 +586,10 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                   DocSymbol *const *symbols, int num_symbols,
                                   DocSymbol *const **extra_pools,
                                   const int *extra_counts, int num_extra,
-                                  int id_kind) {
-    int bang_count = count_leading_bangs(tokens, num_tokens, cursor);
+                                  int id_kind, int *out_incomplete) {
+    LspPos first_bang_pos = {0, 0};
+    int bang_count = count_leading_bangs(tokens, num_tokens, cursor,
+                                         &first_bang_pos);
     IdList ids = {0};
     char bang_prefix[64] = "";
 
@@ -583,28 +618,35 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
     int count = 0;
     for (int i = 0; i < ids.n; i++) {
         emit_id_item(doc, items, ids.items[i].id, ids.items[i].name,
-                     id_kind, bang_prefix);
+                     id_kind, bang_prefix, first_bang_pos, cursor);
         count++;
     }
+
+    if (out_incomplete) *out_incomplete = (bang_count > 0) ? 1 : 0;
 
     idlist_free(&ids);
     return count;
 }
 
 /* Build ID completion items for an allocate/chargeset/etc. argument.
- * Returns the full candidate list; client-side filtering narrows it. */
+ *
+ * Returns the full candidate list.  For KW_TASK, delegates to the dep builder
+ * which handles bang scoping.  For the other ID kinds (resources, accounts)
+ * bangs are not meaningful, so the list is always complete and
+ * *out_incomplete is set to 0.
+ */
 static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                 const TokenSpan *tokens, int num_tokens,
                                 LspPos cursor,
                                 DocSymbol *const *symbols, int num_symbols,
                                 DocSymbol *const **extra_pools,
                                 const int *extra_counts, int num_extra,
-                                int id_kind) {
+                                int id_kind, int *out_incomplete) {
     if (id_kind == KW_TASK)
         return build_dep_completions(doc, items, tokens, num_tokens, cursor,
                                      symbols, num_symbols,
                                      extra_pools, extra_counts, num_extra,
-                                     id_kind);
+                                     id_kind, out_incomplete);
 
     IdList ids = {0};
     collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
@@ -613,9 +655,11 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
     int count = 0;
     for (int i = 0; i < ids.n; i++) {
         emit_id_item(doc, items, ids.items[i].id, ids.items[i].name,
-                     id_kind, NULL);
+                     id_kind, NULL, (LspPos){0, 0}, (LspPos){0, 0});
         count++;
     }
+
+    if (out_incomplete) *out_incomplete = 0;
 
     idlist_free(&ids);
     return count;
@@ -674,6 +718,7 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
 
     yyjson_mut_val *items = yyjson_mut_arr(doc);
     int item_count = 0;
+    int is_incomplete = 0;
 
     /* Suppress completions while typing a declaration keyword's id/name */
     if (is_decl_keyword(first_word))
@@ -697,7 +742,7 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                               cursor,
                                               symbols, num_symbols,
                                               extra_pools, extra_counts, num_extra,
-                                              id_kind);
+                                              id_kind, &is_incomplete);
             free(ac.keyword);
             goto done;  /* Don't mix ID completions with keyword completions */
         }
@@ -720,7 +765,7 @@ done:
         return yyjson_mut_null(doc);
 
     yyjson_mut_val *list = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_bool(doc, list, "isIncomplete", true);
+    yyjson_mut_obj_add_bool(doc, list, "isIncomplete", (bool)is_incomplete);
     yyjson_mut_obj_add_val(doc, list, "items", items);
     return list;
 }
