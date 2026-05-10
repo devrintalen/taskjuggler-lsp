@@ -16,12 +16,14 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
 #include "parser.h"
 #include <yyjson.h>
 
-/*
+/**
  * Build a DocumentHighlight[] JSON array for textDocument/documentHighlight.
  *
  * Returns NULL when the cursor is not on an identifier that can be resolved

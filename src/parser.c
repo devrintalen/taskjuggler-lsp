@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #include "parser.h"
 #include "diagnostics.h"
 #include "grammar.tab.h"  /* yyparse() */
@@ -67,7 +69,7 @@ void push_dep_ref(int bang_count, const char *path,
     dr->range      = (LspRange){ start, end };
 }
 
-/* Split a dot-separated path string into a heap-allocated array of segments. */
+/** Split a dot-separated path string into a heap-allocated array of segments. */
 static void split_path(const char *path, char ***out_segs, int *out_nseg) {
     *out_nseg = 0;
     *out_segs = NULL;
@@ -104,7 +106,7 @@ int          g_num_tok_spans   = 0;
 int          g_tok_span_cap    = 0;
 int          g_num_sem_entries = 0;
 
-/* Returns 1 if a token of the given kind will be emitted as a semantic token.
+/** Returns 1 if a token of the given kind will be emitted as a semantic token.
  * Matches the skip set in classify() in semantic_tokens.c. */
 static int is_sem_highlighted(int kind) {
     return kind != TK_LBRACE && kind != TK_RBRACE &&
@@ -135,7 +137,7 @@ void g_push_tok_span(int kind,
 
 /* ── Token helpers ───────────────────────────────────────────────────────── */
 
-/* Frees the heap-allocated text field of t and sets it to NULL. */
+/** Frees the heap-allocated text field of t and sets it to NULL. */
 void token_free(Token *t) {
     free(t->text);
     t->text = NULL;
@@ -143,7 +145,7 @@ void token_free(Token *t) {
 
 /* ── DocSymbol helpers ───────────────────────────────────────────────────── */
 
-/* Recursively frees all heap memory owned by s (name, detail, children array)
+/** Recursively frees all heap memory owned by s (name, detail, children array)
  * but does not free s itself, as it is typically stored inline in an array.
  */
 void doc_symbol_free(DocSymbol *s) {
@@ -164,7 +166,7 @@ void doc_symbol_free(DocSymbol *s) {
 
 /* ── ParseResult helpers ─────────────────────────────────────────────────── */
 
-/* Releases all heap memory owned by r (diagnostics, symbols, token spans,
+/** Releases all heap memory owned by r (diagnostics, symbols, token spans,
  * definition links, raw dep refs), then zeroes the struct.
  */
 void parse_result_free(ParseResult *r) {
@@ -196,7 +198,7 @@ void parse_result_free(ParseResult *r) {
     memset(r, 0, sizeof(*r));
 }
 
-/* Appends s to r's doc_symbols pointer array, growing it if needed. */
+/** Appends s to r's doc_symbols pointer array, growing it if needed. */
 void push_doc_symbol(ParseResult *r, DocSymbol *s) {
     if (r->num_doc_symbols >= r->doc_sym_cap) {
         int nc = r->doc_sym_cap ? r->doc_sym_cap * 2 : 4;
@@ -208,7 +210,7 @@ void push_doc_symbol(ParseResult *r, DocSymbol *s) {
     r->doc_symbols[r->num_doc_symbols++] = s;
 }
 
-/* Append a heap-allocated copy of the unquoted filename from an include
+/** Append a heap-allocated copy of the unquoted filename from an include
  * statement.  quoted_text is the raw TK_STR token text (e.g. "\"foo.tji\"");
  * the surrounding quotes are stripped before storing.
  */
@@ -274,7 +276,7 @@ DocSymbol *const *doc_symbol_find_path(DocSymbol *const *syms, int n,
 
 /* ── DocSymbol tree linkage ─────────────────────────────────────────────── */
 
-/* Recursively set parent pointers for all children in the symbol tree. */
+/** Recursively set parent pointers for all children in the symbol tree. */
 static void assign_parents(DocSymbol **syms, int n, DocSymbol *parent) {
     for (int i = 0; i < n; i++) {
         syms[i]->parent = parent;
@@ -284,7 +286,7 @@ static void assign_parents(DocSymbol **syms, int n, DocSymbol *parent) {
 
 /* ── Token-to-symbol cross-referencing ──────────────────────────────────── */
 
-/* Assign each token span's owner to the innermost enclosing DocSymbol using
+/** Assign each token span's owner to the innermost enclosing DocSymbol using
  * a single linear sweep.  Both tok_spans[] and symbol ranges are in document
  * order, so we walk them in lockstep with a stack of open symbol scopes.
  *
@@ -347,7 +349,7 @@ static void assign_token_owners(ParseResult *r) {
     free(stack);
 }
 
-/* Return the innermost DocSymbol whose range contains pos, using the
+/** Return the innermost DocSymbol whose range contains pos, using the
  * precomputed .owner on tok_spans.  Binary-searches for the last token whose
  * start is at or before pos, then walks up the parent chain until the scope
  * strictly contains pos (inclusive start, exclusive end).  Returns NULL if
@@ -373,7 +375,7 @@ DocSymbol *symbol_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
 
 /* ── Dependency edge resolution ────────────────────────────────────────── */
 
-/* Append a DefinitionLink to a DocSymbol's def_links array. */
+/** Append a DefinitionLink to a DocSymbol's def_links array. */
 static void push_def_link(DocSymbol *sym, DefinitionLink link) {
     if (sym->num_def_links >= sym->def_links_cap) {
         int nc = sym->def_links_cap ? sym->def_links_cap * 2 : 4;
@@ -386,7 +388,7 @@ static void push_def_link(DocSymbol *sym, DefinitionLink link) {
     sym->def_links[sym->num_def_links++] = link;
 }
 
-/* Append a ReferenceLink to a DocSymbol's ref_links array. */
+/** Append a ReferenceLink to a DocSymbol's ref_links array. */
 static void push_ref_link(DocSymbol *sym, ReferenceLink link) {
     if (sym->num_ref_links >= sym->ref_links_cap) {
         int nc = sym->ref_links_cap ? sym->ref_links_cap * 2 : 4;
@@ -441,7 +443,7 @@ static void emit_unresolved_dep_diag(ParseResult *r, LspRange range,
     free(msg);
 }
 
-/* Append a RawDepRef onto r->cross_file_deps[], taking ownership of path. */
+/** Append a RawDepRef onto r->cross_file_deps[], taking ownership of path. */
 static void stash_cross_file_dep(ParseResult *r, const RawDepRef *ref) {
     if (r->num_cross_file_deps >= r->cross_file_deps_cap) {
         int nc = r->cross_file_deps_cap ? r->cross_file_deps_cap * 2 : 4;
@@ -456,7 +458,7 @@ static void stash_cross_file_dep(ParseResult *r, const RawDepRef *ref) {
     dst->path  = ref->path ? strdup(ref->path) : NULL;
 }
 
-/* Resolve dep refs accumulated by the grammar: split paths, resolve targets
+/** Resolve dep refs accumulated by the grammar: split paths, resolve targets
  * in-file, populate def_links/ref_links on success.  For 0-bang refs that
  * fail in-file lookup, stash them on r->cross_file_deps[] for the server to
  * retry against other open documents — no diagnostic yet.  For bang refs,
@@ -549,7 +551,7 @@ static void resolve_dep_refs(ParseResult *r) {
     free_dep_refs();
 }
 
-/* Walk s and its descendants, compacting link arrays in place by dropping
+/** Walk s and its descendants, compacting link arrays in place by dropping
  * any entry that carries a cross-document URI.  Frees the URI strings. */
 static void strip_cross_file_links(DocSymbol *s) {
     int keep = 0;

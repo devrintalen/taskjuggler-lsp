@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #include "signature.h"
 #include "hover.h"
 
@@ -23,7 +25,7 @@
 
 /* ── active_context ──────────────────────────────────────────────────────── */
 
-/* Determine the active keyword context and argument index at cursor.
+/** Determine the active keyword context and argument index at cursor.
  * Returns the innermost keyword that has signature help and whose brace depth
  * matches the cursor's, along with the number of arguments before the cursor.
  * The returned keyword string is heap-allocated; caller must free it.

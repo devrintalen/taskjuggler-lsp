@@ -18,7 +18,15 @@
 
 #pragma once
 
-#define VERSION_MAJOR 0
-#define VERSION_MINOR 5
-#define VERSION_PATCH 2
-#define VERSION_STRING "0.5.2"
+/**
+ * @file version.h
+ * @brief Build-time version constants embedded into the `initialize`
+ * response's `serverInfo.version` field.  Bumped together with the
+ * `VERSION` variable in the Makefile (see the release checklist in
+ * CLAUDE.md).
+ */
+
+#define VERSION_MAJOR 0           /**< Major component of the server version. */
+#define VERSION_MINOR 5           /**< Minor component of the server version. */
+#define VERSION_PATCH 2           /**< Patch component of the server version. */
+#define VERSION_STRING "0.5.2"    /**< Dotted version string reported to clients. */

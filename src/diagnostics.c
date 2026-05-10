@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 /*
  * diagnostics.c — diagnostic accumulation and LSP diagnostic delivery
  *
@@ -61,7 +63,7 @@ void push_diagnostic(ParseResult *r, LspRange range, int severity,
 
 /* ── LSP publishDiagnostics notification ─────────────────────────────────── */
 
-/* Send a textDocument/publishDiagnostics notification to the editor.
+/** Send a textDocument/publishDiagnostics notification to the editor.
  * Serialises r->diagnostics[] as a JSON-RPC notification and writes it to
  * stdout via lsp_send_message().  Passing a zeroed ParseResult (r->num_diagnostics=0)
  * clears any editor-side errors for the document.

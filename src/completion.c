@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #include "completion.h"
 #include "document_symbol.h"
 #include "hover.h"
@@ -35,7 +37,7 @@
 
 /* ── String utilities ────────────────────────────────────────────────────── */
 
-/* Returns 1 if s begins with prefix (case-insensitive). */
+/** Returns 1 if s begins with prefix (case-insensitive). */
 static int istarts(const char *s, const char *prefix) {
     if (!s || !prefix) return 0;
     size_t pn = strlen(prefix);
@@ -48,7 +50,7 @@ static int istarts(const char *s, const char *prefix) {
 
 /* ── Cursor suppression ──────────────────────────────────────────────────── */
 
-/* Find the start of the line containing cursor in text.  Returns a pointer
+/** Find the start of the line containing cursor in text.  Returns a pointer
  * into text at the first character of that line.
  */
 static const char *find_line_start(const char *text, uint32_t target_line) {
@@ -148,7 +150,7 @@ static int cursor_in_scissors(const char *text, LspPos cursor,
 
 /* ── Token context ───────────────────────────────────────────────────────── */
 
-/* Returns heap-allocated text of the first non-comment token on cursor's line,
+/** Returns heap-allocated text of the first non-comment token on cursor's line,
  * or NULL if no such ident exists. */
 static char *line_first_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     for (int i = 0; i < num_tokens; i++) {
@@ -164,7 +166,7 @@ static char *line_first_word(const TokenSpan *tokens, int num_tokens, LspPos cur
     return NULL;
 }
 
-/* Returns 1 if there are no non-whitespace tokens before cursor on its line. */
+/** Returns 1 if there are no non-whitespace tokens before cursor on its line. */
 static int at_statement_start(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     for (int i = 0; i < num_tokens; i++) {
         const TokenSpan *t = &tokens[i];
@@ -177,7 +179,7 @@ static int at_statement_start(const TokenSpan *tokens, int num_tokens, LspPos cu
     return 1;
 }
 
-/* Return the identifier text at cursor if cursor is on a TK_IDENT token,
+/** Return the identifier text at cursor if cursor is on a TK_IDENT token,
  * otherwise return an empty heap-allocated string.  Caller must free.
  */
 static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
@@ -332,7 +334,7 @@ static const KwEntry ACCOUNT_KWS[] = {
     {NULL, NULL}
 };
 
-/* Return the keyword table appropriate for the innermost recognized block type.
+/** Return the keyword table appropriate for the innermost recognized block type.
  * Walks the stack from innermost outward, skipping structural-but-transparent
  * blocks (limits, supplement, etc.) until a recognized type is found.
  * Returns TOPLEVEL_KWS if no recognized block is found.
@@ -371,7 +373,7 @@ typedef struct {
     int      cap;    /**< allocated capacity */
 } IdList;
 
-/* Append a heap-allocated copy of (id, name) to il, growing it if needed. */
+/** Append a heap-allocated copy of (id, name) to il, growing it if needed. */
 static void idlist_push(IdList *il, const char *id, const char *name) {
     if (il->n >= il->cap) {
         il->cap = il->cap ? il->cap * 2 : 16;
@@ -382,7 +384,7 @@ static void idlist_push(IdList *il, const char *id, const char *name) {
     il->items[il->n++] = (IdEntry){ strdup(id), strdup(name) };
 }
 
-/* Free all entries in il and the backing array. */
+/** Free all entries in il and the backing array. */
 static void idlist_free(IdList *il) {
     for (int i = 0; i < il->n; i++) {
         free(il->items[i].id);
@@ -495,7 +497,7 @@ static int count_leading_bangs(const TokenSpan *tokens, int num_tokens,
 
 /* ── Completion builders ─────────────────────────────────────────────────── */
 
-/* Map a KW_* keyword constant to the corresponding CompletionItemKind value. */
+/** Map a KW_* keyword constant to the corresponding CompletionItemKind value. */
 static int completion_kind_for(int keyword) {
     switch (keyword) {
     case KW_TASK:     return CIK_FUNCTION;
@@ -505,7 +507,7 @@ static int completion_kind_for(int keyword) {
     }
 }
 
-/* Return 1 if fw is a declaration keyword whose id/name the user is typing
+/** Return 1 if fw is a declaration keyword whose id/name the user is typing
  * (i.e. completions should be suppressed). */
 static int is_decl_keyword(const char *fw) {
     return fw && (strcmp(fw, "project")    == 0 || strcmp(fw, "task")       == 0
@@ -515,7 +517,7 @@ static int is_decl_keyword(const char *fw) {
               || strcmp(fw, "supplement") == 0);
 }
 
-/* Map an active-context keyword string to the KW_* symbol kind that its
+/** Map an active-context keyword string to the KW_* symbol kind that its
  * arguments reference, or 0 if the keyword does not take ID arguments. */
 static int id_kind_for_keyword(const char *keyword) {
     if (!keyword) return 0;

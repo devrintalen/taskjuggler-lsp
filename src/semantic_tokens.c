@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #include "semantic_tokens.h"
 #include "grammar.tab.h"
 
@@ -204,7 +206,7 @@ static void emit_token(uint32_t *buf, int *count,
 
 /* ── Integer serialization ───────────────────────────────────────────────── */
 
-/* Write the decimal representation of val into buf and return the number of
+/** Write the decimal representation of val into buf and return the number of
  * bytes written.  Avoids sprintf overhead; val=0 emits a single '0'. */
 static int write_uint32(char *buf, uint32_t val) {
     if (val == 0) { buf[0] = '0'; return 1; }

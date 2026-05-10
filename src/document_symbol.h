@@ -16,21 +16,27 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
 #include "parser.h"
 #include <yyjson.h>
 
-/* Serialize an LspRange to a mutable JSON object. */
+/** Serialise an LspRange to a mutable JSON object allocated in @p doc. */
 yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r);
 
-/* Map a KW_* keyword constant to the corresponding LSP SymbolKind (SK_*). */
+/** Map a KW_* keyword constant to the corresponding LSP SymbolKind (SK_*). */
 int symbol_kind_for(int keyword);
 
-/*
- * Serialize the documentSymbol tree to a heap-allocated, NUL-terminated JSON
- * array string.  Sets *out_len to the byte length (excluding NUL).
- * Caller owns the returned memory and must free() it.
- * Intended to be cached and embedded via yyjson_mut_rawncpy.
+/**
+ * Serialise the documentSymbol tree to a heap-allocated, NUL-terminated JSON
+ * array string.  Intended to be cached and later embedded via
+ * yyjson_mut_rawncpy.
+ *
+ * @param syms     Top-level symbols of the document.
+ * @param n        Length of @p syms.
+ * @param out_len  Receives the byte length of the result, excluding the NUL.
+ * @return Heap-allocated JSON; caller owns and must free().
  */
 char *build_document_symbols_json(DocSymbol *const *syms, int n, size_t *out_len);

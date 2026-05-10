@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #include "hover.h"
 
 #include <stdlib.h>
@@ -23,12 +25,12 @@
 
 /* ── token_at ────────────────────────────────────────────────────────────── */
 
-/* Returns 1 if position p falls within [start, end] (both endpoints inclusive). */
+/** Returns 1 if position p falls within [start, end] (both endpoints inclusive). */
 static int pos_in(LspPos p, LspPos start, LspPos end) {
     return pos_cmp(start, p) <= 0 && pos_cmp(p, end) <= 0;
 }
 
-/* Return a copy of the token span that covers pos, or a sentinel TK_EOF span
+/** Return a copy of the token span that covers pos, or a sentinel TK_EOF span
  * if no token covers that position.  The returned span's text field is always
  * heap-allocated; caller must free it.
  *
@@ -146,7 +148,7 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
 
 /* ── active_keyword_at ───────────────────────────────────────────────────── */
 
-/* Return the innermost keyword that has hover documentation and whose brace
+/** Return the innermost keyword that has hover documentation and whose brace
  * depth matches the cursor's brace depth.  The returned keyword string is
  * heap-allocated; caller must free it.  Returns {NULL, ...} if none found.
  *

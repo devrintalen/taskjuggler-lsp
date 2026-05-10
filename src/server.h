@@ -16,14 +16,29 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
+/**
+ * Initialise the document store and any per-process state used by
+ * server_process().  Must be called once before the first message is
+ * processed.
+ */
 void server_init();
 
-/* Process one JSON-RPC request/notification.
- * Returns a heap-allocated JSON string response, or NULL for notifications.
- * Caller must free the returned string. */
+/**
+ * Process one JSON-RPC request or notification.
+ *
+ * @param json_text  The raw JSON message body (without the Content-Length
+ *                   framing).
+ * @return Heap-allocated JSON string response, or NULL for notifications.
+ *         Caller must free() the returned string.
+ */
 char *server_process(const char *json_text);
 
-/* Write one LSP-framed message to stdout. */
+/**
+ * Write one LSP-framed message to stdout, prepending the required
+ * `Content-Length` header.
+ */
 void lsp_send_message(const char *msg);

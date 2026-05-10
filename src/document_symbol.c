@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #include "document_symbol.h"
 #include "grammar.tab.h"
 #include <stdio.h>
@@ -42,7 +44,7 @@ int symbol_kind_for(int keyword) {
 /* Convenience macro: push a string literal without calling strlen at runtime. */
 #define PUSH_LIT(b, s) buf_push((b), (s), sizeof(s) - 1)
 
-/* Serialize an LspRange into a {"start": {...}, "end": {...}} JSON object.
+/** Serialize an LspRange into a {"start": {...}, "end": {...}} JSON object.
  *
  * doc — the mutable JSON document that will own the returned value
  * r   — the range to serialize
@@ -83,7 +85,7 @@ static void buf_push(Buf *b, const char *s, size_t n) {
 }
 
 
-/* Hand-rolled uint32 formatter; avoids sprintf overhead.
+/** Hand-rolled uint32 formatter; avoids sprintf overhead.
  * Returns the number of characters written to p. */
 static int write_uint(char *p, uint32_t v) {
     if (v == 0) { *p = '0'; return 1; }
@@ -110,7 +112,7 @@ static void buf_push_uint(Buf *b, uint32_t v) {
     b->len += (size_t)write_uint(b->data + b->len, v);
 }
 
-/* Write a JSON-escaped string value including surrounding double quotes.
+/** Write a JSON-escaped string value including surrounding double quotes.
  * Bulk-copies runs of safe characters to avoid per-byte call overhead. */
 static void buf_push_json_str(Buf *b, const char *s) {
     buf_push(b, "\"", 1);
@@ -169,7 +171,7 @@ static void write_sym_buf(Buf *b, const DocSymbol *sym) {
     buf_push(b, "}", 1);
 }
 
-/* Serialize the documentSymbol tree to a heap-allocated JSON array string.
+/** Serialize the documentSymbol tree to a heap-allocated JSON array string.
  *
  * The returned string is NUL-terminated and owned by the caller.
  * Sets *out_len to the byte length of the JSON string (excluding NUL).

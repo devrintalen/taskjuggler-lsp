@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 /*
  * definition.c — textDocument/definition response builder
  *
@@ -43,7 +45,7 @@
 #include "definition.h"
 #include "document_symbol.h"
 
-/* Returns 1 if position p falls within range r (both endpoints inclusive). */
+/** Returns 1 if position p falls within range r (both endpoints inclusive). */
 static int pos_in_range(LspPos p, LspRange r) {
     int after  = (p.line > r.start.line)
               || (p.line == r.start.line && p.character >= r.start.character);

@@ -16,16 +16,19 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
 #include "parser.h"
 #include <yyjson.h>
 
-/* ── Semantic token type indices ─────────────────────────────────────────── *
+/** @name Semantic token type indices
  *
- * These are positions in the legend.tokenTypes array advertised during
- * initialize.  Any change here must be reflected in semantic_token_type_names[]
- * in semantic_tokens.c, keeping the order identical.
+ * Positions in the legend.tokenTypes array advertised during initialize.
+ * Any change here must be reflected in semantic_token_type_names[] in
+ * semantic_tokens.c, keeping the order identical.
+ * @{
  */
 #define SEMTOK_TYPE_KEYWORD  0
 #define SEMTOK_TYPE_COMMENT  1
@@ -33,8 +36,9 @@
 #define SEMTOK_TYPE_NUMBER   3
 #define SEMTOK_TYPE_VARIABLE 4
 #define SEMTOK_TYPE_FUNCTION 5
+/** @} */
 
-/* ── Semantic token modifier bitmasks ────────────────────────────────────── *
+/** @name Semantic token modifier bitmasks
  *
  * Bit positions correspond to positions in legend.tokenModifiers.  Any
  * change here must be reflected in semantic_token_modifier_names[] in
@@ -43,24 +47,28 @@
  * SEMTOK_MOD_DECLARATION is applied to the five structural keywords that
  * introduce named declarations: project, task, resource, account, shift.
  * This allows editors to style them distinctly from property keywords.
+ * @{
  */
 #define SEMTOK_MOD_DECLARATION (1 << 0)
+/** @} */
 
-/* ── Legend arrays ───────────────────────────────────────────────────────── *
+/** @name Legend arrays
  *
  * Exposed so that handle_initialize() can embed them directly into the
  * capabilities response without duplicating the string literals.
+ * @{
  */
 extern const char * const semantic_token_type_names[];
 extern const int          num_semantic_token_types;
 extern const char * const semantic_token_modifier_names[];
 extern const int          num_semantic_token_modifiers;
+/** @} */
 
-/* ── Public API ──────────────────────────────────────────────────────────── *
- *
- * Build a LSP SemanticTokens object { "data": [...] } for the given token
- * span array.  The data array uses the standard five-integer delta encoding
- * per token: [deltaLine, deltaStartChar, length, tokenType, tokenModifiers].
+/**
+ * Build an LSP SemanticTokens object `{ "data": [...] }` for the given
+ * token span array.  The data array uses the standard five-integer delta
+ * encoding per token: [deltaLine, deltaStartChar, length, tokenType,
+ * tokenModifiers].
  *
  * Multi-line tokens (TK_BLOCK_COMMENT, TK_MULTI_LINE_STR) are split into
  * one entry per source line as required by the protocol.  The accumulated
@@ -69,7 +77,7 @@ extern const int          num_semantic_token_modifiers;
  * Tokens recorded in tok_spans solely for cursor-position queries
  * (TK_LBRACE, TK_RBRACE, TK_BANG, TK_DOT, TK_COMMA) are silently skipped.
  *
- * Values are allocated in doc; caller owns doc.
+ * Values are allocated in @p doc; caller owns @p doc.
  */
 yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
                                             const TokenSpan *spans, int num_spans,

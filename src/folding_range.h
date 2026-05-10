@@ -16,12 +16,14 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
 #include "parser.h"
 #include <yyjson.h>
 
-/*
+/**
  * Build the JSON array of FoldingRange objects for
  * textDocument/foldingRange responses.
  *

@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 /*
  * document_highlight.c — textDocument/documentHighlight response builder
  *
@@ -55,7 +57,7 @@
 #include "grammar.tab.h"
 #include <string.h>
 
-/* Returns 1 if position p falls within range r (both endpoints inclusive). */
+/** Returns 1 if position p falls within range r (both endpoints inclusive). */
 static int pos_in_range(LspPos p, LspRange r) {
     int after  = (p.line > r.start.line)
               || (p.line == r.start.line && p.character >= r.start.character);
@@ -64,7 +66,7 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-/* Returns 1 if ranges a and b have identical start and end positions. */
+/** Returns 1 if ranges a and b have identical start and end positions. */
 static int range_eq(LspRange a, LspRange b) {
     return pos_cmp(a.start, b.start) == 0 && pos_cmp(a.end, b.end) == 0;
 }

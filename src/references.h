@@ -16,12 +16,14 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
 #include "parser.h"
 #include <yyjson.h>
 
-/*
+/**
  * Build a Location[] JSON array for textDocument/references.
  *
  * Returns NULL when the cursor is not on a task declaration identifier.

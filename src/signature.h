@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
 #include "parser.h"
@@ -28,17 +30,17 @@ typedef struct {
     uint32_t arg_count;  /**< number of completed argument tokens at cursor */
 } ActiveContext;
 
-/*
- * Scan tokens up to `cursor` and return the innermost active statement
+/**
+ * Scan tokens up to @p cursor and return the innermost active statement
  * keyword together with the number of completed argument tokens.
  * Caller must free result.keyword (if non-NULL).
  */
 ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cursor);
 
-/*
- * Build a LSP SignatureHelp JSON object for `kw` with `active_param`
- * highlighted, or NULL if `kw` has no known signature.
- * Values are allocated in doc; caller owns doc.
+/**
+ * Build an LSP SignatureHelp JSON object for @p kw with @p active_param
+ * highlighted, or NULL if @p kw has no known signature.
+ * Values are allocated in @p doc; caller owns @p doc.
  */
 yyjson_mut_val *build_signature_help_json(yyjson_mut_doc *doc,
                                            const char *kw,
