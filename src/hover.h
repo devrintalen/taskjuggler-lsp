@@ -25,7 +25,7 @@
  * if none.  Caller must free result.text (if non-NULL). */
 TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
 
-/*
+/**
  * Shared keyword-context scanner used by hover and signature help.
  *
  * Walks tokens up to cursor, tracking brace depth and a keyword stack.
@@ -43,10 +43,10 @@ TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
  * The caller is responsible for freeing all kw fields in the stack.
  */
 typedef struct {
-    char     *kw;
-    LspRange  range;
-    uint32_t  depth;
-    uint32_t  argc;
+    char     *kw;        /**< keyword text, heap-allocated */
+    LspRange  range;     /**< source range of the keyword token */
+    uint32_t  depth;     /**< brace depth at which this keyword was pushed */
+    uint32_t  argc;      /**< number of argument tokens seen so far */
 } KwStackEntry;
 
 int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
@@ -57,7 +57,7 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
 /* Return Markdown documentation for a TJP keyword, or NULL if unknown. */
 const char *keyword_docs(const char *kw);
 
-/*
+/**
  * Find the keyword that is "active" at cursor — the most recent documentable
  * keyword whose argument list encompasses the cursor position (i.e. it has
  * been started but not yet terminated by a deeper block or a sibling keyword).
@@ -67,8 +67,8 @@ const char *keyword_docs(const char *kw);
  * Returns {NULL, {0}} when no active keyword exists.
  */
 typedef struct {
-    char    *keyword;
-    LspRange range;
+    char    *keyword;    /**< keyword text, heap-allocated; NULL if none */
+    LspRange range;      /**< source range of the keyword token */
 } ActiveKeyword;
 
 ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos cursor);

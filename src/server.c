@@ -133,14 +133,15 @@
 
 #define MAX_DOCS 64
 
+/** Document store slot — URI plus authoritative text and its parse result. */
 typedef struct {
-    char       *uri;
-    char       *text;
-    ParseResult parse;
-    char       *doc_symbols_json; /* cached documentSymbol JSON array; NULL = invalid */
-    size_t      doc_symbols_json_len; /* byte length of doc_symbols_json (excluding NUL) */
-    int         in_use;
-    int         disk_only; /* 1 = loaded from disk/watcher, not opened by editor */
+    char       *uri;                  /**< document URI, heap-allocated */
+    char       *text;                 /**< full source text, heap-allocated */
+    ParseResult parse;                /**< parse output for the current text */
+    char       *doc_symbols_json;     /**< cached documentSymbol JSON array; NULL = invalid */
+    size_t      doc_symbols_json_len; /**< byte length of doc_symbols_json (excluding NUL) */
+    int         in_use;               /**< 1 if this slot holds a live document */
+    int         disk_only;            /**< 1 = loaded from disk/watcher, not opened by editor */
 } Document;
 
 static Document docs[MAX_DOCS];

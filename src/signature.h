@@ -22,10 +22,10 @@
 #include "grammar.tab.h"
 #include <yyjson.h>
 
-/* Result of scanning context up to a cursor position. */
+/** Result of scanning context up to a cursor position. */
 typedef struct {
-    char    *keyword;   /* heap-allocated; NULL if no active context */
-    uint32_t arg_count;
+    char    *keyword;    /**< heap-allocated; NULL if no active context */
+    uint32_t arg_count;  /**< number of completed argument tokens at cursor */
 } ActiveContext;
 
 /*
