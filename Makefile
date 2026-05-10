@@ -78,12 +78,4 @@ clean:
 	rm -f $(DEBUG_OBJ) $(DEBUG_BIN)
 	rm -f $(LEXTEST_BIN) tools/lexer_test.o
 
-# ── Documentation ────────────────────────────────────────────────────────── #
-
-docs:
-	doxygen Doxyfile
-
-docs-clean:
-	rm -rf docs/
-
-.PHONY: all debug clean lexer-test docs docs-clean
+.PHONY: all debug clean lexer-test
