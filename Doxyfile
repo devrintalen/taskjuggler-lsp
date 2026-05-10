@@ -15,7 +15,7 @@ RECURSIVE              = NO
 # Skip flex/bison output — generated, and Doxygen chokes on the macros.
 EXCLUDE                = src/lexer.yy.c src/grammar.tab.c src/grammar.tab.h
 
-EXTRACT_ALL            = YES
+EXTRACT_ALL            = NO
 EXTRACT_STATIC         = YES
 JAVADOC_AUTOBRIEF      = YES
 OPTIMIZE_OUTPUT_FOR_C  = YES
