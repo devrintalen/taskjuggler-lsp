@@ -62,10 +62,11 @@ yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r) {
 
 /* ── Flat-buffer JSON serialization ─────────────────────────────────────── */
 
+/** Growable byte buffer used to assemble the document-symbol JSON payload. */
 typedef struct {
-    char   *data;
-    size_t  len;
-    size_t  cap;
+    char   *data;  /**< heap-allocated bytes; not NUL-terminated */
+    size_t  len;   /**< number of bytes currently in use */
+    size_t  cap;   /**< allocated capacity */
 } Buf;
 
 static void buf_push(Buf *b, const char *s, size_t n) {

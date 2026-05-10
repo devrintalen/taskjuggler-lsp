@@ -225,7 +225,11 @@ static int *block_stack(const TokenSpan *tokens, int num_tokens,
 
 /* ── Keyword tables ──────────────────────────────────────────────────────── */
 
-typedef struct { const char *kw; const char *doc; } KwEntry;
+/** A single keyword completion entry: keyword text and short description. */
+typedef struct {
+    const char *kw;   /**< keyword text shown to the user */
+    const char *doc;  /**< short documentation for the completion item */
+} KwEntry;
 
 static const KwEntry TOPLEVEL_KWS[] = {
     {"project",          "Project header (required once per file)"},
@@ -354,9 +358,18 @@ static const KwEntry *kws_for_stack(const int *stack, int n) {
 
 /* ── ID collection ───────────────────────────────────────────────────────── */
 
-typedef struct { char *id; char *name; } IdEntry;
+/** A single identifier completion candidate. */
+typedef struct {
+    char *id;    /**< TJP identifier, heap-allocated */
+    char *name; /**< display name (quoted-string label), heap-allocated */
+} IdEntry;
 
-typedef struct { IdEntry *items; int n, cap; } IdList;
+/** Dynamic array of IdEntry used to gather completion candidates. */
+typedef struct {
+    IdEntry *items;  /**< heap-allocated array of entries */
+    int      n;      /**< number of entries */
+    int      cap;    /**< allocated capacity */
+} IdList;
 
 /* Append a heap-allocated copy of (id, name) to il, growing it if needed. */
 static void idlist_push(IdList *il, const char *id, const char *name) {

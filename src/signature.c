@@ -56,10 +56,11 @@ ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cur
 
 /* ── build_signature_help_json ───────────────────────────────────────────── */
 
+/** A single keyword signature: label, parameter names, and documentation. */
 typedef struct {
-    const char  *label;
-    const char **params; /* NULL-terminated */
-    const char  *doc;
+    const char  *label;  /**< signature label, e.g. "task id \"name\"" */
+    const char **params; /**< NULL-terminated array of parameter names */
+    const char  *doc;    /**< human-readable description */
 } SigDef;
 
 /* Build a SignatureHelp JSON response object from a SigDef.

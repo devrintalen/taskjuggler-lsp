@@ -1,0 +1,31 @@
+# Doxygen configuration for taskjuggler-lsp.
+#
+# Only non-default options are set here; everything else uses Doxygen's
+# built-in defaults. Run `make docs` to generate HTML output under docs/.
+
+PROJECT_NAME           = "taskjuggler-lsp"
+PROJECT_NUMBER         = 0.5.2
+PROJECT_BRIEF          = "Language Server Protocol implementation for TaskJuggler v3"
+
+OUTPUT_DIRECTORY       = docs
+INPUT                  = src
+FILE_PATTERNS          = *.c *.h
+RECURSIVE              = NO
+
+# Skip flex/bison output — generated, and Doxygen chokes on the macros.
+EXCLUDE                = src/lexer.yy.c src/grammar.tab.c src/grammar.tab.h
+
+EXTRACT_ALL            = NO
+EXTRACT_STATIC         = YES
+JAVADOC_AUTOBRIEF      = YES
+OPTIMIZE_OUTPUT_FOR_C  = YES
+
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_NO_PARAMDOC       = YES
+
+# Set HAVE_DOT = YES (and install graphviz) to enable call/caller graphs.
+HAVE_DOT               = NO
