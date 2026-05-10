@@ -10,6 +10,9 @@ A Language Server Protocol (LSP) implementation for
 The project supports TaskJuggler v3 and does not support earlier
 versions.
 
+Generated Doxygen API documentation is published at
+<https://devrintalen.github.io/taskjuggler-lsp/index.html>.
+
 ## Dependencies
 
 - yyjson (`-lyyjson`)
