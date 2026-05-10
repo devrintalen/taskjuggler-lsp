@@ -41,6 +41,8 @@
  * @param extra_counts Per-pool lengths matching @p extra_pools.
  * @param num_extra    Length of @p extra_pools.
  * @param text         Raw source text of the current document.
+ * @return A CompletionList JSON object, or yyjson_mut_null() when no
+ *         completions apply at @p cursor.
  */
 yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const TokenSpan *tokens, int num_tokens,

@@ -26,16 +26,22 @@
 /**
  * Build a DocumentHighlight[] JSON array for textDocument/documentHighlight.
  *
- * Returns NULL when the cursor is not on an identifier that can be resolved
- * to a symbol definition.  Otherwise returns an array of DocumentHighlight
- * objects: the definition site tagged as Write (kind 3) and all same-document
- * reference sites tagged as Read (kind 2).
- *
  * Works bidirectionally: triggers from both definition and reference sites.
- * For dotted dependency paths (e.g. "task1.subtask2"), each segment is
+ * For dotted dependency paths (e.g. `task1.subtask2`), each segment is
  * treated as an independent reference.
  *
- * Values are allocated in doc; caller owns doc.
+ * Values are allocated in @p doc; caller owns @p doc.
+ *
+ * @param doc          Destination mutable JSON document.
+ * @param symbols      Top-level symbols of the current document.
+ * @param num_symbols  Length of @p symbols.
+ * @param tokens       Token spans of the current document.
+ * @param num_tokens   Length of @p tokens.
+ * @param cursor       Cursor position.
+ * @return A JSON array of DocumentHighlight objects: the definition site
+ *         tagged as Write (kind 3) and all same-document reference sites
+ *         tagged as Read (kind 2).  NULL when @p cursor is not on an
+ *         identifier that resolves to a symbol definition.
  */
 yyjson_mut_val *build_document_highlight_json(
     yyjson_mut_doc *doc,

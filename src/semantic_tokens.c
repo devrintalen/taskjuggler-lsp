@@ -206,8 +206,14 @@ static void emit_token(uint32_t *buf, int *count,
 
 /* ── Integer serialization ───────────────────────────────────────────────── */
 
-/** Write the decimal representation of val into buf and return the number of
- * bytes written.  Avoids sprintf overhead; val=0 emits a single '0'. */
+/**
+ * Write the decimal representation of @p val into @p buf.  Avoids sprintf
+ * overhead; `val == 0` emits a single '0'.
+ *
+ * @param buf  Destination with at least 10 bytes of space.
+ * @param val  Value to serialise.
+ * @return Number of bytes written to @p buf.
+ */
 static int write_uint32(char *buf, uint32_t val) {
     if (val == 0) { buf[0] = '0'; return 1; }
     char tmp[10];
@@ -219,14 +225,6 @@ static int write_uint32(char *buf, uint32_t val) {
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
-/* Build the {"data": [...]} response object for textDocument/semanticTokens/full.
- * Iterates tok_spans, classifies each token, and emits delta-encoded entries.
- *
- * doc             — the mutable JSON document that will own the returned value
- * spans           — token span array from the ParseResult
- * num_spans       — number of entries in spans
- * num_sem_entries — upper bound on push_entry calls (precomputed during lexing)
- */
 yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
                                             const TokenSpan *spans, int num_spans,
                                             int num_sem_entries) {

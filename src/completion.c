@@ -37,7 +37,13 @@
 
 /* ── String utilities ────────────────────────────────────────────────────── */
 
-/** Returns 1 if s begins with prefix (case-insensitive). */
+/**
+ * Test whether @p s begins with @p prefix, comparing case-insensitively.
+ *
+ * @param s       Heap or stack string to test.
+ * @param prefix  Required prefix; may not be NULL.
+ * @return 1 on match, 0 otherwise.
+ */
 static int istarts(const char *s, const char *prefix) {
     if (!s || !prefix) return 0;
     size_t pn = strlen(prefix);
@@ -50,8 +56,13 @@ static int istarts(const char *s, const char *prefix) {
 
 /* ── Cursor suppression ──────────────────────────────────────────────────── */
 
-/** Find the start of the line containing cursor in text.  Returns a pointer
- * into text at the first character of that line.
+/**
+ * Find the start of the line containing @p target_line in @p text.
+ *
+ * @param text         NUL-terminated source text.
+ * @param target_line  Zero-indexed line whose start position is wanted.
+ * @return Pointer into @p text at the first character of @p target_line,
+ *         or the trailing NUL when the file is shorter.
  */
 static const char *find_line_start(const char *text, uint32_t target_line) {
     const char *p = text;
@@ -150,8 +161,15 @@ static int cursor_in_scissors(const char *text, LspPos cursor,
 
 /* ── Token context ───────────────────────────────────────────────────────── */
 
-/** Returns heap-allocated text of the first non-comment token on cursor's line,
- * or NULL if no such ident exists. */
+/**
+ * Return the first non-comment identifier token on @p cursor's line.
+ *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param cursor      Cursor position; only its line component is used.
+ * @return Heap-allocated copy of the identifier text, or NULL when the line
+ *         starts with something other than an identifier.
+ */
 static char *line_first_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     for (int i = 0; i < num_tokens; i++) {
         const TokenSpan *t = &tokens[i];
@@ -166,7 +184,14 @@ static char *line_first_word(const TokenSpan *tokens, int num_tokens, LspPos cur
     return NULL;
 }
 
-/** Returns 1 if there are no non-whitespace tokens before cursor on its line. */
+/**
+ * Test whether @p cursor sits before any non-comment tokens on its line.
+ *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param cursor      Cursor position.
+ * @return 1 when @p cursor is at the start of a fresh statement, 0 otherwise.
+ */
 static int at_statement_start(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     for (int i = 0; i < num_tokens; i++) {
         const TokenSpan *t = &tokens[i];
@@ -179,8 +204,15 @@ static int at_statement_start(const TokenSpan *tokens, int num_tokens, LspPos cu
     return 1;
 }
 
-/** Return the identifier text at cursor if cursor is on a TK_IDENT token,
- * otherwise return an empty heap-allocated string.  Caller must free.
+/**
+ * Return the identifier text @p cursor is sitting on.
+ *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param cursor      Cursor position.
+ * @return Heap-allocated identifier text when @p cursor is on a TK_IDENT
+ *         token, or an empty heap-allocated string otherwise.  Caller must
+ *         free.
  */
 static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     TokenSpan t = tok_span_at(tokens, num_tokens, cursor);
@@ -334,10 +366,16 @@ static const KwEntry ACCOUNT_KWS[] = {
     {NULL, NULL}
 };
 
-/** Return the keyword table appropriate for the innermost recognized block type.
- * Walks the stack from innermost outward, skipping structural-but-transparent
- * blocks (limits, supplement, etc.) until a recognized type is found.
- * Returns TOPLEVEL_KWS if no recognized block is found.
+/**
+ * Return the keyword table appropriate for the innermost recognised block
+ * type in the enclosing keyword stack.  Walks @p stack from innermost
+ * outward, skipping structural-but-transparent blocks (limits, supplement,
+ * etc.) until a recognised type is found.
+ *
+ * @param stack  Stack of KW_* values, outermost first.
+ * @param n      Length of @p stack.
+ * @return The matching keyword table, or TOPLEVEL_KWS when no recognised
+ *         block is found.
  */
 static const KwEntry *kws_for_stack(const int *stack, int n) {
     for (int i = n - 1; i >= 0; i--) {
@@ -373,7 +411,14 @@ typedef struct {
     int      cap;    /**< allocated capacity */
 } IdList;
 
-/** Append a heap-allocated copy of (id, name) to il, growing it if needed. */
+/**
+ * Append a heap-allocated copy of (@p id, @p name) to @p il, growing the
+ * backing array if needed.
+ *
+ * @param il    Target IdList.
+ * @param id    Identifier text; copied via strdup().
+ * @param name  Display label; copied via strdup().
+ */
 static void idlist_push(IdList *il, const char *id, const char *name) {
     if (il->n >= il->cap) {
         il->cap = il->cap ? il->cap * 2 : 16;
@@ -384,7 +429,11 @@ static void idlist_push(IdList *il, const char *id, const char *name) {
     il->items[il->n++] = (IdEntry){ strdup(id), strdup(name) };
 }
 
-/** Free all entries in il and the backing array. */
+/**
+ * Free all entries in @p il and the backing array.
+ *
+ * @param il  IdList to release.
+ */
 static void idlist_free(IdList *il) {
     for (int i = 0; i < il->n; i++) {
         free(il->items[i].id);
@@ -497,7 +546,13 @@ static int count_leading_bangs(const TokenSpan *tokens, int num_tokens,
 
 /* ── Completion builders ─────────────────────────────────────────────────── */
 
-/** Map a KW_* keyword constant to the corresponding CompletionItemKind value. */
+/**
+ * Map a KW_* keyword constant to the corresponding CompletionItemKind value.
+ *
+ * @param keyword  KW_* constant from grammar.tab.h.
+ * @return The matching CompletionItemKind value (CIK_FUNCTION, CIK_CLASS,
+ *         CIK_VARIABLE, or CIK_REFERENCE).
+ */
 static int completion_kind_for(int keyword) {
     switch (keyword) {
     case KW_TASK:     return CIK_FUNCTION;
@@ -507,8 +562,13 @@ static int completion_kind_for(int keyword) {
     }
 }
 
-/** Return 1 if fw is a declaration keyword whose id/name the user is typing
- * (i.e. completions should be suppressed). */
+/**
+ * Test whether @p fw is a declaration keyword whose id/name the user is
+ * typing — in which case completions should be suppressed.
+ *
+ * @param fw  Candidate keyword text (may be NULL).
+ * @return 1 when @p fw is a declaration keyword, 0 otherwise.
+ */
 static int is_decl_keyword(const char *fw) {
     return fw && (strcmp(fw, "project")    == 0 || strcmp(fw, "task")       == 0
               || strcmp(fw, "resource")   == 0 || strcmp(fw, "account")    == 0
@@ -517,8 +577,14 @@ static int is_decl_keyword(const char *fw) {
               || strcmp(fw, "supplement") == 0);
 }
 
-/** Map an active-context keyword string to the KW_* symbol kind that its
- * arguments reference, or 0 if the keyword does not take ID arguments. */
+/**
+ * Map an active-context keyword string to the KW_* symbol kind whose
+ * identifiers form its arguments.
+ *
+ * @param keyword  Keyword text (e.g. `"depends"`, `"allocate"`).
+ * @return The KW_* kind whose identifiers should be offered as completions,
+ *         or 0 when @p keyword does not take id arguments.
+ */
 static int id_kind_for_keyword(const char *keyword) {
     if (!keyword) return 0;
     if (strcmp(keyword, "depends")  == 0 || strcmp(keyword, "precedes") == 0)

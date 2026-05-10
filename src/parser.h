@@ -78,7 +78,12 @@ typedef struct {
     char  *text;         /**< heap-allocated; caller must free */
 } Token;
 
-/** Free the heap-allocated text inside a Token (does not free the Token itself). */
+/**
+ * Free the heap-allocated text inside a Token (does not free the Token
+ * itself).
+ *
+ * @param t  Token whose `text` field should be released and nulled out.
+ */
 void token_free(Token *t);
 
 
@@ -381,13 +386,24 @@ typedef struct {
  * Parse @p src into a ParseResult.  Single entry point for the lexer +
  * grammar pipeline.  The returned ParseResult owns all dynamic arrays;
  * release with parse_result_free().
+ *
+ * @param src  NUL-terminated TaskJuggler source text.
+ * @return Fully populated ParseResult.
  */
 ParseResult parse(const char *src);
 
-/** Release every dynamic allocation owned by @p r. */
+/**
+ * Release every dynamic allocation owned by @p r and zero its fields.
+ *
+ * @param r  ParseResult to release; the struct itself is not freed.
+ */
 void        parse_result_free(ParseResult *r);
 
-/** Recursively free a DocSymbol and all of its children. */
+/**
+ * Recursively free a DocSymbol and all of its children.
+ *
+ * @param s  Root of the DocSymbol subtree to free.
+ */
 void        doc_symbol_free(DocSymbol *s);
 
 /**
@@ -395,13 +411,19 @@ void        doc_symbol_free(DocSymbol *s);
  *
  * @param r            ParseResult being populated.
  * @param quoted_text  Raw `include` argument as it appears in source; the
- *                     surrounding quotes are stripped.
+ *                     surrounding quotes are stripped before storing.
  */
 void        push_included_file(ParseResult *r, const char *quoted_text);
 
 /**
  * Push a `depends`/`precedes` reference into the parser's transient
  * accumulator.  Called from grammar.y as the rules fire.
+ *
+ * @param bang_count  Number of leading `!` characters in the reference.
+ * @param path        Dot-separated reference path (e.g. `"deliveries.start"`).
+ * @param owner       DocSymbol that declared the reference.
+ * @param start       Start position of the reference expression.
+ * @param end         End position of the reference expression.
  */
 void push_dep_ref(int bang_count, const char *path,
                   DocSymbol *owner, LspPos start, LspPos end);
@@ -424,6 +446,15 @@ void dep_refs_reset(void);
  *
  * Call clear_cross_file_state(@p r) before calling this to wipe any
  * cross-file state left over from a previous resolution pass.
+ *
+ * @param r            ParseResult whose cross_file_deps[] are resolved.
+ * @param extra_roots  Per-document arrays of top-level symbols to consult.
+ * @param extra_counts Per-document lengths matching @p extra_roots.
+ * @param extra_uris   URIs corresponding to each entry in @p extra_roots.
+ * @param num_extra    Length of @p extra_roots, @p extra_counts, and
+ *                     @p extra_uris.
+ * @param self_uri     URI of the document owning @p r, stored on each
+ *                     ReferenceLink's `source_uri` for matches.
  */
 void resolve_cross_file_deps(ParseResult *r,
                              DocSymbol *const *const *extra_roots,
@@ -439,6 +470,8 @@ void resolve_cross_file_deps(ParseResult *r,
  * entries with a non-NULL source_uri (freeing the URI strings), and
  * truncates @p r->diagnostics back to dep_diag_start.  Called by the
  * server before each cross-file resolution cycle.
+ *
+ * @param r  ParseResult whose cross-file state should be cleared.
  */
 void clear_cross_file_state(ParseResult *r);
 
@@ -447,6 +480,9 @@ void clear_cross_file_state(ParseResult *r);
  * start, exclusive end), using the precomputed `.owner` field on
  * @p tokens.
  *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param pos         Position to look up.
  * @return The matching symbol, or NULL when @p pos is outside every
  *         DocSymbol.  Runs in O(log T + D) where T is @p num_tokens
  *         and D is the symbol nesting depth at @p pos.
@@ -471,7 +507,13 @@ DocSymbol *const *doc_symbol_find_path(DocSymbol *const *syms, int n,
                                        const char **path, int plen,
                                        int *out_n);
 
-/** Compare two positions.  Returns -1, 0, or 1 (strcmp-style). */
+/**
+ * Compare two positions in source order.
+ *
+ * @param a  Left-hand position.
+ * @param b  Right-hand position.
+ * @return -1 if @p a precedes @p b, 1 if @p a follows @p b, 0 if equal.
+ */
 static inline int pos_cmp(LspPos a, LspPos b) {
     if (a.line != b.line) return (a.line < b.line) ? -1 : 1;
     if (a.character != b.character) return (a.character < b.character) ? -1 : 1;

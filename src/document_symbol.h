@@ -23,10 +23,21 @@
 #include "parser.h"
 #include <yyjson.h>
 
-/** Serialise an LspRange to a mutable JSON object allocated in @p doc. */
+/**
+ * Serialise an LspRange to a mutable JSON object allocated in @p doc.
+ *
+ * @param doc  Destination mutable JSON document.
+ * @param r    Range to serialise.
+ * @return The newly created JSON object.
+ */
 yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r);
 
-/** Map a KW_* keyword constant to the corresponding LSP SymbolKind (SK_*). */
+/**
+ * Map a KW_* keyword constant to the corresponding LSP SymbolKind (SK_*).
+ *
+ * @param keyword  KW_* constant from grammar.tab.h.
+ * @return The matching LSP SymbolKind value.
+ */
 int symbol_kind_for(int keyword);
 
 /**

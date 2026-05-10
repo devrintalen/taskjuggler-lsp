@@ -42,5 +42,8 @@ void push_diagnostic(ParseResult *r, LspRange range, int severity,
 /**
  * Serialise @p r->diagnostics and send a textDocument/publishDiagnostics
  * notification for @p uri to the editor.
+ *
+ * @param uri  Document URI whose diagnostics are being published.
+ * @param r    ParseResult whose diagnostics array is serialised.
  */
 void publish_diagnostics(const char *uri, const ParseResult *r);

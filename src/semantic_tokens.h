@@ -78,6 +78,14 @@ extern const int          num_semantic_token_modifiers;
  * (TK_LBRACE, TK_RBRACE, TK_BANG, TK_DOT, TK_COMMA) are silently skipped.
  *
  * Values are allocated in @p doc; caller owns @p doc.
+ *
+ * @param doc              Destination mutable JSON document.
+ * @param spans            Token spans of the current document.
+ * @param num_spans        Length of @p spans.
+ * @param num_sem_entries  Upper bound on the number of semantic-token
+ *                         entries that will be emitted (used to
+ *                         pre-allocate the result array).
+ * @return The SemanticTokens JSON object `{ "data": [...] }`.
  */
 yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
                                             const TokenSpan *spans, int num_spans,

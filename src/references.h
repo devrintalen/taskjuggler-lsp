@@ -26,20 +26,21 @@
 /**
  * Build a Location[] JSON array for textDocument/references.
  *
- * Returns NULL when the cursor is not on a task declaration identifier.
- * Returns an empty array when the cursor is on a task declaration that
- * no dependency reference points to anywhere in the workspace.
- * Otherwise returns an array of Location objects, one per dependency
- * reference that resolves to the task under the cursor, collected from
- * the target's ref_links.
+ * Values are allocated in @p doc; caller owns @p doc.
  *
- * cursor_uri   — URI of the document the cursor is in (used for
- *                same-document references where source_uri is NULL)
- * tokens/num_tokens — token spans of the cursor document (carry .owner links
- *                     that let symbol_at() locate the declaration under cursor)
- * cursor       — the cursor position
- *
- * Values are allocated in doc; caller owns doc.
+ * @param doc         Destination mutable JSON document.
+ * @param cursor_uri  URI of the document the cursor is in (used for
+ *                    same-document references where source_uri is NULL).
+ * @param tokens      Token spans of the cursor document (carry `.owner`
+ *                    links that let symbol_at() locate the declaration
+ *                    under cursor).
+ * @param num_tokens  Length of @p tokens.
+ * @param cursor      Cursor position.
+ * @return An array of Location objects (one per dependency reference that
+ *         resolves to the task under @p cursor, collected from the
+ *         target's ref_links); an empty array when no dependency points
+ *         to that task; or NULL when @p cursor is not on a task
+ *         declaration identifier.
  */
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
                                        const char *cursor_uri,

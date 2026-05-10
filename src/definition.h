@@ -28,12 +28,18 @@
  *
  * Locates a DefinitionLink whose source range contains @p cursor via
  * symbol_at() + parent-chain walk.  When found, returns a JSON object
- * of the form:
+ * of the form `{ "uri": "<uri>", "range": <target selection_range> }`.
  *
- *   { "uri": "<uri>", "range": <selection_range of target symbol> }
- *
- * Returns NULL when no definition link covers the cursor position.
  * Values are allocated in @p doc; caller owns @p doc.
+ *
+ * @param doc         Destination mutable JSON document.
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param cursor      Cursor position.
+ * @param uri         URI placed into the response's `uri` field when the
+ *                    target lives in the same document as the source.
+ * @return The Location JSON object, or NULL when no definition link
+ *         covers @p cursor.
  */
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
                                        const TokenSpan *tokens, int num_tokens,
@@ -45,6 +51,9 @@ yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
  * Uses symbol_at() to locate the innermost enclosing DocSymbol and scans its
  * def_links, walking parents on miss.
  *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param cursor      Cursor position.
  * @return Pointer to the matching link, or NULL when none covers the cursor.
  */
 const DefinitionLink *find_def_link_at(const TokenSpan *tokens, int num_tokens,

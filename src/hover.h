@@ -26,6 +26,11 @@
 /**
  * Return a copy of the TokenSpan that spans @p pos, or a token with kind
  * TK_EOF if none.  Caller must free result.text (if non-NULL).
+ *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param pos         Cursor position.
+ * @return Copy of the matching token, or one with `token_kind == TK_EOF`.
  */
 TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
 
@@ -54,6 +59,18 @@ typedef struct {
  * heap-allocated.  *out_depth holds the brace depth at cursor.
  * The caller is responsible for freeing all kw fields in the stack.
  *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param cursor      Cursor position.
+ * @param kind_max    Upper bound (exclusive) on KW_* values eligible to be
+ *                    pushed as keyword entries (e.g. KW_DOCS_END,
+ *                    KW_SIG_END).
+ * @param track_argc  When non-zero, increment `arg_count` on the innermost
+ *                    entry for every non-keyword token that ends before
+ *                    @p cursor.
+ * @param stack       Output buffer for the keyword stack.
+ * @param stack_cap   Capacity of @p stack in entries.
+ * @param out_depth   Receives the brace depth at @p cursor.
  * @return Number of entries written into @p stack.
  */
 int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
@@ -61,7 +78,14 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
                   KwStackEntry *stack, int stack_cap,
                   uint32_t *out_depth);
 
-/** Return Markdown documentation for a TJP keyword, or NULL if unknown. */
+/**
+ * Return Markdown documentation for a TJP keyword, or NULL if unknown.
+ *
+ * @param kw  Keyword text (e.g. `"task"`, `"depends"`).
+ * @return Markdown documentation string, or NULL when @p kw is not a
+ *         documented keyword.  The returned pointer is to static storage
+ *         and must not be freed.
+ */
 const char *keyword_docs(const char *kw);
 
 /** Result of active_keyword_at() — keyword text and its source range. */
@@ -75,8 +99,13 @@ typedef struct {
  * keyword whose argument list encompasses the cursor position (i.e. it has
  * been started but not yet terminated by a deeper block or a sibling keyword).
  *
- * result.keyword is heap-allocated; caller must free it.
- * result.range is the span of the keyword token itself (not its arguments).
- * Returns {NULL, {0}} when no active keyword exists.
+ * The returned `keyword` is heap-allocated; caller must free it.
+ * The returned `range` is the span of the keyword token itself (not its
+ * arguments).
+ *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param cursor      Cursor position.
+ * @return The active keyword, or `{NULL, {0}}` when none exists.
  */
 ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos cursor);

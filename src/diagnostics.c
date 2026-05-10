@@ -63,13 +63,6 @@ void push_diagnostic(ParseResult *r, LspRange range, int severity,
 
 /* ── LSP publishDiagnostics notification ─────────────────────────────────── */
 
-/** Send a textDocument/publishDiagnostics notification to the editor.
- * Serialises r->diagnostics[] as a JSON-RPC notification and writes it to
- * stdout via lsp_send_message().  Passing a zeroed ParseResult (r->num_diagnostics=0)
- * clears any editor-side errors for the document.
- * uri — document URI to include in the notification params
- * r   — ParseResult whose diagnostics[] to publish
- */
 void publish_diagnostics(const char *uri, const ParseResult *r) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
 

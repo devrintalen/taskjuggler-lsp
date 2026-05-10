@@ -40,5 +40,7 @@ char *server_process(const char *json_text);
 /**
  * Write one LSP-framed message to stdout, prepending the required
  * `Content-Length` header.
+ *
+ * @param msg  NUL-terminated JSON message body.
  */
 void lsp_send_message(const char *msg);

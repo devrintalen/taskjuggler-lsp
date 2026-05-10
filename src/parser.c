@@ -69,7 +69,15 @@ void push_dep_ref(int bang_count, const char *path,
     dr->range      = (LspRange){ start, end };
 }
 
-/** Split a dot-separated path string into a heap-allocated array of segments. */
+/**
+ * Split a dot-separated path string into a heap-allocated array of segments.
+ *
+ * @param path      Dot-separated reference path (e.g. `"foo.bar.baz"`).
+ * @param out_segs  Receives a heap-allocated array of heap-allocated
+ *                  segment strings.  Caller must free each segment and
+ *                  the array.
+ * @param out_nseg  Receives the segment count.
+ */
 static void split_path(const char *path, char ***out_segs, int *out_nseg) {
     *out_nseg = 0;
     *out_segs = NULL;
@@ -106,8 +114,13 @@ int          g_num_tok_spans   = 0;
 int          g_tok_span_cap    = 0;
 int          g_num_sem_entries = 0;
 
-/** Returns 1 if a token of the given kind will be emitted as a semantic token.
- * Matches the skip set in classify() in semantic_tokens.c. */
+/**
+ * Test whether a token of @p kind is emitted as a semantic token.
+ * Mirrors the skip set in classify() in semantic_tokens.c.
+ *
+ * @param kind  Token kind (TK_* / KW_*) to test.
+ * @return 1 when the token contributes a semantic-tokens entry, 0 otherwise.
+ */
 static int is_sem_highlighted(int kind) {
     return kind != TK_LBRACE && kind != TK_RBRACE &&
            kind != TK_BANG   && kind != TK_DOT    && kind != TK_COMMA;
@@ -137,7 +150,6 @@ void g_push_tok_span(int kind,
 
 /* ── Token helpers ───────────────────────────────────────────────────────── */
 
-/** Frees the heap-allocated text field of t and sets it to NULL. */
 void token_free(Token *t) {
     free(t->text);
     t->text = NULL;
@@ -145,9 +157,6 @@ void token_free(Token *t) {
 
 /* ── DocSymbol helpers ───────────────────────────────────────────────────── */
 
-/** Recursively frees all heap memory owned by s (name, detail, children array)
- * but does not free s itself, as it is typically stored inline in an array.
- */
 void doc_symbol_free(DocSymbol *s) {
     free(s->name);
     free(s->id);
@@ -166,9 +175,6 @@ void doc_symbol_free(DocSymbol *s) {
 
 /* ── ParseResult helpers ─────────────────────────────────────────────────── */
 
-/** Releases all heap memory owned by r (diagnostics, symbols, token spans,
- * definition links, raw dep refs), then zeroes the struct.
- */
 void parse_result_free(ParseResult *r) {
     for (int i = 0; i < r->num_diagnostics; i++)
         free(r->diagnostics[i].message);
@@ -198,7 +204,12 @@ void parse_result_free(ParseResult *r) {
     memset(r, 0, sizeof(*r));
 }
 
-/** Appends s to r's doc_symbols pointer array, growing it if needed. */
+/**
+ * Append @p s to @p r's `doc_symbols` pointer array, growing it if needed.
+ *
+ * @param r  ParseResult being populated.
+ * @param s  Symbol to append (transfer of ownership).
+ */
 void push_doc_symbol(ParseResult *r, DocSymbol *s) {
     if (r->num_doc_symbols >= r->doc_sym_cap) {
         int nc = r->doc_sym_cap ? r->doc_sym_cap * 2 : 4;
@@ -210,10 +221,6 @@ void push_doc_symbol(ParseResult *r, DocSymbol *s) {
     r->doc_symbols[r->num_doc_symbols++] = s;
 }
 
-/** Append a heap-allocated copy of the unquoted filename from an include
- * statement.  quoted_text is the raw TK_STR token text (e.g. "\"foo.tji\"");
- * the surrounding quotes are stripped before storing.
- */
 void push_included_file(ParseResult *r, const char *quoted_text) {
     if (!quoted_text) return;
     size_t len = strlen(quoted_text);
@@ -276,7 +283,13 @@ DocSymbol *const *doc_symbol_find_path(DocSymbol *const *syms, int n,
 
 /* ── DocSymbol tree linkage ─────────────────────────────────────────────── */
 
-/** Recursively set parent pointers for all children in the symbol tree. */
+/**
+ * Recursively set parent pointers for all children in the symbol tree.
+ *
+ * @param syms    Array of sibling symbols whose parent is @p parent.
+ * @param n       Length of @p syms.
+ * @param parent  Parent pointer to assign; NULL for top-level symbols.
+ */
 static void assign_parents(DocSymbol **syms, int n, DocSymbol *parent) {
     for (int i = 0; i < n; i++) {
         syms[i]->parent = parent;
@@ -286,16 +299,22 @@ static void assign_parents(DocSymbol **syms, int n, DocSymbol *parent) {
 
 /* ── Token-to-symbol cross-referencing ──────────────────────────────────── */
 
-/** Assign each token span's owner to the innermost enclosing DocSymbol using
- * a single linear sweep.  Both tok_spans[] and symbol ranges are in document
- * order, so we walk them in lockstep with a stack of open symbol scopes.
+/**
+ * Assign each token span's owner to the innermost enclosing DocSymbol
+ * using a single linear sweep.  Both tok_spans[] and symbol ranges are in
+ * document order, so we walk them in lockstep with a stack of open symbol
+ * scopes.
  *
- * Each stack frame holds a children array, the next-child index at that level,
- * and a pointer to the scope symbol we descended into (NULL for the root
- * frame, which has no enclosing scope).  The owner of a token is the scope
- * of the deepest currently-open frame.
+ * Each stack frame holds a children array, the next-child index at that
+ * level, and a pointer to the scope symbol we descended into (NULL for the
+ * root frame, which has no enclosing scope).  The owner of a token is the
+ * scope of the deepest currently-open frame.
  *
- * Complexity: O(T + S) where T = num_tok_spans, S = total DocSymbols. */
+ * Runs in O(T + S) where T is `num_tok_spans` and S is the total number
+ * of DocSymbols.
+ *
+ * @param r  ParseResult whose tok_spans get `.owner` populated.
+ */
 static void assign_token_owners(ParseResult *r) {
     typedef struct {
         DocSymbol **children;
@@ -349,11 +368,6 @@ static void assign_token_owners(ParseResult *r) {
     free(stack);
 }
 
-/** Return the innermost DocSymbol whose range contains pos, using the
- * precomputed .owner on tok_spans.  Binary-searches for the last token whose
- * start is at or before pos, then walks up the parent chain until the scope
- * strictly contains pos (inclusive start, exclusive end).  Returns NULL if
- * pos is outside every DocSymbol. */
 DocSymbol *symbol_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
     int lo = 0, hi = num_tokens - 1, found = -1;
     while (lo <= hi) {
@@ -375,7 +389,14 @@ DocSymbol *symbol_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
 
 /* ── Dependency edge resolution ────────────────────────────────────────── */
 
-/** Append a DefinitionLink to a DocSymbol's def_links array. */
+/**
+ * Append a DefinitionLink to a DocSymbol's def_links array, growing it
+ * if needed.
+ *
+ * @param sym   Target symbol that owns the outgoing reference.
+ * @param link  Resolved link to append (transfer of ownership for any
+ *              heap-allocated fields).
+ */
 static void push_def_link(DocSymbol *sym, DefinitionLink link) {
     if (sym->num_def_links >= sym->def_links_cap) {
         int nc = sym->def_links_cap ? sym->def_links_cap * 2 : 4;
@@ -388,7 +409,14 @@ static void push_def_link(DocSymbol *sym, DefinitionLink link) {
     sym->def_links[sym->num_def_links++] = link;
 }
 
-/** Append a ReferenceLink to a DocSymbol's ref_links array. */
+/**
+ * Append a ReferenceLink to a DocSymbol's ref_links array, growing it
+ * if needed.
+ *
+ * @param sym   Target symbol that the reference points to.
+ * @param link  Incoming link to append (transfer of ownership for any
+ *              heap-allocated fields).
+ */
 static void push_ref_link(DocSymbol *sym, ReferenceLink link) {
     if (sym->num_ref_links >= sym->ref_links_cap) {
         int nc = sym->ref_links_cap ? sym->ref_links_cap * 2 : 4;
@@ -443,7 +471,14 @@ static void emit_unresolved_dep_diag(ParseResult *r, LspRange range,
     free(msg);
 }
 
-/** Append a RawDepRef onto r->cross_file_deps[], taking ownership of path. */
+/**
+ * Append a RawDepRef onto @p r->cross_file_deps[], taking ownership of
+ * the heap-allocated `path` field.
+ *
+ * @param r    ParseResult being populated.
+ * @param ref  Reference to stash.  Its `path` is moved into the new entry;
+ *             do not free it after the call.
+ */
 static void stash_cross_file_dep(ParseResult *r, const RawDepRef *ref) {
     if (r->num_cross_file_deps >= r->cross_file_deps_cap) {
         int nc = r->cross_file_deps_cap ? r->cross_file_deps_cap * 2 : 4;
@@ -458,12 +493,19 @@ static void stash_cross_file_dep(ParseResult *r, const RawDepRef *ref) {
     dst->path  = ref->path ? strdup(ref->path) : NULL;
 }
 
-/** Resolve dep refs accumulated by the grammar: split paths, resolve targets
- * in-file, populate def_links/ref_links on success.  For 0-bang refs that
- * fail in-file lookup, stash them on r->cross_file_deps[] for the server to
- * retry against other open documents — no diagnostic yet.  For bang refs,
- * which are strictly in-file, emit an unresolved-dependency diagnostic on
- * failure.  Frees the global accumulator at the end. */
+/**
+ * Resolve dep refs accumulated by the grammar.
+ *
+ * For each entry in the global accumulator: split the path, resolve the
+ * target in-file, and populate def_links/ref_links on success.  For
+ * 0-bang refs that fail in-file lookup, stash them on
+ * @p r->cross_file_deps[] for the server to retry against other open
+ * documents — no diagnostic is emitted yet.  Bang refs (which are
+ * strictly in-file) produce an unresolved-dependency diagnostic on
+ * failure.  The global accumulator is freed at the end.
+ *
+ * @param r  ParseResult whose dep refs are being resolved.
+ */
 static void resolve_dep_refs(ParseResult *r) {
     for (int i = 0; i < g_num_dep_refs; i++) {
         RawDepRef *ref = &g_dep_refs[i];
@@ -551,8 +593,13 @@ static void resolve_dep_refs(ParseResult *r) {
     free_dep_refs();
 }
 
-/** Walk s and its descendants, compacting link arrays in place by dropping
- * any entry that carries a cross-document URI.  Frees the URI strings. */
+/**
+ * Walk @p s and its descendants, compacting link arrays in place by
+ * dropping any entry that carries a cross-document URI.  Frees the URI
+ * strings of dropped entries.
+ *
+ * @param s  Root of the subtree to clean.
+ */
 static void strip_cross_file_links(DocSymbol *s) {
     int keep = 0;
     for (int i = 0; i < s->num_def_links; i++) {

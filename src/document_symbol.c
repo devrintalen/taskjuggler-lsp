@@ -44,11 +44,6 @@ int symbol_kind_for(int keyword) {
 /* Convenience macro: push a string literal without calling strlen at runtime. */
 #define PUSH_LIT(b, s) buf_push((b), (s), sizeof(s) - 1)
 
-/** Serialize an LspRange into a {"start": {...}, "end": {...}} JSON object.
- *
- * doc — the mutable JSON document that will own the returned value
- * r   — the range to serialize
- */
 yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r) {
     yyjson_mut_val *s  = yyjson_mut_obj(doc);
     yyjson_mut_val *st = yyjson_mut_obj(doc);
@@ -85,8 +80,13 @@ static void buf_push(Buf *b, const char *s, size_t n) {
 }
 
 
-/** Hand-rolled uint32 formatter; avoids sprintf overhead.
- * Returns the number of characters written to p. */
+/**
+ * Hand-rolled uint32 formatter; avoids sprintf overhead.
+ *
+ * @param p  Destination buffer with at least 10 bytes of space.
+ * @param v  Value to format.
+ * @return Number of bytes written to @p p.
+ */
 static int write_uint(char *p, uint32_t v) {
     if (v == 0) { *p = '0'; return 1; }
     char tmp[10];
@@ -112,8 +112,13 @@ static void buf_push_uint(Buf *b, uint32_t v) {
     b->len += (size_t)write_uint(b->data + b->len, v);
 }
 
-/** Write a JSON-escaped string value including surrounding double quotes.
- * Bulk-copies runs of safe characters to avoid per-byte call overhead. */
+/**
+ * Write a JSON-escaped string value including surrounding double quotes.
+ * Bulk-copies runs of safe characters to avoid per-byte call overhead.
+ *
+ * @param b  Destination buffer.
+ * @param s  NUL-terminated string to encode.
+ */
 static void buf_push_json_str(Buf *b, const char *s) {
     buf_push(b, "\"", 1);
     const char *run = s;
@@ -171,17 +176,6 @@ static void write_sym_buf(Buf *b, const DocSymbol *sym) {
     buf_push(b, "}", 1);
 }
 
-/** Serialize the documentSymbol tree to a heap-allocated JSON array string.
- *
- * The returned string is NUL-terminated and owned by the caller.
- * Sets *out_len to the byte length of the JSON string (excluding NUL).
- * Intended to be cached in Document.doc_symbols_json and embedded into
- * responses via yyjson_mut_rawncpy.
- *
- * syms    — root-level symbol array
- * n       — number of entries in syms
- * out_len — receives the byte count of the returned string
- */
 char *build_document_symbols_json(DocSymbol *const *syms, int n, size_t *out_len) {
     Buf b = {0};
     buf_push(&b, "[", 1);

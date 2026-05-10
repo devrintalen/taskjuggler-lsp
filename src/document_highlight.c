@@ -57,7 +57,13 @@
 #include "grammar.tab.h"
 #include <string.h>
 
-/** Returns 1 if position p falls within range r (both endpoints inclusive). */
+/**
+ * Test whether @p p falls within range @p r (endpoints inclusive).
+ *
+ * @param p  Position to test.
+ * @param r  Range.
+ * @return 1 when @p p is inside @p r, 0 otherwise.
+ */
 static int pos_in_range(LspPos p, LspRange r) {
     int after  = (p.line > r.start.line)
               || (p.line == r.start.line && p.character >= r.start.character);
@@ -66,7 +72,13 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-/** Returns 1 if ranges a and b have identical start and end positions. */
+/**
+ * Test whether ranges @p a and @p b have identical start and end positions.
+ *
+ * @param a  First range.
+ * @param b  Second range.
+ * @return 1 when the ranges are exactly equal, 0 otherwise.
+ */
 static int range_eq(LspRange a, LspRange b) {
     return pos_cmp(a.start, b.start) == 0 && pos_cmp(a.end, b.end) == 0;
 }

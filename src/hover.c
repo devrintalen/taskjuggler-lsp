@@ -25,19 +25,18 @@
 
 /* ── token_at ────────────────────────────────────────────────────────────── */
 
-/** Returns 1 if position p falls within [start, end] (both endpoints inclusive). */
+/**
+ * Test whether @p p falls within [@p start, @p end] (endpoints inclusive).
+ *
+ * @param p      Position to test.
+ * @param start  Inclusive start of the range.
+ * @param end    Inclusive end of the range.
+ * @return 1 if @p p is inside the range, 0 otherwise.
+ */
 static int pos_in(LspPos p, LspPos start, LspPos end) {
     return pos_cmp(start, p) <= 0 && pos_cmp(p, end) <= 0;
 }
 
-/** Return a copy of the token span that covers pos, or a sentinel TK_EOF span
- * if no token covers that position.  The returned span's text field is always
- * heap-allocated; caller must free it.
- *
- * tokens     — token span array from the ParseResult
- * num_tokens — number of entries in tokens
- * pos        — cursor position to look up
- */
 TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
     int lo = 0, hi = num_tokens - 1, found = -1;
 
@@ -62,24 +61,6 @@ TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
 
 /* ── scan_kw_stack ───────────────────────────────────────────────────────── */
 
-/* Scan tokens from the start up to cursor, building a stack of active keywords.
- * Each entry records the keyword text, its source range, the brace depth at
- * which it appeared, and (if track_argc) the number of arguments before cursor.
- * Keywords are pushed at their depth and popped when a closing } drops the depth
- * below the entry's recorded depth.
- *
- * tokens     — token span array from the ParseResult
- * num_tokens — number of entries in tokens
- * cursor     — stop scanning after this position
- * kind_max   — tokens with token_kind < kind_max are treated as keywords to track;
- *              pass KW_DOCS_END for hover, KW_SIG_END for signature help
- * track_argc — if non-zero, count non-keyword, non-comment tokens as arguments
- * stack      — caller-allocated array to hold the keyword stack entries
- * stack_cap  — capacity of stack
- * out_depth  — set to the brace depth at cursor on return
- *
- * Returns the number of entries written to stack.
- */
 int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
                   int kind_max, int track_argc,
                   KwStackEntry *stack, int stack_cap,
@@ -148,14 +129,6 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
 
 /* ── active_keyword_at ───────────────────────────────────────────────────── */
 
-/** Return the innermost keyword that has hover documentation and whose brace
- * depth matches the cursor's brace depth.  The returned keyword string is
- * heap-allocated; caller must free it.  Returns {NULL, ...} if none found.
- *
- * tokens     — token span array from the ParseResult
- * num_tokens — number of entries in tokens
- * cursor     — cursor position from the textDocument/hover request
- */
 ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     KwStackEntry stack[512];
     uint32_t brace_depth;

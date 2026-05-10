@@ -25,16 +25,6 @@
 
 /* ── active_context ──────────────────────────────────────────────────────── */
 
-/** Determine the active keyword context and argument index at cursor.
- * Returns the innermost keyword that has signature help and whose brace depth
- * matches the cursor's, along with the number of arguments before the cursor.
- * The returned keyword string is heap-allocated; caller must free it.
- * Returns {NULL, 0} if no relevant keyword context is found.
- *
- * tokens     — token span array from the ParseResult
- * num_tokens — number of entries in tokens
- * cursor     — cursor position from the textDocument/signatureHelp request
- */
 ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     KwStackEntry stack[512];
     uint32_t brace_depth;
@@ -112,13 +102,6 @@ static yyjson_mut_val *make_sig_json(yyjson_mut_doc *doc, const SigDef *def,
     return root;
 }
 
-/* Build a SignatureHelp JSON response for the given keyword and argument index.
- * Returns NULL if kw has no signature entry (server will return null to editor).
- *
- * doc          — the mutable JSON document that will own the returned value
- * kw           — the active keyword (e.g. "task", "effort")
- * active_param — zero-based index of the argument currently being typed
- */
 yyjson_mut_val *build_signature_help_json(yyjson_mut_doc *doc, const char *kw,
                                            uint32_t active_param) {
     if (!kw) return NULL;
