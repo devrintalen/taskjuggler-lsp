@@ -29,10 +29,16 @@
 #include <string.h>
 
 /* ── CompletionItemKind values ───────────────────────────────────────────── */
+
+/** LSP CompletionItemKind for tasks (rendered as a function). */
 #define CIK_FUNCTION  3
+/** LSP CompletionItemKind for accounts (rendered as a variable). */
 #define CIK_VARIABLE  6
+/** LSP CompletionItemKind for resources (rendered as a class). */
 #define CIK_CLASS     7
+/** LSP CompletionItemKind for TJP keywords. */
 #define CIK_KEYWORD   14
+/** LSP CompletionItemKind for any other identifier reference. */
 #define CIK_REFERENCE 18
 
 /* ── String utilities ────────────────────────────────────────────────────── */
@@ -74,7 +80,8 @@ static const char *find_line_start(const char *text, uint32_t target_line) {
     return p;
 }
 
-/* Check whether cursor is inside a double-quoted string.
+/**
+ * Test whether @p cursor sits inside a double-quoted string.
  *
  * First checks the token spans: if tok_span_at() returns TK_STR the
  * cursor is inside a terminated string and we return immediately.
@@ -83,6 +90,12 @@ static const char *find_line_start(const char *text, uint32_t target_line) {
  * Double-quoted strings in TaskJuggler cannot span newlines, so we only
  * need to scan from the start of the cursor's line up to the cursor
  * column.  Handles escaped quotes and unterminated strings.
+ *
+ * @param text        Raw source text.
+ * @param cursor      Cursor position.
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @return 1 when @p cursor is inside a string, 0 otherwise.
  */
 static int cursor_in_dquote(const char *text, LspPos cursor,
                             const TokenSpan *tokens, int num_tokens) {
@@ -114,20 +127,28 @@ static int cursor_in_dquote(const char *text, LspPos cursor,
     return in_string;
 }
 
-/* Check whether cursor is inside a scissors block (-8<- ... ->8-).
+/**
+ * Test whether @p cursor sits inside a scissors block
+ * (`-8<-` ... `->8-`).
  *
  * First checks the token spans: if tok_span_at() returns
  * TK_MULTI_LINE_STR the cursor is inside a terminated scissors block.
  * If it returns any other real token, the cursor cannot be inside an
  * unterminated scissors block either (the lexer's SCISSORS state
- * consumes everything from -8<- to EOF, so no tokens would exist at the
- * cursor position if it were inside one).
+ * consumes everything from `-8<-` to EOF, so no tokens would exist at
+ * the cursor position if it were inside one).
  *
  * Only when tok_span_at() returns TK_EOF (cursor is in a tokenless
  * region) do we fall back to a backward scan through the raw text.
  * Because the unterminated scissors block has already consumed every
- * character from its opener to EOF, the -8<- delimiter is necessarily
+ * character from its opener to EOF, the `-8<-` delimiter is necessarily
  * between the last real token and the cursor — a bounded distance.
+ *
+ * @param text        Raw source text.
+ * @param cursor      Cursor position.
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @return 1 when @p cursor is inside a scissors block, 0 otherwise.
  */
 static int cursor_in_scissors(const char *text, LspPos cursor,
                               const TokenSpan *tokens, int num_tokens) {
@@ -227,11 +248,18 @@ static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor
 
 /* ── Block stack ─────────────────────────────────────────────────────────── */
 
-/* Build the stack of block-opener keyword constants enclosing cursor
+/**
+ * Build the stack of block-opener keyword constants enclosing @p cursor
  * (outermost first).  Uses symbol_at() to locate the innermost enclosing
  * DocSymbol, then walks up the parent chain, recording keywords in reverse
  * order into a scratch array and emitting them outermost-first.
- * Returns a heap-allocated array of KW_* values; caller must free.
+ *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param cursor      Cursor position.
+ * @param out_n       Receives the stack depth.
+ * @return Heap-allocated array of KW_* values; caller must free.  NULL when
+ *         @p cursor sits outside every DocSymbol.
  */
 static int *block_stack(const TokenSpan *tokens, int num_tokens,
                         LspPos cursor, int *out_n) {
@@ -265,6 +293,7 @@ typedef struct {
     const char *doc;  /**< short documentation for the completion item */
 } KwEntry;
 
+/** Keywords offered at file scope (outside any block). */
 static const KwEntry TOPLEVEL_KWS[] = {
     {"project",          "Project header (required once per file)"},
     {"task",             "Work package, summary task, or milestone"},
@@ -294,6 +323,7 @@ static const KwEntry TOPLEVEL_KWS[] = {
     {NULL, NULL}
 };
 
+/** Keywords offered inside a `task { ... }` block. */
 static const KwEntry TASK_KWS[] = {
     {"task",          "Sub-task"},
     {"effort",        "Work required, e.g. `effort 5d`"},
@@ -326,6 +356,7 @@ static const KwEntry TASK_KWS[] = {
     {NULL, NULL}
 };
 
+/** Keywords offered inside a `resource { ... }` block. */
 static const KwEntry RESOURCE_KWS[] = {
     {"resource",      "Sub-resource"},
     {"rate",          "Daily cost rate"},
@@ -343,6 +374,7 @@ static const KwEntry RESOURCE_KWS[] = {
     {NULL, NULL}
 };
 
+/** Keywords offered inside a `project { ... }` block. */
 static const KwEntry PROJECT_KWS[] = {
     {"scenario",          "Define a scheduling scenario"},
     {"extend",            "Add custom attributes to a built-in type"},
@@ -359,6 +391,7 @@ static const KwEntry PROJECT_KWS[] = {
     {NULL, NULL}
 };
 
+/** Keywords offered inside an `account { ... }` block. */
 static const KwEntry ACCOUNT_KWS[] = {
     {"account", "Sub-account"},
     {"credit",  "Credit transaction"},
@@ -442,10 +475,18 @@ static void idlist_free(IdList *il) {
     free(il->items);
 }
 
-/* Recursively collect all symbol IDs of the given kind from syms[], building
- * dot-separated fully-qualified paths relative to prefix.  Symbols of other
- * kinds are recursed into but not emitted (so task children of a project
- * container are still collected).
+/**
+ * Recursively collect all symbol IDs of @p kind from @p syms, building
+ * dot-separated fully-qualified paths relative to @p prefix.  Symbols of
+ * other kinds are recursed into but not emitted (so task children of a
+ * project container are still collected).
+ *
+ * @param syms    Sibling symbols to walk.
+ * @param n       Length of @p syms.
+ * @param kind    KW_* kind to collect.
+ * @param prefix  Path prefix already accumulated for the parent scope (may
+ *                be `""`).
+ * @param out     IdList to append to.
  */
 static void collect_ids(DocSymbol *const *syms, int n, int kind,
                          const char *prefix, IdList *out) {
@@ -474,12 +515,19 @@ static void collect_ids(DocSymbol *const *syms, int n, int kind,
 
 /* ── Scope-aware helpers ─────────────────────────────────────────────────── */
 
-/* Return the ordered list of task IDs enclosing cursor (outermost first).
- * Used to determine the bang-relative dep-ref scope for dependency completions.
- * Uses symbol_at() + parent walk to locate the enclosing chain, collects
- * KW_TASK ids in reverse order, then fills the output outermost-first.
- * Returns a heap-allocated array of heap-allocated strings; caller must free
- * each string and the array.
+/**
+ * Return the ordered list of task IDs enclosing @p cursor (outermost
+ * first).  Used to determine the bang-relative dep-ref scope for
+ * dependency completions.  Uses symbol_at() + parent walk to locate the
+ * enclosing chain, collects KW_TASK ids in reverse order, then fills the
+ * output outermost-first.
+ *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param cursor      Cursor position.
+ * @param out_n       Receives the depth of the returned array.
+ * @return Heap-allocated array of heap-allocated strings; caller must free
+ *         each string and the array.  NULL when no enclosing task exists.
  */
 static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
                                  LspPos cursor, int *out_n) {
@@ -507,12 +555,18 @@ static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
     return result;
 }
 
-/* Count the number of consecutive `!` tokens immediately before the cursor,
- * skipping any trailing partial identifier and any comments.
- * Used to determine the bang depth for dep-ref scope navigation.
+/**
+ * Count the consecutive `!` tokens immediately before @p cursor, skipping
+ * any trailing partial identifier and any comments.  Used to determine the
+ * bang depth for dep-ref scope navigation.
  *
- * When out_first_bang_pos is non-NULL and the count is > 0, writes the start
- * position of the earliest consecutive bang.  Otherwise leaves it untouched.
+ * @param tokens              Token spans of the current document.
+ * @param num_tokens          Length of @p tokens.
+ * @param cursor              Cursor position.
+ * @param out_first_bang_pos  When non-NULL and the count is > 0, receives
+ *                            the start position of the earliest consecutive
+ *                            bang.  Otherwise left untouched.
+ * @return Number of consecutive bangs before @p cursor.
  */
 static int count_leading_bangs(const TokenSpan *tokens, int num_tokens,
                                LspPos cursor, LspPos *out_first_bang_pos) {
@@ -599,7 +653,18 @@ static int id_kind_for_keyword(const char *keyword) {
     return 0;
 }
 
-/* Collect IDs from all symbol pools (primary + extras). */
+/**
+ * Collect IDs from all symbol pools (primary + extras) into @p ids.
+ *
+ * @param symbols      Top-level symbols of the current document.
+ * @param num_symbols  Length of @p symbols.
+ * @param extra_pools  Per-document arrays of top-level symbols from other
+ *                     open / background documents.
+ * @param extra_counts Per-document lengths matching @p extra_pools.
+ * @param num_extra    Length of @p extra_pools.
+ * @param id_kind      KW_* kind to collect.
+ * @param ids          Destination IdList.
+ */
 static void collect_all_ids(DocSymbol *const *symbols, int num_symbols,
                             DocSymbol *const **extra_pools,
                             const int *extra_counts, int num_extra,
@@ -609,16 +674,30 @@ static void collect_all_ids(DocSymbol *const *symbols, int num_symbols,
         collect_ids(extra_pools[e], extra_counts[e], id_kind, "", ids);
 }
 
-/* Append one ID completion item to items.
+/**
+ * Append one ID completion item to @p items.
  *
- * When bang_prefix is non-empty, the label and insertion text include the
- * leading bangs (so the popup shows e.g. "!!alice.foo") and a textEdit
- * replaces the user-typed bang run from first_bang_pos through cursor.
- * This keeps insertion idempotent regardless of how the client treats `!`
- * in its word-boundary rules.
+ * When @p bang_prefix is non-empty, the label and insertion text include
+ * the leading bangs (so the popup shows e.g. `"!!alice.foo"`) and a
+ * textEdit replaces the user-typed bang run from @p first_bang_pos through
+ * @p cursor.  This keeps insertion idempotent regardless of how the client
+ * treats `!` in its word-boundary rules.
  *
- * When bang_prefix is empty or NULL, the plain id is used as the label with
- * default client insertion semantics.
+ * When @p bang_prefix is empty or NULL, the plain id is used as the label
+ * with default client insertion semantics.
+ *
+ * @param doc             Destination mutable JSON document.
+ * @param items           CompletionItem[] array to append to.
+ * @param id              Identifier text to insert.
+ * @param name            Display name (quoted-string label).
+ * @param id_kind         KW_* kind, mapped to CompletionItemKind via
+ *                        completion_kind_for().
+ * @param bang_prefix     Bang prefix to render and insert; empty or NULL
+ *                        when not in a bang context.
+ * @param first_bang_pos  Position of the earliest user-typed bang (only
+ *                        used when @p bang_prefix is non-empty).
+ * @param cursor          Cursor position (used as textEdit end when @p
+ *                        bang_prefix is non-empty).
  */
 static void emit_id_item(yyjson_mut_doc *doc, yyjson_mut_val *items,
                           const char *id, const char *name, int id_kind,
@@ -651,15 +730,30 @@ static void emit_id_item(yyjson_mut_doc *doc, yyjson_mut_val *items,
     yyjson_mut_arr_add_val(items, item);
 }
 
-/* Build dep completion items for depends/precedes.
+/**
+ * Build dep completion items for `depends` / `precedes`.
  *
- * If no leading bangs: return all absolute task IDs from all open files.  The
- * result is complete — *out_incomplete is set to 0.
- * If leading bangs:    navigate to the bang-relative scope level and return
- *                      all task IDs reachable from there.  Labels include the
- *                      bang run and a textEdit replaces the typed bangs.
- *                      Typing an additional `!` widens the scope, so
- *                      *out_incomplete is set to 1 to force a re-request.
+ * If no leading bangs: return all absolute task IDs from all open files.
+ * The result is complete — `*out_incomplete` is set to 0.
+ * If leading bangs: navigate to the bang-relative scope level and return
+ * all task IDs reachable from there.  Labels include the bang run and a
+ * textEdit replaces the typed bangs.  Typing an additional `!` widens the
+ * scope, so `*out_incomplete` is set to 1 to force a re-request.
+ *
+ * @param doc            Destination mutable JSON document.
+ * @param items          CompletionItem[] array to append to.
+ * @param tokens         Token spans of the current document.
+ * @param num_tokens     Length of @p tokens.
+ * @param cursor         Cursor position.
+ * @param symbols        Top-level symbols of the current document.
+ * @param num_symbols    Length of @p symbols.
+ * @param extra_pools    Per-document arrays of top-level symbols from other
+ *                       open / background documents.
+ * @param extra_counts   Per-document lengths matching @p extra_pools.
+ * @param num_extra      Length of @p extra_pools.
+ * @param id_kind        KW_* kind to collect (always KW_TASK for now).
+ * @param out_incomplete Receives the LSP `isIncomplete` flag.
+ * @return Number of items added to @p items.
  */
 static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                   const TokenSpan *tokens, int num_tokens,
@@ -709,12 +803,29 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
     return count;
 }
 
-/* Build ID completion items for an allocate/chargeset/etc. argument.
+/**
+ * Build ID completion items for an `allocate` / `chargeset` / etc.
+ * argument.
  *
- * Returns the full candidate list.  For KW_TASK, delegates to the dep builder
- * which handles bang scoping.  For the other ID kinds (resources, accounts)
- * bangs are not meaningful, so the list is always complete and
- * *out_incomplete is set to 0.
+ * For KW_TASK, delegates to build_dep_completions() which handles bang
+ * scoping.  For the other ID kinds (resources, accounts) bangs are not
+ * meaningful, so the list is always complete and `*out_incomplete` is set
+ * to 0.
+ *
+ * @param doc            Destination mutable JSON document.
+ * @param items          CompletionItem[] array to append to.
+ * @param tokens         Token spans of the current document.
+ * @param num_tokens     Length of @p tokens.
+ * @param cursor         Cursor position.
+ * @param symbols        Top-level symbols of the current document.
+ * @param num_symbols    Length of @p symbols.
+ * @param extra_pools    Per-document arrays of top-level symbols from other
+ *                       open / background documents.
+ * @param extra_counts   Per-document lengths matching @p extra_pools.
+ * @param num_extra      Length of @p extra_pools.
+ * @param id_kind        KW_* kind to collect.
+ * @param out_incomplete Receives the LSP `isIncomplete` flag.
+ * @return Number of items added to @p items.
  */
 static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                 const TokenSpan *tokens, int num_tokens,
@@ -746,8 +857,19 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
     return count;
 }
 
-/* Build keyword completion items for the current block context.
- * Returns the number of items added to the items array. */
+/**
+ * Build keyword completion items for the current block context.
+ *
+ * @param doc         Destination mutable JSON document.
+ * @param items       CompletionItem[] array to append to.
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param cursor      Cursor position.
+ * @param partial     Partial identifier the user is typing (may be `""`).
+ * @param stack       Enclosing block-keyword stack from block_stack().
+ * @param stack_n     Length of @p stack.
+ * @return Number of items added to @p items.
+ */
 static int build_keyword_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                      const TokenSpan *tokens, int num_tokens,
                                      LspPos cursor, const char *partial,

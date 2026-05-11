@@ -25,10 +25,16 @@
 #include <stdlib.h>
 
 /* LSP SymbolKind values — only used for JSON serialization. */
+
+/** SymbolKind for a project (rendered as a module). */
 #define SK_MODULE   2
+/** SymbolKind for a task (rendered as a function). */
 #define SK_FUNCTION 12
+/** SymbolKind for an account (rendered as a variable). */
 #define SK_VARIABLE 13
+/** SymbolKind for a resource (rendered as an object). */
 #define SK_OBJECT   19
+/** SymbolKind for a shift (rendered as an event). */
 #define SK_EVENT    24
 
 int symbol_kind_for(int keyword) {
@@ -41,7 +47,7 @@ int symbol_kind_for(int keyword) {
     }
 }
 
-/* Convenience macro: push a string literal without calling strlen at runtime. */
+/** Convenience macro: push a string literal without calling strlen at runtime. */
 #define PUSH_LIT(b, s) buf_push((b), (s), sizeof(s) - 1)
 
 yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r) {
@@ -66,6 +72,13 @@ typedef struct {
     size_t  cap;   /**< allocated capacity */
 } Buf;
 
+/**
+ * Append @p n bytes from @p s to @p b, growing the buffer if needed.
+ *
+ * @param b  Destination buffer.
+ * @param s  Source bytes (not required to be NUL-terminated).
+ * @param n  Number of bytes to copy.
+ */
 static void buf_push(Buf *b, const char *s, size_t n) {
     if (b->len + n > b->cap) {
         size_t new_cap = b->cap ? b->cap * 2 : 4096;
@@ -99,6 +112,12 @@ static int write_uint(char *p, uint32_t v) {
     return len;
 }
 
+/**
+ * Append the decimal representation of @p v to @p b.
+ *
+ * @param b  Destination buffer.
+ * @param v  Value to serialise.
+ */
 static void buf_push_uint(Buf *b, uint32_t v) {
     /* 10 digits max for uint32 */
     if (b->len + 10 > b->cap) {
@@ -142,6 +161,12 @@ static void buf_push_json_str(Buf *b, const char *s) {
     buf_push(b, "\"", 1);
 }
 
+/**
+ * Append a serialised LSP Range object to @p b.
+ *
+ * @param b  Destination buffer.
+ * @param r  Range to serialise.
+ */
 static void write_range_buf(Buf *b, LspRange r) {
     PUSH_LIT(b, "{\"start\":{\"line\":");
     buf_push_uint(b, r.start.line);
@@ -154,6 +179,13 @@ static void write_range_buf(Buf *b, LspRange r) {
     PUSH_LIT(b, "}}");
 }
 
+/**
+ * Append a serialised LSP DocumentSymbol object (and any children) to
+ * @p b.
+ *
+ * @param b    Destination buffer.
+ * @param sym  Symbol to serialise.
+ */
 static void write_sym_buf(Buf *b, const DocSymbol *sym) {
     PUSH_LIT(b, "{\"name\":");
     buf_push_json_str(b, sym->name   ? sym->name   : "");

@@ -36,10 +36,14 @@
  * can be stashed on ParseResult.cross_file_deps[] for later re-resolution.
  */
 
+/** Backing storage for the transient dep-ref accumulator. */
 static RawDepRef *g_dep_refs     = NULL;
+/** Number of entries currently held in #g_dep_refs. */
 static int        g_num_dep_refs = 0;
+/** Allocated capacity of #g_dep_refs in entries. */
 static int        g_dep_ref_cap  = 0;
 
+/** Release the accumulator's storage and reset its bookkeeping. */
 static void free_dep_refs(void) {
     for (int i = 0; i < g_num_dep_refs; i++)
         free(g_dep_refs[i].path);
@@ -100,18 +104,38 @@ static void split_path(const char *path, char ***out_segs, int *out_nseg) {
  * These are declared in the flex-generated lexer.yy.c.  We use void * for
  * YY_BUFFER_STATE to avoid pulling in the full flex header.
  */
+
+/** Opaque flex input-buffer handle. */
 typedef void *YY_BUFFER_STATE;
+/**
+ * Flex entry point: scan @p str as the next input buffer.
+ *
+ * @param str  NUL-terminated input to scan.
+ * @return Handle to the new buffer; release with yy_delete_buffer().
+ */
 extern YY_BUFFER_STATE yy_scan_string(const char *str);
+/**
+ * Flex entry point: release a buffer returned by yy_scan_string().
+ *
+ * @param buf  Buffer handle to release.
+ */
 extern void            yy_delete_buffer(YY_BUFFER_STATE buf);
-extern int             yycolumn; /* column tracker defined in lexer.l */
-extern int             yylineno; /* line counter managed by flex %option yylineno */
+/** Column tracker defined in lexer.l. */
+extern int             yycolumn;
+/** Line counter managed by flex `%option yylineno`. */
+extern int             yylineno;
 
 /* ── Shared globals (used by lexer.l and grammar.y via extern) ───────────── */
 
+/** Currently-being-built ParseResult; lexer/grammar populate this directly. */
 ParseResult *g_result          = NULL;
+/** Backing storage for the token-span array under construction. */
 TokenSpan   *g_tok_spans       = NULL;
+/** Number of entries currently held in #g_tok_spans. */
 int          g_num_tok_spans   = 0;
+/** Allocated capacity of #g_tok_spans in entries. */
 int          g_tok_span_cap    = 0;
+/** Running upper bound on emitted semantic-token entries (one per source line covered). */
 int          g_num_sem_entries = 0;
 
 /**
@@ -126,7 +150,17 @@ static int is_sem_highlighted(int kind) {
            kind != TK_BANG   && kind != TK_DOT    && kind != TK_COMMA;
 }
 
-/* Called from lexer.l for every token that callers may need to inspect. */
+/**
+ * Append one TokenSpan to the global accumulator.  Called from lexer.l for
+ * every token that callers may need to inspect.
+ *
+ * @param kind  TK_* / KW_* token kind from grammar.tab.h.
+ * @param sl    Start line.
+ * @param sc    Start column.
+ * @param el    End line.
+ * @param ec    End column (exclusive).
+ * @param text  Token lexeme; copied with strdup() (may be NULL).
+ */
 void g_push_tok_span(int kind,
                      uint32_t sl, uint32_t sc,
                      uint32_t el, uint32_t ec,
@@ -429,10 +463,17 @@ static void push_ref_link(DocSymbol *sym, ReferenceLink link) {
     sym->ref_links[sym->num_ref_links++] = link;
 }
 
-/* Find a task DocSymbol by navigating to the parent scope via
+/**
+ * Find a task DocSymbol by navigating to the parent scope via
  * doc_symbol_find_path(), then scanning for the final segment.
- * Returns the matched node, or NULL if any segment is not found.
- * Only KW_TASK nodes are matched at the leaf level. */
+ * Only KW_TASK nodes are matched at the leaf level.
+ *
+ * @param syms  Top-level symbols to search.
+ * @param n     Length of @p syms.
+ * @param segs  Path segments (e.g. `["spec", "gui"]`).
+ * @param nseg  Length of @p segs.
+ * @return The matched task, or NULL when any segment is not found.
+ */
 static DocSymbol *find_task(DocSymbol **syms, int n,
                             char **segs, int nseg) {
     if (nseg == 0 || !segs) return NULL;
@@ -454,8 +495,15 @@ static DocSymbol *find_task(DocSymbol **syms, int n,
     return NULL;
 }
 
-/* Build an "unresolved dependency: a.b.c" message from segs[] and push
- * it onto r->diagnostics at the given range. */
+/**
+ * Build an `"unresolved dependency: a.b.c"` message from @p segs and push
+ * it onto @p r->diagnostics at @p range.
+ *
+ * @param r      ParseResult to append the diagnostic to.
+ * @param range  Source range to mark.
+ * @param segs   Path segments that failed to resolve.
+ * @param nseg   Length of @p segs.
+ */
 static void emit_unresolved_dep_diag(ParseResult *r, LspRange range,
                                      char *const *segs, int nseg) {
     size_t msg_len = 32; /* "unresolved dependency: " prefix */

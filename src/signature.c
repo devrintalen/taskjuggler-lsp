@@ -55,13 +55,19 @@ typedef struct {
     const char  *doc;    /**< human-readable description */
 } SigDef;
 
-/* Build a SignatureHelp JSON response object from a SigDef.
- * Wraps the signature in a {"signatures": [...], "activeSignature": 0} envelope.
- * active_param is clamped to the last parameter if it exceeds the param count.
+/**
+ * Build a SignatureHelp JSON response object from a SigDef.
  *
- * doc          — the mutable JSON document that will own the returned value
- * def          — signature definition (label, parameter list, documentation)
- * active_param — zero-based index of the argument currently being typed
+ * Wraps the signature in a `{"signatures": [...], "activeSignature": 0}`
+ * envelope.  @p active_param is clamped to the last parameter if it
+ * exceeds the param count.
+ *
+ * @param doc           Destination mutable JSON document.
+ * @param def           Signature definition (label, parameter list,
+ *                      documentation).
+ * @param active_param  Zero-based index of the argument currently being
+ *                      typed.
+ * @return The SignatureHelp JSON object.
  */
 static yyjson_mut_val *make_sig_json(yyjson_mut_doc *doc, const SigDef *def,
                                       uint32_t active_param) {
@@ -106,14 +112,17 @@ yyjson_mut_val *build_signature_help_json(yyjson_mut_doc *doc, const char *kw,
                                            uint32_t active_param) {
     if (!kw) return NULL;
 
-/* SIG0: keyword with no parameters */
+/* Local helper: emit a SignatureHelp response for a keyword with no
+ * parameters. */
 #define SIG0(lbl, sigdoc) \
     do { \
         SigDef d = { lbl, NULL, sigdoc }; \
         return make_sig_json(doc, &d, active_param); \
     } while(0)
 
-/* SIG: keyword with one or more parameters.
+/* Local helper: emit a SignatureHelp response for a keyword with one or more
+ * parameters; variadic arguments after sigdoc are the parameter labels in
+ * order (a trailing NULL is appended automatically).
  *
  * Coverage: 39 of ~200 TaskJuggler keywords have signature help entries.
  *

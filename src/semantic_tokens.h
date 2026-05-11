@@ -23,46 +23,54 @@
 #include "parser.h"
 #include <yyjson.h>
 
-/** @name Semantic token type indices
+/* ── Semantic token type indices ─────────────────────────────────────────── *
  *
  * Positions in the legend.tokenTypes array advertised during initialize.
  * Any change here must be reflected in semantic_token_type_names[] in
  * semantic_tokens.c, keeping the order identical.
- * @{
  */
-#define SEMTOK_TYPE_KEYWORD  0
-#define SEMTOK_TYPE_COMMENT  1
-#define SEMTOK_TYPE_STRING   2
-#define SEMTOK_TYPE_NUMBER   3
-#define SEMTOK_TYPE_VARIABLE 4
-#define SEMTOK_TYPE_FUNCTION 5
-/** @} */
 
-/** @name Semantic token modifier bitmasks
+/** Semantic token type for TJP keywords. */
+#define SEMTOK_TYPE_KEYWORD  0
+/** Semantic token type for line and block comments. */
+#define SEMTOK_TYPE_COMMENT  1
+/** Semantic token type for quoted strings and scissors blocks. */
+#define SEMTOK_TYPE_STRING   2
+/** Semantic token type for integer and date/duration literals. */
+#define SEMTOK_TYPE_NUMBER   3
+/** Semantic token type for declaration identifiers (task/resource/etc. names). */
+#define SEMTOK_TYPE_VARIABLE 4
+/** Semantic token type for dependency-reference identifiers. */
+#define SEMTOK_TYPE_FUNCTION 5
+
+/* ── Semantic token modifier bitmasks ───────────────────────────────────── *
  *
  * Bit positions correspond to positions in legend.tokenModifiers.  Any
  * change here must be reflected in semantic_token_modifier_names[] in
  * semantic_tokens.c.
- *
- * SEMTOK_MOD_DECLARATION is applied to the five structural keywords that
- * introduce named declarations: project, task, resource, account, shift.
- * This allows editors to style them distinctly from property keywords.
- * @{
+ */
+
+/**
+ * Marker applied to the five structural keywords that introduce named
+ * declarations: project, task, resource, account, shift.  This allows
+ * editors to style them distinctly from property keywords.
  */
 #define SEMTOK_MOD_DECLARATION (1 << 0)
-/** @} */
 
-/** @name Legend arrays
+/* ── Legend arrays ──────────────────────────────────────────────────────── *
  *
  * Exposed so that handle_initialize() can embed them directly into the
  * capabilities response without duplicating the string literals.
- * @{
  */
+
+/** Token-type names indexed by SEMTOK_TYPE_*. */
 extern const char * const semantic_token_type_names[];
+/** Length of #semantic_token_type_names. */
 extern const int          num_semantic_token_types;
+/** Token-modifier names indexed by bit position. */
 extern const char * const semantic_token_modifier_names[];
+/** Length of #semantic_token_modifier_names. */
 extern const int          num_semantic_token_modifiers;
-/** @} */
 
 /**
  * Build an LSP SemanticTokens object `{ "data": [...] }` for the given

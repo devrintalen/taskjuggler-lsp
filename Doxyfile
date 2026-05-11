@@ -15,6 +15,11 @@ RECURSIVE              = NO
 # Skip flex/bison output — generated, and Doxygen chokes on the macros.
 EXCLUDE                = src/lexer.yy.c src/grammar.tab.c src/grammar.tab.h
 
+# Function-body-local helper macros.  Doxygen extracts them because they
+# are #defines, but they aren't real members of the file's API surface and
+# can't be cleanly associated with their preceding comment.
+EXCLUDE_SYMBOLS        = SIG SIG0
+
 EXTRACT_ALL            = NO
 EXTRACT_STATIC         = YES
 JAVADOC_AUTOBRIEF      = YES

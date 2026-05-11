@@ -21,10 +21,19 @@
 #include "folding_range.h"
 #include "grammar.tab.h"
 
-/* Maximum nesting depth for bracket matching. */
+/** Maximum nesting depth for bracket matching. */
 #define MAX_BRACKET_DEPTH 256
 
-/* Append one FoldingRange entry to arr. */
+/**
+ * Append one FoldingRange entry to @p arr.
+ *
+ * @param doc         Destination mutable JSON document.
+ * @param arr         FoldingRange[] array.
+ * @param start_line  Start line of the foldable region.
+ * @param end_line    End line of the foldable region.
+ * @param kind        LSP FoldingRangeKind string (`"region"` or
+ *                    `"comment"`).
+ */
 static void push_range(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                         uint32_t start_line, uint32_t end_line,
                         const char *kind) {
@@ -35,7 +44,14 @@ static void push_range(yyjson_mut_doc *doc, yyjson_mut_val *arr,
     yyjson_mut_arr_add_val(arr, obj);
 }
 
-/* Recursively emit "region" folding ranges from the DocSymbol tree. */
+/**
+ * Recursively emit `"region"` folding ranges from the DocSymbol tree.
+ *
+ * @param doc   Destination mutable JSON document.
+ * @param arr   FoldingRange[] array.
+ * @param syms  Sibling symbols to walk.
+ * @param n     Length of @p syms.
+ */
 static void emit_symbol_ranges(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                                 DocSymbol *const *syms, int n) {
     for (int i = 0; i < n; i++) {
@@ -47,8 +63,15 @@ static void emit_symbol_ranges(yyjson_mut_doc *doc, yyjson_mut_val *arr,
     }
 }
 
-/* Scan tokens for bracket pairs and block comments that are not represented
- * in the DocSymbol tree. */
+/**
+ * Scan tokens for bracket pairs and block comments that are not
+ * represented in the DocSymbol tree, emitting one entry per pair.
+ *
+ * @param doc        Destination mutable JSON document.
+ * @param arr        FoldingRange[] array.
+ * @param spans      Token spans of the current document.
+ * @param num_spans  Length of @p spans.
+ */
 static void emit_token_ranges(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                                const TokenSpan *spans, int num_spans) {
     uint32_t bracket_stack[MAX_BRACKET_DEPTH];

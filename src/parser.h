@@ -49,6 +49,7 @@ typedef struct {
     LspPos end;          /**< exclusive end position */
 } LspRange;
 
+/** Bison's end-of-input marker (always 0). */
 #define TK_EOF 0
 
 /** ── Token ───────────────────────────────────────────────────────────────── *
@@ -87,8 +88,11 @@ typedef struct {
 void token_free(Token *t);
 
 
+/** Forward declaration; the full struct is defined below. */
 typedef struct DocSymbol DocSymbol;
+/** Forward declaration; the full struct is defined further down. */
 typedef struct DefinitionLink DefinitionLink;
+/** Forward declaration; the full struct is defined further down. */
 typedef struct ReferenceLink ReferenceLink;
 
 /** ── DocSymbol ───────────────────────────────────────────────────────────── *
@@ -151,7 +155,9 @@ struct DocSymbol {
 
 /* ── Diagnostic severity ─────────────────────────────────────────────────── */
 
+/** LSP DiagnosticSeverity for hard errors. */
 #define DIAG_ERROR   1
+/** LSP DiagnosticSeverity for warnings. */
 #define DIAG_WARNING 2
 
 /** ── Diagnostic ──────────────────────────────────────────────────────────── *

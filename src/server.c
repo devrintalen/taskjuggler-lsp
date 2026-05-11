@@ -133,6 +133,7 @@
    Document store
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/** Maximum number of documents the server holds open at once. */
 #define MAX_DOCS 64
 
 /** Document store slot — URI plus authoritative text and its parse result. */
@@ -146,13 +147,18 @@ typedef struct {
     int         disk_only;            /**< 1 = loaded from disk/watcher, not opened by editor */
 } Document;
 
+/** Fixed-size document store; entries with `in_use == 0` are free. */
 static Document docs[MAX_DOCS];
 
-/* Workspace root filesystem paths extracted from the initialize params.
- * Populated from rootUri and/or workspaceFolders.  Heap-allocated entries;
- * never freed (server lifetime). */
+/** Maximum number of workspace root URIs the server tracks. */
 #define MAX_WORKSPACE_ROOTS 16
+/**
+ * Workspace root filesystem paths extracted from the `initialize` params.
+ * Populated from `rootUri` and/or `workspaceFolders`.  Heap-allocated
+ * entries; never freed (server lifetime).
+ */
 static char *g_workspace_roots[MAX_WORKSPACE_ROOTS];
+/** Number of entries currently used in #g_workspace_roots. */
 static int   g_num_workspace_roots = 0;
 
 /** Forward declaration — doc_find / doc_alloc normalize URIs internally so that
@@ -431,6 +437,14 @@ static char *read_file(const char *path) {
  * mutually recursive: loading a file may trigger following its includes. */
 static void follow_includes(const char *file_path, const ParseResult *parse);
 
+/**
+ * Load a `.tjp` / `.tji` file from @p path into the document store as a
+ * disk-only entry, parse it, and follow any `include` directives it
+ * contains.  Silently skips paths whose URI is already in the store
+ * (cycle-safe).
+ *
+ * @param path  Filesystem path of the file to load.
+ */
 static void load_file_from_disk(const char *path) {
     char *uri = path_to_uri(path);
     if (doc_find(uri)) { free(uri); return; }
@@ -593,12 +607,16 @@ static LspPos json_to_pos(yyjson_val *obj) {
     return p;
 }
 
-/* Apply a single incremental text edit described by range/new_text to src.
- * Returns a newly heap-allocated NUL-terminated string; caller must free it.
- * src may be NULL (treated as empty string).
- * range.end is exclusive — text[start_byte..end_byte) is replaced by new_text.
- * character offsets are treated as byte offsets within a line, consistent with
- * how the lexer tracks columns.
+/**
+ * Apply a single incremental text edit described by @p range / @p new_text
+ * to @p src.  `range.end` is exclusive — `src[start_byte..end_byte)` is
+ * replaced by @p new_text.  Character offsets are treated as byte offsets
+ * within a line, consistent with how the lexer tracks columns.
+ *
+ * @param src       Original document text (may be NULL, treated as `""`).
+ * @param range     Range to replace.
+ * @param new_text  Replacement text.
+ * @return Heap-allocated NUL-terminated result string.  Caller must free().
  */
 static char *apply_incremental_change(const char *src,
                                       LspRange range,
@@ -672,7 +690,14 @@ static yyjson_mut_val *copy_id(yyjson_mut_doc *doc, yyjson_val *id) {
     return yyjson_mut_null(doc);
 }
 
-/* Build a success response envelope around result. */
+/**
+ * Build a success JSON-RPC response envelope around @p result.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param result  Response payload.
+ * @return The JSON-RPC response object.
+ */
 static yyjson_mut_val *make_response(yyjson_mut_doc *doc, yyjson_val *id,
                                       yyjson_mut_val *result) {
     yyjson_mut_val *resp = yyjson_mut_obj(doc);
@@ -743,11 +768,17 @@ static void revalidate_all_docs(void) {
    Handlers
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Handle the initialize request.
+/**
+ * Handle the `initialize` request.
+ *
  * Responds with the server's capabilities and registers all supported
- * language features.  Client capabilities in params are not yet inspected.
- * id     — request id to echo back in the response
- * params — initialize parameters (currently unused)
+ * language features.  Client capabilities in @p params are not yet
+ * inspected.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Initialize parameters (currently unused).
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
@@ -1241,9 +1272,16 @@ static void handle_didclose(yyjson_val *params) {
     revalidate_all_docs();
 }
 
-/* Handle textDocument/documentSymbol.
- * Returns the doc_symbols[] tree for the requested document as a hierarchical
- * symbol list, or null if the document is not open.
+/**
+ * Handle `textDocument/documentSymbol`.
+ *
+ * Returns the doc_symbols[] tree for the requested document as a
+ * hierarchical symbol list, or null if the document is not open.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
                                                yyjson_val *params) {
@@ -1267,8 +1305,16 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
     return make_response(doc, id, raw);
 }
 
-/* Handle textDocument/foldingRange.
- * Returns folding ranges derived from the brace token spans of the document.
+/**
+ * Handle `textDocument/foldingRange`.
+ *
+ * Returns folding ranges derived from the brace token spans of the
+ * document.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
                                              yyjson_val *params) {
@@ -1308,10 +1354,19 @@ static const char *sym_kind_label(int keyword) {
     }
 }
 
-/* Handle textDocument/hover.
- * First checks whether the cursor lands on a resolved dependency reference;
- * if so, returns the target symbol's name and kind as a hover card.  Falls
- * back to keyword documentation if no definition link matches.
+/**
+ * Handle `textDocument/hover`.
+ *
+ * First checks whether the cursor lands on a resolved dependency
+ * reference; if so, returns the target symbol's name and kind as a hover
+ * card.  Falls back to keyword documentation if no definition link
+ * matches.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `position`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
                                      yyjson_val *params) {
@@ -1385,10 +1440,18 @@ keyword_hover:;
     return make_response(doc, id, hover);
 }
 
-/* Handle textDocument/signatureHelp.
+/**
+ * Handle `textDocument/signatureHelp`.
+ *
  * Determines the active keyword context at the cursor and returns a
- * SignatureHelp object with the keyword's argument signature.
- * Returns null if the cursor is not in a recognised keyword context.
+ * SignatureHelp object with the keyword's argument signature.  Returns
+ * null when the cursor is not in a recognised keyword context.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `position`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id,
                                               yyjson_val *params) {
@@ -1423,8 +1486,15 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
     return make_response(doc, id, sig);
 }
 
-/* Handle textDocument/semanticTokens/full.
+/**
+ * Handle `textDocument/semanticTokens/full`.
+ *
  * Returns the full delta-encoded semantic token list for the document.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
                                                     yyjson_val *params) {
@@ -1445,9 +1515,17 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
     return make_response(doc, id, result);
 }
 
-/* Handle textDocument/references.
+/**
+ * Handle `textDocument/references`.
+ *
  * Returns all locations that reference the symbol under the cursor, using
  * the precomputed def_links[] and doc_symbols[] from the parsed document.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `position`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
@@ -1473,9 +1551,17 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
-/* Handle textDocument/documentHighlight.
+/**
+ * Handle `textDocument/documentHighlight`.
+ *
  * Returns all occurrences of the symbol under the cursor within the same
  * document, using def_links[], doc_symbols[], and tok_spans[].
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `position`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
                                                   yyjson_val *id,
@@ -1503,9 +1589,18 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
     return make_response(doc, id, result);
 }
 
-/* Handle textDocument/definition.
- * Returns the definition location for the dep-ref expression under the cursor,
- * looked up from the precomputed def_links[] in the parsed document.
+/**
+ * Handle `textDocument/definition`.
+ *
+ * Returns the definition location for the dep-ref expression under the
+ * cursor, looked up from the precomputed def_links[] in the parsed
+ * document.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `position`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
@@ -1530,9 +1625,18 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
-/* Handle textDocument/completion.
+/**
+ * Handle `textDocument/completion`.
+ *
  * Returns a completion list appropriate for the cursor context, including
- * keyword suggestions and task-identifier completions from the symbol tree.
+ * keyword suggestions and task-identifier completions from the symbol
+ * tree.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `position`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
@@ -1585,8 +1689,16 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
-/* Handle workspace/symbol.
- * Returns all task symbols across all open documents whose names contain query.
+/**
+ * Handle `workspace/symbol`.
+ *
+ * Returns all task symbols across all open documents whose names contain
+ * the request's query string.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `query`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
                                                 yyjson_val *params) {
