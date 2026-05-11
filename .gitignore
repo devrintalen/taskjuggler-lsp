@@ -11,4 +11,5 @@
 /grammar-test
 /test/large_*.tjp
 /docs/
+/doc/_build/
 doxygen.warnings.log
