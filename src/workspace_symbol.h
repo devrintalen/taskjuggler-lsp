@@ -16,16 +16,24 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
 #include "parser.h"
 #include <yyjson.h>
 
-/*
- * Append SymbolInformation entries whose name contains `query`
+/**
+ * Append SymbolInformation entries whose name contains @p query
  * (case-insensitive substring; empty query matches all) from the given
- * symbol tree into `arr`.  `uri` is the document URI placed in each
- * entry's location field.  Values are allocated in doc.
+ * symbol tree into @p arr.
+ *
+ * @param doc    Destination mutable JSON document (owns allocations).
+ * @param query  Case-insensitive substring filter; empty string matches all.
+ * @param syms   Top-level symbols to walk.
+ * @param n      Length of @p syms.
+ * @param uri    URI placed into each entry's `location.uri` field.
+ * @param arr    JSON array to append SymbolInformation entries to.
  */
 void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
                                 DocSymbol *const *syms, int n,

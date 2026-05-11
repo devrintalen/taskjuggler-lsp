@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #include "server.h"
 #include "parser.h"
 #include "diagnostics.h"
@@ -131,6 +133,7 @@
    Document store
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/** Maximum number of documents the server holds open at once. */
 #define MAX_DOCS 64
 
 /** Document store slot — URI plus authoritative text and its parse result. */
@@ -144,24 +147,35 @@ typedef struct {
     int         disk_only;            /**< 1 = loaded from disk/watcher, not opened by editor */
 } Document;
 
+/** Fixed-size document store; entries with `in_use == 0` are free. */
 static Document docs[MAX_DOCS];
 
-/* Workspace root filesystem paths extracted from the initialize params.
- * Populated from rootUri and/or workspaceFolders.  Heap-allocated entries;
- * never freed (server lifetime). */
+/** Maximum number of workspace root URIs the server tracks. */
 #define MAX_WORKSPACE_ROOTS 16
+/**
+ * Workspace root filesystem paths extracted from the `initialize` params.
+ * Populated from `rootUri` and/or `workspaceFolders`.  Heap-allocated
+ * entries; never freed (server lifetime).
+ */
 static char *g_workspace_roots[MAX_WORKSPACE_ROOTS];
+/** Number of entries currently used in #g_workspace_roots. */
 static int   g_num_workspace_roots = 0;
 
-/* Forward declaration — doc_find / doc_alloc normalize URIs internally so that
+/** Forward declaration — doc_find / doc_alloc normalize URIs internally so that
  * different spellings of the same file (trailing slashes, "./", symlinks) map
  * to the same document slot. */
 static char *normalize_uri(const char *raw_uri);
 
-/* Find the open document with the given URI, or return NULL if not found.
- * Fast-path exact match first (clients overwhelmingly send the canonical URI
- * we already stored); falls back to normalizing and retrying so that
- * non-canonical URI spellings still hit the stored canonical key. */
+/**
+ * Find the open document with the given URI.
+ *
+ * Fast-path exact match first (clients overwhelmingly send the canonical
+ * URI we already stored); falls back to normalising and retrying so that
+ * non-canonical URI spellings still hit the stored canonical key.
+ *
+ * @param uri  Document URI to look up.
+ * @return The matching Document, or NULL when none is in use.
+ */
 static Document *doc_find(const char *uri) {
     if (!uri) return NULL;
     for (int i = 0; i < MAX_DOCS; i++)
@@ -182,10 +196,15 @@ static Document *doc_find(const char *uri) {
     return found;
 }
 
-/* Claim a free Document slot for uri and return it, or NULL if the store
- * is full.  The stored URI is always canonical (see normalize_uri) so the
- * document store is deduplicated regardless of how the URI was spelled.
- * The returned slot has in_use=1 and uri set; all other fields are zeroed.
+/**
+ * Claim a free Document slot for @p uri and return it.
+ *
+ * The stored URI is always canonical (see normalize_uri) so the document
+ * store is deduplicated regardless of how the URI was spelled.  The
+ * returned slot has `in_use=1` and `uri` set; all other fields are zeroed.
+ *
+ * @param uri  Document URI to associate with the new slot.
+ * @return The newly allocated Document, or NULL when the store is full.
  */
 static Document *doc_alloc(const char *uri) {
     char *canon = normalize_uri(uri);
@@ -203,8 +222,11 @@ static Document *doc_alloc(const char *uri) {
     return NULL; /* shouldn't happen in practice */
 }
 
-/* Release all heap memory owned by d and zero its fields, returning the
+/**
+ * Release all heap memory owned by @p d and zero its fields, returning the
  * slot to the pool.
+ *
+ * @param d  Document slot to free.
  */
 static void doc_free(Document *d) {
     free(d->uri);
@@ -218,9 +240,6 @@ static void doc_free(Document *d) {
    Server-to-client messaging
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Write msg to stdout with the required LSP Content-Length header.
- * Flushes stdout after writing so the editor receives the message promptly.
- */
 void lsp_send_message(const char *msg) {
     printf("Content-Length: %zu\r\n\r\n%s", strlen(msg), msg);
     fflush(stdout);
@@ -230,9 +249,11 @@ void lsp_send_message(const char *msg) {
    File I/O helpers
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/*
- * Decode a percent-encoded string (e.g. from a URI path component).
- * Returns a heap-allocated NUL-terminated string; caller must free.
+/**
+ * Decode a percent-encoded string (e.g. a URI path component).
+ *
+ * @param src  Percent-encoded source string.
+ * @return Heap-allocated, NUL-terminated decoded string.  Caller must free().
  */
 static char *percent_decode(const char *src) {
     size_t len = strlen(src);
@@ -254,11 +275,14 @@ static char *percent_decode(const char *src) {
     return dst;
 }
 
-/*
- * Percent-encode a filesystem path for use in a file:// URI.
- * '/' is preserved as-is; all other characters outside the RFC 3986
- * unreserved set (A-Z a-z 0-9 - _ . ~) are encoded as %XX.
- * Returns a heap-allocated NUL-terminated string; caller must free.
+/**
+ * Percent-encode a filesystem path for use in a `file://` URI.
+ *
+ * `/` is preserved as-is; all other characters outside the RFC 3986
+ * unreserved set (`A-Z a-z 0-9 - _ . ~`) are encoded as `%XX`.
+ *
+ * @param src  Filesystem path to encode.
+ * @return Heap-allocated, NUL-terminated encoded string.  Caller must free().
  */
 static char *percent_encode_path(const char *src) {
     size_t len = strlen(src);
@@ -284,19 +308,24 @@ static char *percent_encode_path(const char *src) {
     return dst;
 }
 
-/*
- * Convert a file:// URI to a filesystem path.  Returns a heap-allocated,
- * percent-decoded copy of the path portion (after "file://"), or NULL if
- * the URI does not use the file scheme.  Caller must free.
+/**
+ * Convert a `file://` URI to a filesystem path.
+ *
+ * @param uri  Source URI.
+ * @return Heap-allocated, percent-decoded copy of the path portion (after
+ *         `file://`), or NULL when @p uri does not use the file scheme.
+ *         Caller must free().
  */
 static char *uri_to_path(const char *uri) {
     if (!uri || strncmp(uri, "file://", 7) != 0) return NULL;
     return percent_decode(uri + 7);
 }
 
-/*
- * Convert a filesystem path to a file:// URI.
- * Returns a heap-allocated string; caller must free.
+/**
+ * Convert a filesystem path to a `file://` URI.
+ *
+ * @param path  Filesystem path.
+ * @return Heap-allocated URI.  Caller must free().
  */
 static char *path_to_uri(const char *path) {
     char *encoded = percent_encode_path(path);
@@ -310,11 +339,14 @@ static char *path_to_uri(const char *path) {
     return uri;
 }
 
-/*
- * Lexically normalize a filesystem path: collapse "//" runs, drop "." segments,
- * strip trailing slashes.  Does not touch ".." or resolve symlinks — the caller
- * uses this as a fallback when realpath(3) fails (file doesn't exist yet).
- * Returns a heap-allocated string; caller must free.
+/**
+ * Lexically normalise a filesystem path: collapse repeated slashes, drop
+ * `"."` segments, strip trailing slashes.  Does not touch `".."` or
+ * resolve symlinks — the caller uses this as a fallback when realpath(3)
+ * fails (file doesn't exist yet).
+ *
+ * @param path  Filesystem path to normalise.
+ * @return Heap-allocated normalised path.  Caller must free().
  */
 static char *lexical_normalize_path(const char *path) {
     if (!path) return NULL;
@@ -344,13 +376,16 @@ static char *lexical_normalize_path(const char *path) {
     return out;
 }
 
-/*
- * Normalize a URI into the canonical key used by the document store.
- * For file:// URIs, runs realpath(3) to collapse ".", "..", "//", and
+/**
+ * Normalise a URI into the canonical key used by the document store.
+ *
+ * For `file://` URIs, runs realpath(3) to collapse `.`, `..`, `//`, and
  * symlinks when the file exists; falls back to lexical_normalize_path()
  * for URIs whose backing file does not exist yet.  Non-file URIs are
  * passed through unchanged.
- * Returns a heap-allocated URI; caller must free.
+ *
+ * @param raw_uri  URI to canonicalise.
+ * @return Heap-allocated canonical URI.  Caller must free().
  */
 static char *normalize_uri(const char *raw_uri) {
     if (!raw_uri) return NULL;
@@ -369,9 +404,12 @@ static char *normalize_uri(const char *raw_uri) {
     return uri;
 }
 
-/*
- * Read an entire file into a heap-allocated, NUL-terminated string.
- * Returns NULL on any error.  Caller must free.
+/**
+ * Read an entire file into memory.
+ *
+ * @param path  Filesystem path to the file.
+ * @return Heap-allocated, NUL-terminated contents on success, or NULL on
+ *         any error.  Caller must free().
  */
 static char *read_file(const char *path) {
     FILE *file = fopen(path, "r");
@@ -395,10 +433,18 @@ static char *read_file(const char *path) {
  * covering "./"-prefixed, trailing-slash, and symlinked spellings — is
  * handled inside doc_find / doc_alloc via normalize_uri().
  */
-/* Forward declaration — follow_includes() and load_file_from_disk() are
+/** Forward declaration — follow_includes() and load_file_from_disk() are
  * mutually recursive: loading a file may trigger following its includes. */
 static void follow_includes(const char *file_path, const ParseResult *parse);
 
+/**
+ * Load a `.tjp` / `.tji` file from @p path into the document store as a
+ * disk-only entry, parse it, and follow any `include` directives it
+ * contains.  Silently skips paths whose URI is already in the store
+ * (cycle-safe).
+ *
+ * @param path  Filesystem path of the file to load.
+ */
 static void load_file_from_disk(const char *path) {
     char *uri = path_to_uri(path);
     if (doc_find(uri)) { free(uri); return; }
@@ -416,11 +462,15 @@ static void load_file_from_disk(const char *path) {
     follow_includes(path, &document->parse);
 }
 
-/*
- * For each filename listed in parse->included_files, resolve it relative to
- * the directory containing file_path and load it into the document store if
- * not already present.  Cycle-safe: load_file_from_disk() skips URIs that are
- * already in the store.
+/**
+ * For each filename listed in @p result->included_files, resolve it
+ * relative to the directory containing @p file_path and load it into the
+ * document store if not already present.  Cycle-safe: load_file_from_disk()
+ * skips URIs that are already in the store.
+ *
+ * @param file_path  Filesystem path of the file whose includes are being
+ *                   followed.
+ * @param result     ParseResult of @p file_path.
  */
 static void follow_includes(const char *file_path, const ParseResult *result) {
     if (!result->num_included_files) return;
@@ -464,11 +514,14 @@ static void follow_includes(const char *file_path, const ParseResult *result) {
     }
 }
 
-/*
- * Recursively walk dir_path and call load_file_from_disk() for every
- * regular .tjp or .tji file found.  Silently skips unreadable directories.
- * Entries are processed in sorted order so the document store ordering is
- * deterministic across filesystems (readdir order is filesystem-dependent).
+/**
+ * Recursively walk @p dir_path and call load_file_from_disk() for every
+ * regular `.tjp` or `.tji` file found.  Silently skips unreadable
+ * directories.  Entries are processed in sorted order so the document
+ * store ordering is deterministic across filesystems (readdir order is
+ * filesystem-dependent).
+ *
+ * @param dir_path  Filesystem path to the directory to walk.
  */
 static void load_tj_files_recursive(const char *dir_path) {
     DIR *dir = opendir(dir_path);
@@ -537,8 +590,12 @@ static void load_tj_files_recursive(const char *dir_path) {
    JSON helpers
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Extract an LspPos from a JSON object with "line" and "character" fields.
- * Returns a zeroed LspPos if obj is NULL or the fields are absent.
+/**
+ * Extract an LspPos from a JSON object with `"line"` and `"character"` fields.
+ *
+ * @param obj  JSON object to read.
+ * @return The extracted position, or a zeroed LspPos when @p obj is NULL or
+ *         the fields are absent.
  */
 static LspPos json_to_pos(yyjson_val *obj) {
     LspPos p = {0};
@@ -550,12 +607,16 @@ static LspPos json_to_pos(yyjson_val *obj) {
     return p;
 }
 
-/* Apply a single incremental text edit described by range/new_text to src.
- * Returns a newly heap-allocated NUL-terminated string; caller must free it.
- * src may be NULL (treated as empty string).
- * range.end is exclusive — text[start_byte..end_byte) is replaced by new_text.
- * character offsets are treated as byte offsets within a line, consistent with
- * how the lexer tracks columns.
+/**
+ * Apply a single incremental text edit described by @p range / @p new_text
+ * to @p src.  `range.end` is exclusive — `src[start_byte..end_byte)` is
+ * replaced by @p new_text.  Character offsets are treated as byte offsets
+ * within a line, consistent with how the lexer tracks columns.
+ *
+ * @param src       Original document text (may be NULL, treated as `""`).
+ * @param range     Range to replace.
+ * @param new_text  Replacement text.
+ * @return Heap-allocated NUL-terminated result string.  Caller must free().
  */
 static char *apply_incremental_change(const char *src,
                                       LspRange range,
@@ -598,14 +659,28 @@ static char *apply_incremental_change(const char *src,
     return result;
 }
 
-/* Return the string value of obj[key], or NULL if missing or not a string. */
+/**
+ * Look up a string field on a JSON object.
+ *
+ * @param obj  JSON object (may be NULL).
+ * @param key  Field name.
+ * @return The string value at @p key, or NULL when @p obj is NULL or the
+ *         field is missing or not a string.
+ */
 static const char *json_str(yyjson_val *obj, const char *key) {
     if (!obj) return NULL;
     yyjson_val *item = yyjson_obj_get(obj, key);
     return (item && yyjson_is_str(item)) ? yyjson_get_str(item) : NULL;
 }
 
-/* Copy an immutable id value into doc as a mutable value. */
+/**
+ * Copy an immutable JSON id value into @p doc as a mutable value.
+ *
+ * @param doc  Destination mutable JSON document.
+ * @param id   Source id from the incoming JSON-RPC message (may be NULL or
+ *             null).
+ * @return Mutable copy of @p id; a JSON null when @p id is NULL or null.
+ */
 static yyjson_mut_val *copy_id(yyjson_mut_doc *doc, yyjson_val *id) {
     if (!id || yyjson_is_null(id)) return yyjson_mut_null(doc);
     if (yyjson_is_str(id))  return yyjson_mut_strcpy(doc, yyjson_get_str(id));
@@ -615,7 +690,14 @@ static yyjson_mut_val *copy_id(yyjson_mut_doc *doc, yyjson_val *id) {
     return yyjson_mut_null(doc);
 }
 
-/* Build a success response envelope around result. */
+/**
+ * Build a success JSON-RPC response envelope around @p result.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param result  Response payload.
+ * @return The JSON-RPC response object.
+ */
 static yyjson_mut_val *make_response(yyjson_mut_doc *doc, yyjson_val *id,
                                       yyjson_mut_val *result) {
     yyjson_mut_val *resp = yyjson_mut_obj(doc);
@@ -629,7 +711,7 @@ static yyjson_mut_val *make_response(yyjson_mut_doc *doc, yyjson_val *id,
    Cross-file revalidation
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/*
+/**
  * Revalidate cross-file dep refs in all open documents, then publish updated
  * diagnostics.  Called after any document open, change, or close.
  *
@@ -686,11 +768,17 @@ static void revalidate_all_docs(void) {
    Handlers
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Handle the initialize request.
+/**
+ * Handle the `initialize` request.
+ *
  * Responds with the server's capabilities and registers all supported
- * language features.  Client capabilities in params are not yet inspected.
- * id     — request id to echo back in the response
- * params — initialize parameters (currently unused)
+ * language features.  Client capabilities in @p params are not yet
+ * inspected.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Initialize parameters (currently unused).
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
@@ -810,15 +898,21 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
-/* Handle the shutdown request.
+/**
+ * Handle the `shutdown` request.
+ *
  * Returns a null result as required by the LSP spec; the server process
- * exits on the subsequent exit notification.
+ * exits on the subsequent `exit` notification.
+ *
+ * @param doc  Destination mutable JSON document.
+ * @param id   Request id to echo back.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_shutdown(yyjson_mut_doc *doc, yyjson_val *id) {
     return make_response(doc, id, yyjson_mut_null(doc));
 }
 
-/*
+/**
  * Send client/registerCapability to ask the client to watch all .tjp and
  * .tji files in the workspace.  The server will then receive
  * workspace/didChangeWatchedFiles whenever those files change on disk.
@@ -870,8 +964,8 @@ static void handle_initialized(void) {
         revalidate_all_docs();
 }
 
-/*
- * Handle workspace/didChangeWatchedFiles.
+/**
+ * Handle `workspace/didChangeWatchedFiles`.
  *
  * The LSP spec defines three change types:
  *   1 = Created, 2 = Changed, 3 = Deleted
@@ -880,6 +974,8 @@ static void handle_initialized(void) {
  * in the document store, then re-parse.  For Deleted: remove the document
  * from the store.  In all cases, revalidate_all_docs() is called so that
  * cross-file dependency diagnostics are kept up to date.
+ *
+ * @param params  Notification `params` object.
  */
 static void handle_did_change_watched_files(yyjson_val *params) {
     if (!params) return;
@@ -938,12 +1034,15 @@ static void handle_did_change_watched_files(yyjson_val *params) {
     if (changed) revalidate_all_docs();
 }
 
-/*
- * Handle workspace/didRenameFiles.
+/**
+ * Handle `workspace/didRenameFiles`.
  *
- * For each renamed file: remove the old URI from the document store (clearing
- * its diagnostics), then read the new URI from disk and add it.  Revalidates
- * all documents once at the end so that cross-file references are updated.
+ * For each renamed file: remove the old URI from the document store
+ * (clearing its diagnostics), then read the new URI from disk and add it.
+ * Revalidates all documents once at the end so that cross-file references
+ * are updated.
+ *
+ * @param params  Notification `params` object.
  */
 static void handle_did_rename_files(yyjson_val *params) {
     if (!params) return;
@@ -997,10 +1096,14 @@ static void handle_did_rename_files(yyjson_val *params) {
     if (changed) revalidate_all_docs();
 }
 
-/* Handle textDocument/didOpen.
+/**
+ * Handle `textDocument/didOpen`.
+ *
  * Stores the document text, parses it, and triggers cross-file
  * revalidation so that references to symbols in this file resolve.
- * params — notification params containing textDocument.uri and textDocument.text
+ *
+ * @param params  Notification params containing `textDocument.uri` and
+ *                `textDocument.text`.
  */
 static void handle_didopen(yyjson_val *params) {
     if (!params) return;
@@ -1047,13 +1150,17 @@ static void handle_didopen(yyjson_val *params) {
     revalidate_all_docs();
 }
 
-/* Handle textDocument/didChange.
+/**
+ * Handle `textDocument/didChange`.
+ *
  * Applies each content change in order to the stored document text,
- * re-parses, and revalidates all open documents.
- * Each change may be a full replacement (no "range" field) or an incremental
- * edit (has "range" and "text" fields).  Changes are applied sequentially;
- * each change's range is relative to the text produced by the previous one.
- * params — notification params containing textDocument.uri and contentChanges[]
+ * re-parses, and revalidates all open documents.  Each change may be a
+ * full replacement (no `range` field) or an incremental edit (has `range`
+ * and `text` fields).  Changes are applied sequentially; each change's
+ * range is relative to the text produced by the previous one.
+ *
+ * @param params  Notification params containing `textDocument.uri` and
+ *                `contentChanges[]`.
  */
 static void handle_didchange(yyjson_val *params) {
     if (!params) return;
@@ -1118,12 +1225,15 @@ static void handle_didchange(yyjson_val *params) {
     revalidate_all_docs();
 }
 
-/* Handle textDocument/didClose.
+/**
+ * Handle `textDocument/didClose`.
+ *
  * When the editor closes a file, attempt to reload it from disk so that
  * cross-file features (completions, definition, references) keep working
  * even when the file is not open in the editor.  If the file cannot be
  * read, remove it from the store and clear client-side diagnostics.
- * params — notification params containing textDocument.uri
+ *
+ * @param params  Notification params containing `textDocument.uri`.
  */
 static void handle_didclose(yyjson_val *params) {
     if (!params) return;
@@ -1162,9 +1272,16 @@ static void handle_didclose(yyjson_val *params) {
     revalidate_all_docs();
 }
 
-/* Handle textDocument/documentSymbol.
- * Returns the doc_symbols[] tree for the requested document as a hierarchical
- * symbol list, or null if the document is not open.
+/**
+ * Handle `textDocument/documentSymbol`.
+ *
+ * Returns the doc_symbols[] tree for the requested document as a
+ * hierarchical symbol list, or null if the document is not open.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
                                                yyjson_val *params) {
@@ -1188,8 +1305,16 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
     return make_response(doc, id, raw);
 }
 
-/* Handle textDocument/foldingRange.
- * Returns folding ranges derived from the brace token spans of the document.
+/**
+ * Handle `textDocument/foldingRange`.
+ *
+ * Returns folding ranges derived from the brace token spans of the
+ * document.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
                                              yyjson_val *params) {
@@ -1211,7 +1336,13 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, arr);
 }
 
-/* Return a human-readable label for a DocSymbol keyword. */
+/**
+ * Return a human-readable label for a DocSymbol keyword.
+ *
+ * @param keyword  KW_* constant from grammar.tab.h.
+ * @return Static string label (e.g. `"Task"`, `"Resource"`).  Returns
+ *         `"Symbol"` for keywords with no specific label.
+ */
 static const char *sym_kind_label(int keyword) {
     switch (keyword) {
     case KW_TASK:     return "Task";
@@ -1223,10 +1354,19 @@ static const char *sym_kind_label(int keyword) {
     }
 }
 
-/* Handle textDocument/hover.
- * First checks whether the cursor lands on a resolved dependency reference;
- * if so, returns the target symbol's name and kind as a hover card.  Falls
- * back to keyword documentation if no definition link matches.
+/**
+ * Handle `textDocument/hover`.
+ *
+ * First checks whether the cursor lands on a resolved dependency
+ * reference; if so, returns the target symbol's name and kind as a hover
+ * card.  Falls back to keyword documentation if no definition link
+ * matches.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `position`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
                                      yyjson_val *params) {
@@ -1300,10 +1440,18 @@ keyword_hover:;
     return make_response(doc, id, hover);
 }
 
-/* Handle textDocument/signatureHelp.
+/**
+ * Handle `textDocument/signatureHelp`.
+ *
  * Determines the active keyword context at the cursor and returns a
- * SignatureHelp object with the keyword's argument signature.
- * Returns null if the cursor is not in a recognised keyword context.
+ * SignatureHelp object with the keyword's argument signature.  Returns
+ * null when the cursor is not in a recognised keyword context.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `position`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id,
                                               yyjson_val *params) {
@@ -1338,8 +1486,15 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
     return make_response(doc, id, sig);
 }
 
-/* Handle textDocument/semanticTokens/full.
+/**
+ * Handle `textDocument/semanticTokens/full`.
+ *
  * Returns the full delta-encoded semantic token list for the document.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
                                                     yyjson_val *params) {
@@ -1360,9 +1515,17 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
     return make_response(doc, id, result);
 }
 
-/* Handle textDocument/references.
+/**
+ * Handle `textDocument/references`.
+ *
  * Returns all locations that reference the symbol under the cursor, using
  * the precomputed def_links[] and doc_symbols[] from the parsed document.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `position`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
@@ -1388,9 +1551,17 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
-/* Handle textDocument/documentHighlight.
+/**
+ * Handle `textDocument/documentHighlight`.
+ *
  * Returns all occurrences of the symbol under the cursor within the same
  * document, using def_links[], doc_symbols[], and tok_spans[].
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `position`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
                                                   yyjson_val *id,
@@ -1418,9 +1589,18 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
     return make_response(doc, id, result);
 }
 
-/* Handle textDocument/definition.
- * Returns the definition location for the dep-ref expression under the cursor,
- * looked up from the precomputed def_links[] in the parsed document.
+/**
+ * Handle `textDocument/definition`.
+ *
+ * Returns the definition location for the dep-ref expression under the
+ * cursor, looked up from the precomputed def_links[] in the parsed
+ * document.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `position`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
@@ -1445,9 +1625,18 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
-/* Handle textDocument/completion.
+/**
+ * Handle `textDocument/completion`.
+ *
  * Returns a completion list appropriate for the cursor context, including
- * keyword suggestions and task-identifier completions from the symbol tree.
+ * keyword suggestions and task-identifier completions from the symbol
+ * tree.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `position`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
@@ -1500,8 +1689,16 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
-/* Handle workspace/symbol.
- * Returns all task symbols across all open documents whose names contain query.
+/**
+ * Handle `workspace/symbol`.
+ *
+ * Returns all task symbols across all open documents whose names contain
+ * the request's query string.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `query`.
+ * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
                                                 yyjson_val *params) {
@@ -1523,11 +1720,6 @@ static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *
    Main dispatch
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Parse and dispatch one JSON-RPC message.
- * json_text — NUL-terminated JSON-RPC message body (no Content-Length header)
- * Returns a heap-allocated JSON response string for request messages, or
- * NULL for notifications (which have no response).  Caller must free.
- */
 char *server_process(const char *json_text) {
     yyjson_doc *in_doc = yyjson_read(json_text, strlen(json_text), 0);
     if (!in_doc) return NULL;
@@ -1630,9 +1822,6 @@ char *server_process(const char *json_text) {
     return text;
 }
 
-/* Initialise the document store.
- * Must be called once before server_process() is invoked for the first time.
- */
 void server_init() {
      // Initialize array of Document objects
      for (int i=0; i<MAX_DOCS; i++) {

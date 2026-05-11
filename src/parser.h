@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
 #include <stdint.h>
@@ -47,6 +49,7 @@ typedef struct {
     LspPos end;          /**< exclusive end position */
 } LspRange;
 
+/** Bison's end-of-input marker (always 0). */
 #define TK_EOF 0
 
 /** ── Token ───────────────────────────────────────────────────────────────── *
@@ -76,11 +79,20 @@ typedef struct {
     char  *text;         /**< heap-allocated; caller must free */
 } Token;
 
+/**
+ * Free the heap-allocated text inside a Token (does not free the Token
+ * itself).
+ *
+ * @param t  Token whose `text` field should be released and nulled out.
+ */
 void token_free(Token *t);
 
 
+/** Forward declaration; the full struct is defined below. */
 typedef struct DocSymbol DocSymbol;
+/** Forward declaration; the full struct is defined further down. */
 typedef struct DefinitionLink DefinitionLink;
+/** Forward declaration; the full struct is defined further down. */
 typedef struct ReferenceLink ReferenceLink;
 
 /** ── DocSymbol ───────────────────────────────────────────────────────────── *
@@ -143,7 +155,9 @@ struct DocSymbol {
 
 /* ── Diagnostic severity ─────────────────────────────────────────────────── */
 
+/** LSP DiagnosticSeverity for hard errors. */
 #define DIAG_ERROR   1
+/** LSP DiagnosticSeverity for warnings. */
 #define DIAG_WARNING 2
 
 /** ── Diagnostic ──────────────────────────────────────────────────────────── *
@@ -374,26 +388,79 @@ typedef struct {
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
+/**
+ * Parse @p src into a ParseResult.  Single entry point for the lexer +
+ * grammar pipeline.  The returned ParseResult owns all dynamic arrays;
+ * release with parse_result_free().
+ *
+ * @param src  NUL-terminated TaskJuggler source text.
+ * @return Fully populated ParseResult.
+ */
 ParseResult parse(const char *src);
+
+/**
+ * Release every dynamic allocation owned by @p r and zero its fields.
+ *
+ * @param r  ParseResult to release; the struct itself is not freed.
+ */
 void        parse_result_free(ParseResult *r);
+
+/**
+ * Recursively free a DocSymbol and all of its children.
+ *
+ * @param s  Root of the DocSymbol subtree to free.
+ */
 void        doc_symbol_free(DocSymbol *s);
+
+/**
+ * Record an `include` directive's target in @p r->included_files.
+ *
+ * @param r            ParseResult being populated.
+ * @param quoted_text  Raw `include` argument as it appears in source; the
+ *                     surrounding quotes are stripped before storing.
+ */
 void        push_included_file(ParseResult *r, const char *quoted_text);
 
-/* Raw dependency reference accumulation (called from grammar.y) */
+/**
+ * Push a `depends`/`precedes` reference into the parser's transient
+ * accumulator.  Called from grammar.y as the rules fire.
+ *
+ * @param bang_count  Number of leading `!` characters in the reference.
+ * @param path        Dot-separated reference path (e.g. `"deliveries.start"`).
+ * @param owner       DocSymbol that declared the reference.
+ * @param start       Start position of the reference expression.
+ * @param end         End position of the reference expression.
+ */
 void push_dep_ref(int bang_count, const char *path,
                   DocSymbol *owner, LspPos start, LspPos end);
+
+/** Reset the transient dep-ref accumulator before a new parse. */
 void dep_refs_reset(void);
 
-/* Resolve r's cross_file_deps[] against the given set of other documents'
- * top-level symbols.  For each ref: if a match is found, adds a cross-file
- * DefinitionLink on the owner (with target_uri) and ReferenceLink on the
- * target (with source_uri = self_uri).  Otherwise emits an "unresolved
- * dependency" diagnostic onto r->diagnostics.  Matches go through the same
- * KW_PROJECT-transparent find_task() used for in-file resolution, so only
- * top-level symbols (as surfaced by include statements) are visible.
+/**
+ * Resolve @p r->cross_file_deps[] against the given set of other documents'
+ * top-level symbols.
  *
- * Call clear_cross_file_state(r) before calling this to wipe any cross-file
- * state left over from a previous resolution pass.
+ * For each ref: if a match is found, adds a cross-file DefinitionLink on
+ * the owner (with target_uri) and a ReferenceLink on the target (with
+ * source_uri = @p self_uri).  Otherwise emits an "unresolved dependency"
+ * diagnostic onto @p r->diagnostics.
+ *
+ * Matches go through the same KW_PROJECT-transparent find_task() used for
+ * in-file resolution, so only top-level symbols (as surfaced by include
+ * statements) are visible.
+ *
+ * Call clear_cross_file_state(@p r) before calling this to wipe any
+ * cross-file state left over from a previous resolution pass.
+ *
+ * @param r            ParseResult whose cross_file_deps[] are resolved.
+ * @param extra_roots  Per-document arrays of top-level symbols to consult.
+ * @param extra_counts Per-document lengths matching @p extra_roots.
+ * @param extra_uris   URIs corresponding to each entry in @p extra_roots.
+ * @param num_extra    Length of @p extra_roots, @p extra_counts, and
+ *                     @p extra_uris.
+ * @param self_uri     URI of the document owning @p r, stored on each
+ *                     ReferenceLink's `source_uri` for matches.
  */
 void resolve_cross_file_deps(ParseResult *r,
                              DocSymbol *const *const *extra_roots,
@@ -402,31 +469,57 @@ void resolve_cross_file_deps(ParseResult *r,
                              int num_extra,
                              const char *self_uri);
 
-/* Strip cross-file state from r: removes def_links entries with a non-NULL
- * target_uri and ref_links entries with a non-NULL source_uri (freeing the
- * URI strings), and truncates r->diagnostics back to dep_diag_start.
- * Called by the server before each cross-file resolution cycle.
+/**
+ * Strip cross-file state from @p r.
+ *
+ * Removes def_links entries with a non-NULL target_uri and ref_links
+ * entries with a non-NULL source_uri (freeing the URI strings), and
+ * truncates @p r->diagnostics back to dep_diag_start.  Called by the
+ * server before each cross-file resolution cycle.
+ *
+ * @param r  ParseResult whose cross-file state should be cleared.
  */
 void clear_cross_file_state(ParseResult *r);
 
-/* Return the innermost DocSymbol whose range contains pos (inclusive start,
- * exclusive end), using the precomputed .owner field on tok_spans.  Returns
- * NULL if pos is outside every DocSymbol.  O(log T + D) where T = num_tokens
- * and D = symbol nesting depth at pos.
+/**
+ * Return the innermost DocSymbol whose range contains @p pos (inclusive
+ * start, exclusive end), using the precomputed `.owner` field on
+ * @p tokens.
+ *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param pos         Position to look up.
+ * @return The matching symbol, or NULL when @p pos is outside every
+ *         DocSymbol.  Runs in O(log T + D) where T is @p num_tokens
+ *         and D is the symbol nesting depth at @p pos.
  */
 DocSymbol *symbol_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
 
-/*
- * Navigate the DocSymbol tree by following `path` (an array of `plen`
- * identifier strings).  Returns the children array of the matching node and
- * sets *out_n to its length, or NULL / *out_n=0 if the path is not found.
+/**
+ * Navigate the DocSymbol tree by following @p path (an array of @p plen
+ * identifier strings).
+ *
  * Only SK_FUNCTION nodes are traversed (i.e. tasks).
+ *
+ * @param syms   Top-level symbols.
+ * @param n      Length of @p syms.
+ * @param path   Identifiers to follow, outermost first.
+ * @param plen   Length of @p path.
+ * @param out_n  Receives the length of the returned children array.
+ * @return Children array of the matched node, or NULL with `*out_n = 0`
+ *         when the path does not resolve.
  */
 DocSymbol *const *doc_symbol_find_path(DocSymbol *const *syms, int n,
                                        const char **path, int plen,
                                        int *out_n);
 
-/* Compare two positions. Returns -1, 0, or 1. */
+/**
+ * Compare two positions in source order.
+ *
+ * @param a  Left-hand position.
+ * @param b  Right-hand position.
+ * @return -1 if @p a precedes @p b, 1 if @p a follows @p b, 0 if equal.
+ */
 static inline int pos_cmp(LspPos a, LspPos b) {
     if (a.line != b.line) return (a.line < b.line) ? -1 : 1;
     if (a.character != b.character) return (a.character < b.character) ? -1 : 1;

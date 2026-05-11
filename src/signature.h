@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
 #include "parser.h"
@@ -28,17 +30,29 @@ typedef struct {
     uint32_t arg_count;  /**< number of completed argument tokens at cursor */
 } ActiveContext;
 
-/*
- * Scan tokens up to `cursor` and return the innermost active statement
+/**
+ * Scan tokens up to @p cursor and return the innermost active statement
  * keyword together with the number of completed argument tokens.
  * Caller must free result.keyword (if non-NULL).
+ *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param cursor      Cursor position.
+ * @return Active keyword and argument count; `{NULL, 0}` when no
+ *         keyword's argument list encompasses @p cursor.
  */
 ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cursor);
 
-/*
- * Build a LSP SignatureHelp JSON object for `kw` with `active_param`
- * highlighted, or NULL if `kw` has no known signature.
- * Values are allocated in doc; caller owns doc.
+/**
+ * Build an LSP SignatureHelp JSON object for @p kw with @p active_param
+ * highlighted, or NULL if @p kw has no known signature.
+ * Values are allocated in @p doc; caller owns @p doc.
+ *
+ * @param doc           Destination mutable JSON document.
+ * @param kw            Keyword text (e.g. `"task"`, `"depends"`).
+ * @param active_param  Zero-indexed argument the cursor is on.
+ * @return The SignatureHelp JSON object, or NULL when @p kw has no
+ *         registered signature.
  */
 yyjson_mut_val *build_signature_help_json(yyjson_mut_doc *doc,
                                            const char *kw,

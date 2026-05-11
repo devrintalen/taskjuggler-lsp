@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 /*
  * definition.c — textDocument/definition response builder
  *
@@ -43,7 +45,13 @@
 #include "definition.h"
 #include "document_symbol.h"
 
-/* Returns 1 if position p falls within range r (both endpoints inclusive). */
+/**
+ * Test whether @p p falls within range @p r (both endpoints inclusive).
+ *
+ * @param p  Position to test.
+ * @param r  Range.
+ * @return 1 when @p p is inside @p r, 0 otherwise.
+ */
 static int pos_in_range(LspPos p, LspRange r) {
     int after  = (p.line > r.start.line)
               || (p.line == r.start.line && p.character >= r.start.character);
@@ -52,10 +60,6 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-/* Find a DefinitionLink whose source range contains the cursor.  Uses the
- * precomputed tok_spans[].owner to locate the innermost enclosing DocSymbol
- * via symbol_at(), then walks up the parent chain checking def_links at
- * each level.  Returns a pointer to the matching link, or NULL. */
 const DefinitionLink *find_def_link_at(const TokenSpan *tokens, int num_tokens,
                                        LspPos cursor) {
     for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
@@ -68,16 +72,6 @@ const DefinitionLink *find_def_link_at(const TokenSpan *tokens, int num_tokens,
     return NULL;
 }
 
-/* Build a Location JSON object for the go-to-definition response.
- * Locates a DefinitionLink whose source range contains cursor.
- * Returns NULL if no matching link is found (server will return null to editor).
- *
- * doc        — the mutable JSON document that will own the returned value
- * tokens     — token span array from the ParseResult (carries .owner links)
- * num_tokens — number of entries in tokens
- * cursor     — cursor position from the textDocument/definition request
- * uri        — URI of the requesting document, used as fallback target URI
- */
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
                                        const TokenSpan *tokens, int num_tokens,
                                        LspPos cursor, const char *uri) {

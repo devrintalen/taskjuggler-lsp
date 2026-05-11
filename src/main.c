@@ -16,18 +16,23 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #include "server.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Maximum allowed length (in bytes) for a message (16 MB) */
+/** Maximum allowed length (in bytes) for a single LSP message (16 MB). */
 #define CONTENT_LENGTH_MAX (16 * 1024 * 1024)
 
-/* Read one LSP message from stdin.
- * Returns heap-allocated body string, or NULL on EOF/error.
- * Caller must free. */
+/**
+ * Read one LSP message from stdin.
+ *
+ * @return Heap-allocated NUL-terminated message body, or NULL on EOF or
+ *         a malformed header.  Caller must free().
+ */
 static char *read_message(void) {
     int  content_length = -1;
     char line[256];
@@ -61,9 +66,12 @@ static char *read_message(void) {
     return buf;
 }
 
-/* Entry point.  Initializes the server, then reads LSP messages from stdin
- * in a loop, dispatches each to the server, and writes any response to stdout.
- * Returns 0 when stdin closes (normal client shutdown).
+/**
+ * Entry point.  Initialises the server, then reads LSP messages from stdin
+ * in a loop, dispatches each to the server, and writes any response to
+ * stdout.
+ *
+ * @return 0 when stdin closes (normal client shutdown).
  */
 int main(void) {
     server_init();

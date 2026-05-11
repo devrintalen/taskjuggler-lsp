@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 /*
  * references.c — textDocument/references response builder
  *
@@ -50,7 +52,13 @@
 #include "grammar.tab.h"
 #include <string.h>
 
-/* Returns 1 if position p falls within range r (both endpoints inclusive). */
+/**
+ * Test whether @p p falls within range @p r (endpoints inclusive).
+ *
+ * @param p  Position to test.
+ * @param r  Range.
+ * @return 1 when @p p is inside @p r, 0 otherwise.
+ */
 static int pos_in_range(LspPos p, LspRange r) {
     int after  = (p.line > r.start.line)
               || (p.line == r.start.line && p.character >= r.start.character);

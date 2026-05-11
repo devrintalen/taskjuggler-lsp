@@ -16,15 +16,33 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
 #include "parser.h"
 #include "grammar.tab.h"
 #include <yyjson.h>
 
-/*
- * Return a JSON CompletionList object (or null if no items) for the given
- * cursor position.  Values are allocated in doc; caller owns doc.
+/**
+ * Build the textDocument/completion response for the given cursor position.
+ *
+ * Returns a JSON CompletionList object, or a JSON null when there are no
+ * applicable completions.  Values are allocated in @p doc; the caller owns
+ * the document.
+ *
+ * @param doc          Destination mutable JSON document.
+ * @param tokens       Token spans for the current document.
+ * @param num_tokens   Length of @p tokens.
+ * @param cursor       Cursor position.
+ * @param symbols      Top-level symbols of the current document.
+ * @param num_symbols  Length of @p symbols.
+ * @param extra_pools  Top-level symbols of every other open/background doc.
+ * @param extra_counts Per-pool lengths matching @p extra_pools.
+ * @param num_extra    Length of @p extra_pools.
+ * @param text         Raw source text of the current document.
+ * @return A CompletionList JSON object, or yyjson_mut_null() when no
+ *         completions apply at @p cursor.
  */
 yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const TokenSpan *tokens, int num_tokens,

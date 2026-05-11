@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 /*
  * document_highlight.c — textDocument/documentHighlight response builder
  *
@@ -55,7 +57,13 @@
 #include "grammar.tab.h"
 #include <string.h>
 
-/* Returns 1 if position p falls within range r (both endpoints inclusive). */
+/**
+ * Test whether @p p falls within range @p r (endpoints inclusive).
+ *
+ * @param p  Position to test.
+ * @param r  Range.
+ * @return 1 when @p p is inside @p r, 0 otherwise.
+ */
 static int pos_in_range(LspPos p, LspRange r) {
     int after  = (p.line > r.start.line)
               || (p.line == r.start.line && p.character >= r.start.character);
@@ -64,14 +72,27 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-/* Returns 1 if ranges a and b have identical start and end positions. */
+/**
+ * Test whether ranges @p a and @p b have identical start and end positions.
+ *
+ * @param a  First range.
+ * @param b  Second range.
+ * @return 1 when the ranges are exactly equal, 0 otherwise.
+ */
 static int range_eq(LspRange a, LspRange b) {
     return pos_cmp(a.start, b.start) == 0 && pos_cmp(a.end, b.end) == 0;
 }
 
-/* Find the innermost DocSymbol at pos whose selection_range contains pos.
- * Uses symbol_at() for O(log T + D) lookup, then walks up parents checking
- * selection_range at each level.  Returns NULL if no match. */
+/**
+ * Find the innermost DocSymbol whose selection_range contains @p pos.
+ *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param pos         Position to look up.
+ * @return The matching symbol, or NULL when @p pos sits outside every
+ *         selection range.  Runs in O(log T + D) where T is @p num_tokens
+ *         and D is the symbol nesting depth.
+ */
 static const DocSymbol *find_symbol_at(const TokenSpan *tokens, int num_tokens,
                                        LspPos pos) {
     for (DocSymbol *sym = symbol_at(tokens, num_tokens, pos);
@@ -82,9 +103,16 @@ static const DocSymbol *find_symbol_at(const TokenSpan *tokens, int num_tokens,
     return NULL;
 }
 
-/* Walk the symbol tree depth-first to find the first node whose id
- * matches the given string.  Used for intermediate segments in dotted
- * dependency paths where no def_link directly targets the segment. */
+/**
+ * Walk the symbol tree depth-first to find the first node whose id
+ * matches @p id.  Used for intermediate segments in dotted dependency
+ * paths where no def_link directly targets the segment.
+ *
+ * @param syms  Sibling symbols to search.
+ * @param n     Length of @p syms.
+ * @param id    Identifier to match.
+ * @return The matching symbol, or NULL when no symbol carries @p id.
+ */
 static const DocSymbol *find_symbol_by_id(DocSymbol *const *syms, int n,
                                           const char *id) {
     for (int i = 0; i < n; i++) {
@@ -97,9 +125,17 @@ static const DocSymbol *find_symbol_by_id(DocSymbol *const *syms, int n,
     return NULL;
 }
 
-/* Find a same-document DefinitionLink whose source range contains pos and
- * return its target.  Uses symbol_at() to locate the innermost enclosing
- * symbol, then scans def_links walking up parents on miss. */
+/**
+ * Find a same-document DefinitionLink whose source range contains @p pos
+ * and return its target.  Uses symbol_at() to locate the innermost
+ * enclosing symbol, then scans def_links walking up parents on miss.
+ *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param pos         Position to look up.
+ * @return The target symbol, or NULL when @p pos is not on a same-document
+ *         dependency reference.
+ */
 static const DocSymbol *find_link_target_at(const TokenSpan *tokens,
                                             int num_tokens, LspPos pos) {
     for (DocSymbol *sym = symbol_at(tokens, num_tokens, pos);
@@ -114,8 +150,14 @@ static const DocSymbol *find_link_target_at(const TokenSpan *tokens,
     return NULL;
 }
 
-/* Append a DocumentHighlight object to arr.
- * kind: 2 = Read, 3 = Write. */
+/**
+ * Append a DocumentHighlight object to @p arr.
+ *
+ * @param doc    Destination mutable JSON document.
+ * @param arr    DocumentHighlight[] array.
+ * @param range  Source range of the highlight.
+ * @param kind   LSP DocumentHighlightKind: 2 = Read, 3 = Write.
+ */
 static void push_highlight(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                            LspRange range, int kind) {
     yyjson_mut_val *obj = yyjson_mut_obj(doc);
@@ -124,9 +166,18 @@ static void push_highlight(yyjson_mut_doc *doc, yyjson_mut_val *arr,
     yyjson_mut_arr_add_val(arr, obj);
 }
 
-/* Collect Read highlights from the target symbol's ref_links.
+/**
+ * Collect Read highlights from @p target's ref_links into @p arr.
+ *
  * For each same-document reference, find the specific token within the
- * ref source range that matches the target's id. */
+ * ref source range that matches the target's id.
+ *
+ * @param doc         Destination mutable JSON document.
+ * @param arr         DocumentHighlight[] array to append to.
+ * @param target      Symbol whose incoming references are being collected.
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ */
 static void collect_ref_highlights(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                                    const DocSymbol *target,
                                    const TokenSpan *tokens, int num_tokens) {

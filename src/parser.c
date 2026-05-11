@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #include "parser.h"
 #include "diagnostics.h"
 #include "grammar.tab.h"  /* yyparse() */
@@ -34,10 +36,14 @@
  * can be stashed on ParseResult.cross_file_deps[] for later re-resolution.
  */
 
+/** Backing storage for the transient dep-ref accumulator. */
 static RawDepRef *g_dep_refs     = NULL;
+/** Number of entries currently held in #g_dep_refs. */
 static int        g_num_dep_refs = 0;
+/** Allocated capacity of #g_dep_refs in entries. */
 static int        g_dep_ref_cap  = 0;
 
+/** Release the accumulator's storage and reset its bookkeeping. */
 static void free_dep_refs(void) {
     for (int i = 0; i < g_num_dep_refs; i++)
         free(g_dep_refs[i].path);
@@ -67,7 +73,15 @@ void push_dep_ref(int bang_count, const char *path,
     dr->range      = (LspRange){ start, end };
 }
 
-/* Split a dot-separated path string into a heap-allocated array of segments. */
+/**
+ * Split a dot-separated path string into a heap-allocated array of segments.
+ *
+ * @param path      Dot-separated reference path (e.g. `"foo.bar.baz"`).
+ * @param out_segs  Receives a heap-allocated array of heap-allocated
+ *                  segment strings.  Caller must free each segment and
+ *                  the array.
+ * @param out_nseg  Receives the segment count.
+ */
 static void split_path(const char *path, char ***out_segs, int *out_nseg) {
     *out_nseg = 0;
     *out_segs = NULL;
@@ -90,28 +104,63 @@ static void split_path(const char *path, char ***out_segs, int *out_nseg) {
  * These are declared in the flex-generated lexer.yy.c.  We use void * for
  * YY_BUFFER_STATE to avoid pulling in the full flex header.
  */
+
+/** Opaque flex input-buffer handle. */
 typedef void *YY_BUFFER_STATE;
+/**
+ * Flex entry point: scan @p str as the next input buffer.
+ *
+ * @param str  NUL-terminated input to scan.
+ * @return Handle to the new buffer; release with yy_delete_buffer().
+ */
 extern YY_BUFFER_STATE yy_scan_string(const char *str);
+/**
+ * Flex entry point: release a buffer returned by yy_scan_string().
+ *
+ * @param buf  Buffer handle to release.
+ */
 extern void            yy_delete_buffer(YY_BUFFER_STATE buf);
-extern int             yycolumn; /* column tracker defined in lexer.l */
-extern int             yylineno; /* line counter managed by flex %option yylineno */
+/** Column tracker defined in lexer.l. */
+extern int             yycolumn;
+/** Line counter managed by flex `%option yylineno`. */
+extern int             yylineno;
 
 /* ── Shared globals (used by lexer.l and grammar.y via extern) ───────────── */
 
+/** Currently-being-built ParseResult; lexer/grammar populate this directly. */
 ParseResult *g_result          = NULL;
+/** Backing storage for the token-span array under construction. */
 TokenSpan   *g_tok_spans       = NULL;
+/** Number of entries currently held in #g_tok_spans. */
 int          g_num_tok_spans   = 0;
+/** Allocated capacity of #g_tok_spans in entries. */
 int          g_tok_span_cap    = 0;
+/** Running upper bound on emitted semantic-token entries (one per source line covered). */
 int          g_num_sem_entries = 0;
 
-/* Returns 1 if a token of the given kind will be emitted as a semantic token.
- * Matches the skip set in classify() in semantic_tokens.c. */
+/**
+ * Test whether a token of @p kind is emitted as a semantic token.
+ * Mirrors the skip set in classify() in semantic_tokens.c.
+ *
+ * @param kind  Token kind (TK_* / KW_*) to test.
+ * @return 1 when the token contributes a semantic-tokens entry, 0 otherwise.
+ */
 static int is_sem_highlighted(int kind) {
     return kind != TK_LBRACE && kind != TK_RBRACE &&
            kind != TK_BANG   && kind != TK_DOT    && kind != TK_COMMA;
 }
 
-/* Called from lexer.l for every token that callers may need to inspect. */
+/**
+ * Append one TokenSpan to the global accumulator.  Called from lexer.l for
+ * every token that callers may need to inspect.
+ *
+ * @param kind  TK_* / KW_* token kind from grammar.tab.h.
+ * @param sl    Start line.
+ * @param sc    Start column.
+ * @param el    End line.
+ * @param ec    End column (exclusive).
+ * @param text  Token lexeme; copied with strdup() (may be NULL).
+ */
 void g_push_tok_span(int kind,
                      uint32_t sl, uint32_t sc,
                      uint32_t el, uint32_t ec,
@@ -135,7 +184,6 @@ void g_push_tok_span(int kind,
 
 /* ── Token helpers ───────────────────────────────────────────────────────── */
 
-/* Frees the heap-allocated text field of t and sets it to NULL. */
 void token_free(Token *t) {
     free(t->text);
     t->text = NULL;
@@ -143,9 +191,6 @@ void token_free(Token *t) {
 
 /* ── DocSymbol helpers ───────────────────────────────────────────────────── */
 
-/* Recursively frees all heap memory owned by s (name, detail, children array)
- * but does not free s itself, as it is typically stored inline in an array.
- */
 void doc_symbol_free(DocSymbol *s) {
     free(s->name);
     free(s->id);
@@ -164,9 +209,6 @@ void doc_symbol_free(DocSymbol *s) {
 
 /* ── ParseResult helpers ─────────────────────────────────────────────────── */
 
-/* Releases all heap memory owned by r (diagnostics, symbols, token spans,
- * definition links, raw dep refs), then zeroes the struct.
- */
 void parse_result_free(ParseResult *r) {
     for (int i = 0; i < r->num_diagnostics; i++)
         free(r->diagnostics[i].message);
@@ -196,7 +238,12 @@ void parse_result_free(ParseResult *r) {
     memset(r, 0, sizeof(*r));
 }
 
-/* Appends s to r's doc_symbols pointer array, growing it if needed. */
+/**
+ * Append @p s to @p r's `doc_symbols` pointer array, growing it if needed.
+ *
+ * @param r  ParseResult being populated.
+ * @param s  Symbol to append (transfer of ownership).
+ */
 void push_doc_symbol(ParseResult *r, DocSymbol *s) {
     if (r->num_doc_symbols >= r->doc_sym_cap) {
         int nc = r->doc_sym_cap ? r->doc_sym_cap * 2 : 4;
@@ -208,10 +255,6 @@ void push_doc_symbol(ParseResult *r, DocSymbol *s) {
     r->doc_symbols[r->num_doc_symbols++] = s;
 }
 
-/* Append a heap-allocated copy of the unquoted filename from an include
- * statement.  quoted_text is the raw TK_STR token text (e.g. "\"foo.tji\"");
- * the surrounding quotes are stripped before storing.
- */
 void push_included_file(ParseResult *r, const char *quoted_text) {
     if (!quoted_text) return;
     size_t len = strlen(quoted_text);
@@ -274,7 +317,13 @@ DocSymbol *const *doc_symbol_find_path(DocSymbol *const *syms, int n,
 
 /* ── DocSymbol tree linkage ─────────────────────────────────────────────── */
 
-/* Recursively set parent pointers for all children in the symbol tree. */
+/**
+ * Recursively set parent pointers for all children in the symbol tree.
+ *
+ * @param syms    Array of sibling symbols whose parent is @p parent.
+ * @param n       Length of @p syms.
+ * @param parent  Parent pointer to assign; NULL for top-level symbols.
+ */
 static void assign_parents(DocSymbol **syms, int n, DocSymbol *parent) {
     for (int i = 0; i < n; i++) {
         syms[i]->parent = parent;
@@ -284,16 +333,22 @@ static void assign_parents(DocSymbol **syms, int n, DocSymbol *parent) {
 
 /* ── Token-to-symbol cross-referencing ──────────────────────────────────── */
 
-/* Assign each token span's owner to the innermost enclosing DocSymbol using
- * a single linear sweep.  Both tok_spans[] and symbol ranges are in document
- * order, so we walk them in lockstep with a stack of open symbol scopes.
+/**
+ * Assign each token span's owner to the innermost enclosing DocSymbol
+ * using a single linear sweep.  Both tok_spans[] and symbol ranges are in
+ * document order, so we walk them in lockstep with a stack of open symbol
+ * scopes.
  *
- * Each stack frame holds a children array, the next-child index at that level,
- * and a pointer to the scope symbol we descended into (NULL for the root
- * frame, which has no enclosing scope).  The owner of a token is the scope
- * of the deepest currently-open frame.
+ * Each stack frame holds a children array, the next-child index at that
+ * level, and a pointer to the scope symbol we descended into (NULL for the
+ * root frame, which has no enclosing scope).  The owner of a token is the
+ * scope of the deepest currently-open frame.
  *
- * Complexity: O(T + S) where T = num_tok_spans, S = total DocSymbols. */
+ * Runs in O(T + S) where T is `num_tok_spans` and S is the total number
+ * of DocSymbols.
+ *
+ * @param r  ParseResult whose tok_spans get `.owner` populated.
+ */
 static void assign_token_owners(ParseResult *r) {
     typedef struct {
         DocSymbol **children;
@@ -347,11 +402,6 @@ static void assign_token_owners(ParseResult *r) {
     free(stack);
 }
 
-/* Return the innermost DocSymbol whose range contains pos, using the
- * precomputed .owner on tok_spans.  Binary-searches for the last token whose
- * start is at or before pos, then walks up the parent chain until the scope
- * strictly contains pos (inclusive start, exclusive end).  Returns NULL if
- * pos is outside every DocSymbol. */
 DocSymbol *symbol_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
     int lo = 0, hi = num_tokens - 1, found = -1;
     while (lo <= hi) {
@@ -373,7 +423,14 @@ DocSymbol *symbol_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
 
 /* ── Dependency edge resolution ────────────────────────────────────────── */
 
-/* Append a DefinitionLink to a DocSymbol's def_links array. */
+/**
+ * Append a DefinitionLink to a DocSymbol's def_links array, growing it
+ * if needed.
+ *
+ * @param sym   Target symbol that owns the outgoing reference.
+ * @param link  Resolved link to append (transfer of ownership for any
+ *              heap-allocated fields).
+ */
 static void push_def_link(DocSymbol *sym, DefinitionLink link) {
     if (sym->num_def_links >= sym->def_links_cap) {
         int nc = sym->def_links_cap ? sym->def_links_cap * 2 : 4;
@@ -386,7 +443,14 @@ static void push_def_link(DocSymbol *sym, DefinitionLink link) {
     sym->def_links[sym->num_def_links++] = link;
 }
 
-/* Append a ReferenceLink to a DocSymbol's ref_links array. */
+/**
+ * Append a ReferenceLink to a DocSymbol's ref_links array, growing it
+ * if needed.
+ *
+ * @param sym   Target symbol that the reference points to.
+ * @param link  Incoming link to append (transfer of ownership for any
+ *              heap-allocated fields).
+ */
 static void push_ref_link(DocSymbol *sym, ReferenceLink link) {
     if (sym->num_ref_links >= sym->ref_links_cap) {
         int nc = sym->ref_links_cap ? sym->ref_links_cap * 2 : 4;
@@ -399,10 +463,17 @@ static void push_ref_link(DocSymbol *sym, ReferenceLink link) {
     sym->ref_links[sym->num_ref_links++] = link;
 }
 
-/* Find a task DocSymbol by navigating to the parent scope via
+/**
+ * Find a task DocSymbol by navigating to the parent scope via
  * doc_symbol_find_path(), then scanning for the final segment.
- * Returns the matched node, or NULL if any segment is not found.
- * Only KW_TASK nodes are matched at the leaf level. */
+ * Only KW_TASK nodes are matched at the leaf level.
+ *
+ * @param syms  Top-level symbols to search.
+ * @param n     Length of @p syms.
+ * @param segs  Path segments (e.g. `["spec", "gui"]`).
+ * @param nseg  Length of @p segs.
+ * @return The matched task, or NULL when any segment is not found.
+ */
 static DocSymbol *find_task(DocSymbol **syms, int n,
                             char **segs, int nseg) {
     if (nseg == 0 || !segs) return NULL;
@@ -424,8 +495,15 @@ static DocSymbol *find_task(DocSymbol **syms, int n,
     return NULL;
 }
 
-/* Build an "unresolved dependency: a.b.c" message from segs[] and push
- * it onto r->diagnostics at the given range. */
+/**
+ * Build an `"unresolved dependency: a.b.c"` message from @p segs and push
+ * it onto @p r->diagnostics at @p range.
+ *
+ * @param r      ParseResult to append the diagnostic to.
+ * @param range  Source range to mark.
+ * @param segs   Path segments that failed to resolve.
+ * @param nseg   Length of @p segs.
+ */
 static void emit_unresolved_dep_diag(ParseResult *r, LspRange range,
                                      char *const *segs, int nseg) {
     size_t msg_len = 32; /* "unresolved dependency: " prefix */
@@ -441,7 +519,14 @@ static void emit_unresolved_dep_diag(ParseResult *r, LspRange range,
     free(msg);
 }
 
-/* Append a RawDepRef onto r->cross_file_deps[], taking ownership of path. */
+/**
+ * Append a RawDepRef onto @p r->cross_file_deps[], taking ownership of
+ * the heap-allocated `path` field.
+ *
+ * @param r    ParseResult being populated.
+ * @param ref  Reference to stash.  Its `path` is moved into the new entry;
+ *             do not free it after the call.
+ */
 static void stash_cross_file_dep(ParseResult *r, const RawDepRef *ref) {
     if (r->num_cross_file_deps >= r->cross_file_deps_cap) {
         int nc = r->cross_file_deps_cap ? r->cross_file_deps_cap * 2 : 4;
@@ -456,12 +541,19 @@ static void stash_cross_file_dep(ParseResult *r, const RawDepRef *ref) {
     dst->path  = ref->path ? strdup(ref->path) : NULL;
 }
 
-/* Resolve dep refs accumulated by the grammar: split paths, resolve targets
- * in-file, populate def_links/ref_links on success.  For 0-bang refs that
- * fail in-file lookup, stash them on r->cross_file_deps[] for the server to
- * retry against other open documents — no diagnostic yet.  For bang refs,
- * which are strictly in-file, emit an unresolved-dependency diagnostic on
- * failure.  Frees the global accumulator at the end. */
+/**
+ * Resolve dep refs accumulated by the grammar.
+ *
+ * For each entry in the global accumulator: split the path, resolve the
+ * target in-file, and populate def_links/ref_links on success.  For
+ * 0-bang refs that fail in-file lookup, stash them on
+ * @p r->cross_file_deps[] for the server to retry against other open
+ * documents — no diagnostic is emitted yet.  Bang refs (which are
+ * strictly in-file) produce an unresolved-dependency diagnostic on
+ * failure.  The global accumulator is freed at the end.
+ *
+ * @param r  ParseResult whose dep refs are being resolved.
+ */
 static void resolve_dep_refs(ParseResult *r) {
     for (int i = 0; i < g_num_dep_refs; i++) {
         RawDepRef *ref = &g_dep_refs[i];
@@ -549,8 +641,13 @@ static void resolve_dep_refs(ParseResult *r) {
     free_dep_refs();
 }
 
-/* Walk s and its descendants, compacting link arrays in place by dropping
- * any entry that carries a cross-document URI.  Frees the URI strings. */
+/**
+ * Walk @p s and its descendants, compacting link arrays in place by
+ * dropping any entry that carries a cross-document URI.  Frees the URI
+ * strings of dropped entries.
+ *
+ * @param s  Root of the subtree to clean.
+ */
 static void strip_cross_file_links(DocSymbol *s) {
     int keep = 0;
     for (int i = 0; i < s->num_def_links; i++) {

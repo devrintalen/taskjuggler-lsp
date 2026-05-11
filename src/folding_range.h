@@ -16,21 +16,30 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
 #include "parser.h"
 #include <yyjson.h>
 
-/*
+/**
  * Build the JSON array of FoldingRange objects for
  * textDocument/foldingRange responses.
  *
  * Two kinds of ranges are emitted:
- *   "region"  — brace-delimited blocks and bracket pairs, covering at least
- *               two lines
- *   "comment" — multi-line block comments
+ *   - `"region"`  — brace-delimited blocks and bracket pairs covering at
+ *                   least two lines
+ *   - `"comment"` — multi-line block comments
  *
- * Values are allocated in doc; caller owns doc.
+ * Values are allocated in @p doc; caller owns @p doc.
+ *
+ * @param doc          Destination mutable JSON document.
+ * @param spans        Token spans of the current document.
+ * @param num_spans    Length of @p spans.
+ * @param symbols      Top-level symbols of the current document.
+ * @param num_symbols  Length of @p symbols.
+ * @return The newly created JSON array of FoldingRange objects.
  */
 yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
                                            const TokenSpan *spans,

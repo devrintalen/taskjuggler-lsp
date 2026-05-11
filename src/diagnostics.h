@@ -16,15 +16,34 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #pragma once
 
 #include "parser.h"
 
 /* ── Diagnostic accumulation ─────────────────────────────────────────────── */
 
+/**
+ * Append a Diagnostic to @p r->diagnostics.  Used by the grammar/parser and
+ * by cross-file resolution to report errors and warnings that will later be
+ * forwarded to the editor via publish_diagnostics().
+ *
+ * @param r         Parse result whose diagnostics array is appended to.
+ * @param range     Source range the diagnostic applies to.
+ * @param severity  DIAG_ERROR or DIAG_WARNING.
+ * @param msg       Diagnostic message; copied into a fresh heap allocation.
+ */
 void push_diagnostic(ParseResult *r, LspRange range, int severity,
                      const char *msg);
 
 /* ── LSP publishDiagnostics notification ─────────────────────────────────── */
 
+/**
+ * Serialise @p r->diagnostics and send a textDocument/publishDiagnostics
+ * notification for @p uri to the editor.
+ *
+ * @param uri  Document URI whose diagnostics are being published.
+ * @param r    ParseResult whose diagnostics array is serialised.
+ */
 void publish_diagnostics(const char *uri, const ParseResult *r);

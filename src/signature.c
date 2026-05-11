@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #include "signature.h"
 #include "hover.h"
 
@@ -23,16 +25,6 @@
 
 /* ── active_context ──────────────────────────────────────────────────────── */
 
-/* Determine the active keyword context and argument index at cursor.
- * Returns the innermost keyword that has signature help and whose brace depth
- * matches the cursor's, along with the number of arguments before the cursor.
- * The returned keyword string is heap-allocated; caller must free it.
- * Returns {NULL, 0} if no relevant keyword context is found.
- *
- * tokens     — token span array from the ParseResult
- * num_tokens — number of entries in tokens
- * cursor     — cursor position from the textDocument/signatureHelp request
- */
 ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     KwStackEntry stack[512];
     uint32_t brace_depth;
@@ -63,13 +55,19 @@ typedef struct {
     const char  *doc;    /**< human-readable description */
 } SigDef;
 
-/* Build a SignatureHelp JSON response object from a SigDef.
- * Wraps the signature in a {"signatures": [...], "activeSignature": 0} envelope.
- * active_param is clamped to the last parameter if it exceeds the param count.
+/**
+ * Build a SignatureHelp JSON response object from a SigDef.
  *
- * doc          — the mutable JSON document that will own the returned value
- * def          — signature definition (label, parameter list, documentation)
- * active_param — zero-based index of the argument currently being typed
+ * Wraps the signature in a `{"signatures": [...], "activeSignature": 0}`
+ * envelope.  @p active_param is clamped to the last parameter if it
+ * exceeds the param count.
+ *
+ * @param doc           Destination mutable JSON document.
+ * @param def           Signature definition (label, parameter list,
+ *                      documentation).
+ * @param active_param  Zero-based index of the argument currently being
+ *                      typed.
+ * @return The SignatureHelp JSON object.
  */
 static yyjson_mut_val *make_sig_json(yyjson_mut_doc *doc, const SigDef *def,
                                       uint32_t active_param) {
@@ -110,25 +108,21 @@ static yyjson_mut_val *make_sig_json(yyjson_mut_doc *doc, const SigDef *def,
     return root;
 }
 
-/* Build a SignatureHelp JSON response for the given keyword and argument index.
- * Returns NULL if kw has no signature entry (server will return null to editor).
- *
- * doc          — the mutable JSON document that will own the returned value
- * kw           — the active keyword (e.g. "task", "effort")
- * active_param — zero-based index of the argument currently being typed
- */
 yyjson_mut_val *build_signature_help_json(yyjson_mut_doc *doc, const char *kw,
                                            uint32_t active_param) {
     if (!kw) return NULL;
 
-/* SIG0: keyword with no parameters */
+/* Local helper: emit a SignatureHelp response for a keyword with no
+ * parameters. */
 #define SIG0(lbl, sigdoc) \
     do { \
         SigDef d = { lbl, NULL, sigdoc }; \
         return make_sig_json(doc, &d, active_param); \
     } while(0)
 
-/* SIG: keyword with one or more parameters.
+/* Local helper: emit a SignatureHelp response for a keyword with one or more
+ * parameters; variadic arguments after sigdoc are the parameter labels in
+ * order (a trailing NULL is appended automatically).
  *
  * Coverage: 39 of ~200 TaskJuggler keywords have signature help entries.
  *

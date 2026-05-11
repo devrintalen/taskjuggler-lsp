@@ -16,22 +16,27 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #include "workspace_symbol.h"
 #include "document_symbol.h"  /* symbol_kind_for() */
 
 #include <string.h>
 #include <strings.h>
 
-/* Recursively walk syms[], appending matching SymbolInformation entries to arr.
- * Recurses into every node's children regardless of whether the node matched.
+/**
+ * Recursively walk @p syms, appending matching SymbolInformation entries
+ * to @p arr.  Recurses into every node's children regardless of whether
+ * the node itself matched.
  *
- * doc       — the mutable JSON document that will own new values
- * query     — case-insensitive substring filter; "" matches everything
- * syms      — array of symbols to search
- * n         — number of entries in syms
- * uri       — document URI to embed in each Location result
- * container — name of the parent symbol, or NULL at the top level
- * arr       — JSON array to append matching entries to
+ * @param doc        Destination mutable JSON document.
+ * @param query      Case-insensitive substring filter; `""` matches
+ *                   everything.
+ * @param syms       Sibling symbols to search.
+ * @param n          Length of @p syms.
+ * @param uri        Document URI to embed in each Location result.
+ * @param container  Name of the parent symbol, or NULL at the top level.
+ * @param arr        SymbolInformation[] array to append matches to.
  */
 static void collect_recursive(yyjson_mut_doc *doc, const char *query,
                                DocSymbol *const *syms, int n,

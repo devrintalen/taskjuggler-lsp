@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/** @file */
+
 #include "semantic_tokens.h"
 #include "grammar.tab.h"
 
@@ -41,6 +43,7 @@
  * sync with the SEMTOK_TYPE_* defines in semantic_tokens.h.
  */
 
+/** Token-type names indexed by SEMTOK_TYPE_*. */
 const char * const semantic_token_type_names[] = {
     "keyword",   /* SEMTOK_TYPE_KEYWORD  = 0 */
     "comment",   /* SEMTOK_TYPE_COMMENT  = 1 */
@@ -49,19 +52,30 @@ const char * const semantic_token_type_names[] = {
     "variable",  /* SEMTOK_TYPE_VARIABLE = 4 */
     "function",  /* SEMTOK_TYPE_FUNCTION = 5 */
 };
+/** Length of #semantic_token_type_names. */
 const int num_semantic_token_types =
     (int)(sizeof(semantic_token_type_names) / sizeof(semantic_token_type_names[0]));
 
+/** Token-modifier names indexed by bit position. */
 const char * const semantic_token_modifier_names[] = {
     "declaration",  /* SEMTOK_MOD_DECLARATION = bit 0 */
 };
+/** Length of #semantic_token_modifier_names. */
 const int num_semantic_token_modifiers =
     (int)(sizeof(semantic_token_modifier_names) / sizeof(semantic_token_modifier_names[0]));
 
-/* ── Token classification ─────────────────────────────────────────────────── *
+/* ── Token classification ─────────────────────────────────────────────────── */
+
+/**
+ * Map a token kind to a (type, modifiers) pair for semantic highlighting.
  *
- * Maps a token kind to a (type, modifiers) pair.
- * Returns 1 if the token should be highlighted, 0 if it should be skipped.
+ * @param kind            Token kind (TK_* / KW_*).
+ * @param out_type        Receives the SEMTOK_TYPE_* value when the token is
+ *                        highlighted.
+ * @param out_modifiers   Receives the SEMTOK_MOD_* bitmask (always set;
+ *                        zero when no modifiers apply).
+ * @return 1 when the token should be highlighted, 0 when it should be
+ *         skipped.
  */
 static int classify(int kind, int *out_type, int *out_modifiers) {
     *out_modifiers = 0;
@@ -120,9 +134,20 @@ static int classify(int kind, int *out_type, int *out_modifiers) {
 
 /* ── Delta-encoded data emission ─────────────────────────────────────────── */
 
-/* Append one five-integer entry to the flat buffer.  Zero-length entries are
- * silently dropped; they arise at the end of a multi-line token when the
- * closing delimiter sits at the very start of a line. */
+/**
+ * Append one five-integer entry to the flat buffer.  Zero-length entries
+ * are silently dropped; they arise at the end of a multi-line token when
+ * the closing delimiter sits at the very start of a line.
+ *
+ * @param buf          Destination buffer with room for at least 5 more
+ *                     uint32 slots.
+ * @param count        Current entry count; advanced by 5 on append.
+ * @param delta_line   Lines since the previous entry.
+ * @param delta_start  Start-column delta.
+ * @param length       Highlight length.
+ * @param token_type   SEMTOK_TYPE_* value.
+ * @param modifiers    SEMTOK_MOD_* bitmask.
+ */
 static void push_entry(uint32_t *buf, int *count,
                         uint32_t delta_line, uint32_t delta_start,
                         uint32_t length,
@@ -135,14 +160,30 @@ static void push_entry(uint32_t *buf, int *count,
     buf[(*count)++] = (uint32_t)modifiers;
 }
 
-/* Emit one or more data entries for a single token, splitting across source
- * lines when necessary.  prev_line and prev_char are updated after each
- * entry so that subsequent tokens encode their deltas correctly.
+/**
+ * Emit one or more data entries for a single token, splitting across
+ * source lines when necessary.
  *
  * For multi-line tokens the text field is walked character by character to
  * find per-line lengths.  The text begins at the token's start column in
- * the source, so the character count up to each '\n' is the highlight length
- * for that line without any further adjustment.
+ * the source, so the character count up to each `\n` is the highlight
+ * length for that line without any further adjustment.
+ *
+ * @param buf         Destination flat buffer.
+ * @param count       Current entry count; advanced as entries are pushed.
+ * @param start_line  Token start line.
+ * @param start_char  Token start character.
+ * @param end_line    Token end line.
+ * @param end_char    Token end character.
+ * @param token_type  SEMTOK_TYPE_* value.
+ * @param modifiers   SEMTOK_MOD_* bitmask.
+ * @param text        Token lexeme (used to split multi-line tokens by
+ *                    `\n`).
+ * @param prev_line   Tracks the previous emitted entry's line; updated as
+ *                    entries are pushed so subsequent tokens encode their
+ *                    deltas correctly.
+ * @param prev_char   Tracks the previous emitted entry's column; updated
+ *                    in lockstep with @p prev_line.
  */
 static void emit_token(uint32_t *buf, int *count,
                         uint32_t start_line, uint32_t start_char,
@@ -204,8 +245,14 @@ static void emit_token(uint32_t *buf, int *count,
 
 /* ── Integer serialization ───────────────────────────────────────────────── */
 
-/* Write the decimal representation of val into buf and return the number of
- * bytes written.  Avoids sprintf overhead; val=0 emits a single '0'. */
+/**
+ * Write the decimal representation of @p val into @p buf.  Avoids sprintf
+ * overhead; `val == 0` emits a single '0'.
+ *
+ * @param buf  Destination with at least 10 bytes of space.
+ * @param val  Value to serialise.
+ * @return Number of bytes written to @p buf.
+ */
 static int write_uint32(char *buf, uint32_t val) {
     if (val == 0) { buf[0] = '0'; return 1; }
     char tmp[10];
@@ -217,14 +264,6 @@ static int write_uint32(char *buf, uint32_t val) {
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
-/* Build the {"data": [...]} response object for textDocument/semanticTokens/full.
- * Iterates tok_spans, classifies each token, and emits delta-encoded entries.
- *
- * doc             — the mutable JSON document that will own the returned value
- * spans           — token span array from the ParseResult
- * num_spans       — number of entries in spans
- * num_sem_entries — upper bound on push_entry calls (precomputed during lexing)
- */
 yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
                                             const TokenSpan *spans, int num_spans,
                                             int num_sem_entries) {
