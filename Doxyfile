@@ -32,5 +32,10 @@ QUIET                  = YES
 WARN_IF_UNDOCUMENTED   = YES
 WARN_NO_PARAMDOC       = YES
 
-# Set HAVE_DOT = YES (and install graphviz) to enable call/caller graphs.
-HAVE_DOT               = NO
+# Requires graphviz to be installed (provides the `dot` binary).
+HAVE_DOT               = YES
+CALL_GRAPH             = YES
+CALLER_GRAPH           = YES
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+DOT_GRAPH_MAX_NODES    = 100

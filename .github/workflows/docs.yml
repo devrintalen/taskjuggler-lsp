@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt update
-      - run: sudo apt install -y doxygen
+      - run: sudo apt install -y doxygen graphviz
       - name: make docs
         run: make docs
       - uses: actions/configure-pages@v5
