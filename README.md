@@ -1,5 +1,7 @@
 # taskjuggler-lsp
 
+[![Documentation Status](https://readthedocs.org/projects/taskjuggler-lsp/badge/?version=latest)](https://taskjuggler-lsp.readthedocs.io/en/latest/?badge=latest)
+
 A [Language Server Protocol][] (LSP) server for [TaskJuggler][], written in C.
 
 ![A video showing some of the basic features of taskjuggler-lsp in Emacs lsp-mode](screenshots/overview.gif)
