@@ -7,7 +7,7 @@ PROJECT_NAME           = "taskjuggler-lsp"
 PROJECT_NUMBER         = 0.5.2
 PROJECT_BRIEF          = "Language Server Protocol implementation for TaskJuggler v3"
 
-OUTPUT_DIRECTORY       = docs
+OUTPUT_DIRECTORY       = doc/_doxygen
 INPUT                  = src README.md
 FILE_PATTERNS          = *.c *.h
 RECURSIVE              = NO
@@ -36,6 +36,12 @@ REFERENCES_RELATION    = YES
 GENERATE_HTML          = YES
 GENERATE_TREEVIEW      = YES
 GENERATE_LATEX         = NO
+
+# XML output is consumed by Breathe to render API documentation
+# into the Sphinx site published on Read the Docs.
+GENERATE_XML           = YES
+XML_OUTPUT             = xml
+XML_PROGRAMLISTING     = YES
 
 QUIET                  = YES
 WARN_IF_UNDOCUMENTED   = YES

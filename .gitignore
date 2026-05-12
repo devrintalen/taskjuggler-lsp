@@ -10,6 +10,6 @@
 /lexer-test
 /grammar-test
 /test/large_*.tjp
-/docs/
 /doc/_build/
+/doc/_doxygen/
 doxygen.warnings.log
