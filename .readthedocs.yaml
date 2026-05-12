@@ -7,6 +7,12 @@ build:
   os: ubuntu-22.04
   tools:
     python: "3.12"
+  apt_packages:
+    - doxygen
+    - graphviz
+  jobs:
+    pre_build:
+      - doxygen Doxyfile
 
 sphinx:
   configuration: doc/conf.py

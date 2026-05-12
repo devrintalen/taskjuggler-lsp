@@ -84,6 +84,6 @@ docs:
 	doxygen Doxyfile
 
 docs-clean:
-	rm -rf docs/
+	rm -rf doc/_doxygen/
 
 .PHONY: all debug clean lexer-test docs docs-clean
