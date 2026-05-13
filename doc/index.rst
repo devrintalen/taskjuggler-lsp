@@ -13,6 +13,7 @@ from the source code.
 
    installation
    usage
+   performance
    api
 
 .. _TaskJuggler: https://taskjuggler.org/
