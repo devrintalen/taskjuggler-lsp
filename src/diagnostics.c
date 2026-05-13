@@ -18,18 +18,7 @@
 
 /** @file */
 
-/*
- * diagnostics.c — diagnostic accumulation and LSP diagnostic delivery
- *
- * This file provides:
- *
- *   1. push_diagnostic() — appends a diagnostic to ParseResult during or
- *      after parsing.  Called from grammar.y error rules (syntax errors)
- *      and from parser.c:resolve_dep_refs() (semantic errors).
- *
- *   2. publish_diagnostics() — sends the textDocument/publishDiagnostics
- *      LSP notification to the editor so errors and warnings appear inline.
- */
+/* See doc/modules/diagnostics.rst for the module overview. */
 
 #include "diagnostics.h"
 #include "parser.h"
