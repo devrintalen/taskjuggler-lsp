@@ -15,6 +15,7 @@ from the source code.
    usage
    lsp_coverage
    performance
+   modules/index
    api
 
 .. _TaskJuggler: https://taskjuggler.org/
