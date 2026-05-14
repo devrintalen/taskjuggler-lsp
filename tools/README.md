@@ -16,8 +16,7 @@ pipeline, and profiling workflow.
 | `lsp_record_bench.py`   | Run all `test/session_*.json` fixtures and append a record to `benchmarks.jsonl`         |
 | `lsp_test.py`           | Golden-file test harness                                                                 |
 
-See `doc/performance.rst` (rendered as the [Performance Testing][perf-docs]
-page on the Sphinx site) for the full benchmark pipeline, fixture
-catalogue, and per-tool reference.
+See `doc/performance.rst` for the full benchmark pipeline, fixture
+ catalogue, and per-tool reference.
 
 [perf-docs]: https://taskjuggler-lsp.readthedocs.io/en/latest/performance.html

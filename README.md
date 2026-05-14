@@ -6,28 +6,29 @@ A [Language Server Protocol][] (LSP) server for [TaskJuggler][], written in C.
 
 ![A video showing some of the basic features of taskjuggler-lsp in Emacs lsp-mode](screenshots/overview.gif)
 
+A **language server** is a background program that gives editors
+language-aware features — completion, hover docs, go-to-definition,
+find-references, diagnostics, rename, etc. — without each editor
+having to reimplement them.
+
+The server talks to the editor over the [Language Server Protocol
+(LSP)][LSP Specification]. The editor sends events like "user opened
+this file" or "cursor is here"; the server parses the code, maintains
+its own model of the workspace, and replies with structured results
+the editor renders.
+
+This program implements that for TaskJuggler.
+
 ## Features
 
-| Feature            | Method                                          | Status          | Notes                                                                                                                                                                   |
-|--------------------|-------------------------------------------------|-----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Lifecycle          | `initialize` / `shutdown` / `exit`              | Implemented     | Negotiates capabilities on init                                                                                                                                         |
-| Document Sync      | `textDocument/didOpen`, `didChange`, `didClose` | Implemented     | Incremental sync; editor content is authoritative; closing a file reloads it from disk as a background entry                                                            |
-| File Watching      | `workspace/didChangeWatchedFiles`               | Implemented     | Registers watchers for `**/*.tjp` and `**/*.tji`; performs an initial workspace scan on startup; follows `include` directives transitively; watcher events are ignored for files the editor has open |
-| File Rename        | `workspace/didRenameFiles`                      | Implemented     | Updates the document store when `.tjp`/`.tji` files are renamed                                                                                                         |
-| Diagnostics        | `textDocument/publishDiagnostics`               | Implemented     | Reports unresolved `depends`/`precedes` targets as errors; out-of-scope relative refs as warnings; cross-file validation                                                |
-| Hover              | `textDocument/hover`                            | Implemented     | Markdown docs for 39 TaskJuggler keywords; hovering over a resolved dependency shows the target symbol's kind, id, and name                                             |
-| Completion         | `textDocument/completion`                       | Implemented     | Context-aware keyword and identifier suggestions; supports hierarchical and relative (`!`) references; absolute references include identifiers from all open files       |
-| Signature Help     | `textDocument/signatureHelp`                    | Implemented     | Parameter descriptions for 39 keywords                                                                                                                                  |
-| Document Symbols   | `textDocument/documentSymbol`                   | Implemented     | Hierarchical symbol tree for projects, tasks, resources, accounts, shifts                                                                                               |
-| Workspace Symbols  | `workspace/symbol`                              | Implemented     | Case-insensitive substring search across all open and background-loaded files                                                                                           |
-| Go to Definition   | `textDocument/definition`                       | Implemented     | Jumps to task declaration from `depends`/`precedes` reference; cross-file                                                                                               |
-| Find References    | `textDocument/references`                       | Implemented     | Finds all `depends`/`precedes` references to a task across the whole workspace; trigger from the task's declaration identifier                                          |
-| Document Highlight | `textDocument/documentHighlight`                | Implemented     | Highlights all occurrences of the symbol under the cursor within the document                                                                                           |
-| Folding Ranges     | `textDocument/foldingRange`                     | Implemented     | Folds brace-delimited blocks (`{}`), macro bodies (`[]`), and multi-line block comments                                                                                 |
-| Semantic Tokens    | `textDocument/semanticTokens/full`              | Implemented     | Syntax highlighting for keywords, identifiers, strings, numbers, dates, and comments                                                                                    |
-| Rename             | `textDocument/rename`                           | Not implemented |                                                                                                                                                                         |
-| Code Actions       | `textDocument/codeAction`                       | Not implemented |                                                                                                                                                                         |
-| Formatting         | `textDocument/formatting`                       | Not implemented |                                                                                                                                                                         |
+- Diagnostics: unresolved `depends`/`precedes` targets, out-of-scope relative refs, cross-file validation
+- Hover and signature help for 39 TaskJuggler keywords
+- Context-aware completion of keywords and identifiers, including hierarchical and relative (`!`) references
+- Document and workspace symbols across all open and background-loaded files
+- Go to definition and find references for `depends`/`precedes`, cross-file
+- Document highlight, folding ranges, and semantic-token syntax highlighting
+- Incremental document sync, file watching for `**/*.tjp` and `**/*.tji`, and rename tracking
+- Transitive workspace loading via `include` directives
 
 ## Dependencies
 
@@ -81,50 +82,55 @@ Test cases live under `test/cases/`. Each is a directory containing
 `input.json` (the message sequence to send) and `expected.json` (the
 golden output).
 
+## Documentation
+
+The published site at
+<https://taskjuggler-lsp.readthedocs.io/> is built with
+[Sphinx][] from the sources under `doc/`, with the API reference
+section pulled in from [Doxygen][] XML via [Breathe][]. Both layers
+can be built locally.
+
+### Doxygen API reference
+
+`doxygen` reads `Doxyfile` at the repo root and writes HTML and XML
+output under `doc/_doxygen/`. The XML tree (`doc/_doxygen/xml/`) is
+also what the Sphinx build consumes.
+
+```sh
+make docs           # equivalent to: doxygen Doxyfile
+make docs-clean     # remove doc/_doxygen/
+```
+
+Open `doc/_doxygen/html/index.html` to view the API reference on its
+own.
+
+### Sphinx site
+
+The Sphinx configuration lives in `doc/conf.py`. Python dependencies
+are pinned in `doc/requirements.txt`:
+
+```sh
+pip install -r doc/requirements.txt
+```
+
+The Sphinx build depends on the Doxygen XML output, so run `make docs`
+first (or whenever the C sources change), then run `sphinx-build`:
+
+```sh
+make docs
+sphinx-build doc doc/_build/html
+```
+
+Open `doc/_build/html/index.html` to view the full site.
+
 ## Usage
 
 Configure your editor to launch `taskjuggler-lsp` as the language
 server for `.tjp` and `.tji` files. The server communicates over
 standard input/output using the LSP JSON-RPC protocol.
 
-In Emacs, which I use with `lsp-mode`, this looks like this:
-
-```emacs-lisp
-
-  (use-package lsp-mode
-    :init
-    (setq lsp-keymap-prefix "C-c l")
-    (setq lsp-semantic-tokens-enable t)
-    (setq lsp-log-io t)
-    :hook ((taskjuggler-mode . lsp))
-    :commands lsp
-    :config
-    (setq lsp-completion-no-cache t))
-
-  (use-package lsp-ui
-    :hook (lsp-mode . lsp-ui-mode)
-    :config
-    (setq lsp-ui-doc-show-with-cursor t))
-
-  (with-eval-after-load 'lsp-mode
-    (lsp-register-client
-     (make-lsp-client
-      :new-connection (lsp-stdio-connection
-  		     "/path/to/taskjuggler-lsp/taskjuggler-lsp")
-      :major-modes '(taskjuggler-mode)
-      :server-id 'taskjuggler-lsp)))
-
-```
-
-`lsp-completion-no-cache t` is recommended so that dependency
-completions refresh correctly when the user types additional `!`
-characters. Each extra `!` widens the reference scope rather than
-narrowing the list, so lsp-mode's same-session cache would otherwise
-keep the previous (narrower) result set and hide the newly relevant
-items.
-
-This initialization code depends on [`taskjuggler-mode.el`][], which
-is an Emacs major mode for TaskJuggler that I am working on.
+See `doc/usage.rst` for more details on integrating with specific
+IDEs.
 
 ## License
 
@@ -151,3 +157,7 @@ test fixture under the terms of the GPLv2.
 [Language Server Protocol]: https://microsoft.github.io/language-server-protocol/
 [TaskJuggler]: https://taskjuggler.org/
 [`taskjuggler-mode.el`]: https://github.com/devrintalen/taskjuggler-mode.el
+[Sphinx]: https://www.sphinx-doc.org/
+[Doxygen]: https://www.doxygen.nl/
+[Breathe]: https://breathe.readthedocs.io/
+[LSP Specification]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/

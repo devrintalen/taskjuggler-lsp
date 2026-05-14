@@ -13,6 +13,7 @@ from the source code.
 
    installation
    usage
+   lsp_coverage
    performance
    api
 
