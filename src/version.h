@@ -28,5 +28,5 @@
 
 #define VERSION_MAJOR 0           /**< Major component of the server version. */
 #define VERSION_MINOR 5           /**< Minor component of the server version. */
-#define VERSION_PATCH 2           /**< Patch component of the server version. */
-#define VERSION_STRING "0.5.2"    /**< Dotted version string reported to clients. */
+#define VERSION_PATCH 3           /**< Patch component of the server version. */
+#define VERSION_STRING "0.5.3"    /**< Dotted version string reported to clients. */

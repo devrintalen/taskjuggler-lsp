@@ -1,7 +1,7 @@
 project = "taskjuggler-lsp"
 author = "Devrin Talen"
 copyright = "2026, Devrin Talen"
-release = "0.5.2"
+release = "0.5.3"
 
 extensions = ["breathe"]
 exclude_patterns = ["_build", "_doxygen", "Thumbs.db", ".DS_Store"]
