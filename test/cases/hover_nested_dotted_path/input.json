@@ -1,0 +1,44 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/project.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "project p \"P\" 2026-01-01 +3m {\n  task foo \"Foo\" {\n    task bar \"Bar\" {\n      task design \"Design\" {}\n    }\n  }\n  task build \"Build\" {\n    depends foo.bar.design\n  }\n}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "textDocument/hover",
+    "params": {
+      "textDocument": { "uri": "file:///test/project.tjp" },
+      "position": { "line": 7, "character": 22 }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "shutdown",
+    "params": {}
+  }
+]
