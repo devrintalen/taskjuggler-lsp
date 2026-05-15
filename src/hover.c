@@ -148,6 +148,40 @@ ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos 
     return (ActiveKeyword){ NULL, {{0,0},{0,0}} };
 }
 
+/* ── sym_qualified_id ────────────────────────────────────────────────────── */
+
+char *sym_qualified_id(const DocSymbol *sym) {
+    if (!sym || !sym->id) return strdup("");
+
+    const DocSymbol *chain[64];
+    int depth = 0;
+    for (const DocSymbol *s = sym;
+         s != NULL && depth < (int)(sizeof(chain) / sizeof(chain[0]));
+         s = s->parent) {
+        if (s->keyword == sym->keyword && s->id && s->id[0])
+            chain[depth++] = s;
+    }
+
+    if (depth == 0) return strdup(sym->id);
+
+    size_t total = 0;
+    for (int i = 0; i < depth; i++) total += strlen(chain[i]->id);
+    total += (size_t)(depth - 1);
+
+    char *out = malloc(total + 1);
+    if (!out) return strdup(sym->id);
+
+    char *p = out;
+    for (int i = depth - 1; i >= 0; i--) {
+        size_t len = strlen(chain[i]->id);
+        memcpy(p, chain[i]->id, len);
+        p += len;
+        if (i > 0) *p++ = '.';
+    }
+    *p = '\0';
+    return out;
+}
+
 /* ── keyword_docs ────────────────────────────────────────────────────────── *
  *
  * Returns a Markdown documentation string for a keyword, or NULL if the

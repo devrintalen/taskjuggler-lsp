@@ -79,6 +79,20 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
                   uint32_t *out_depth);
 
 /**
+ * Build the fully qualified, dot-separated id of @p sym by walking up the
+ * parent chain and collecting ids of ancestors that share the same
+ * `keyword` kind.  For example, a task `design` nested inside task `bar`
+ * inside task `foo` yields `"foo.bar.design"`.  Ancestors of a different
+ * kind (such as the enclosing `project`) are skipped, matching TJP
+ * dotted-path semantics.
+ *
+ * @param sym  Target symbol.  May be NULL.
+ * @return Heap-allocated dotted id (empty string if @p sym or its id is
+ *         NULL).  Caller must free.
+ */
+char *sym_qualified_id(const DocSymbol *sym);
+
+/**
  * Return Markdown documentation for a TJP keyword, or NULL if unknown.
  *
  * @param kw  Keyword text (e.g. `"task"`, `"depends"`).

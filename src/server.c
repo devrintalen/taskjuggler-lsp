@@ -1316,14 +1316,14 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
         const DocSymbol *sym = hover_link->target;
         if (!sym) goto keyword_hover;
 
-        /* Build: "**<Kind> `<id>`** — <name>" */
+        /* Build: "**<Kind> `<dotted.id>`** — <name>" */
         const char *label    = sym_kind_label(sym->keyword);
-        const char *sym_id   = sym->id ? sym->id : "";
+        char       *sym_id   = sym_qualified_id(sym);
         const char *sym_name = sym->name   ? sym->name   : "";
-        /* Stack buffer — label(≤8) + id + name + 32 bytes punctuation */
         char hover_text[512];
         snprintf(hover_text, sizeof(hover_text),
                  "**%s `%s`** \xe2\x80\x94 %s", label, sym_id, sym_name);
+        free(sym_id);
 
         yyjson_mut_val *contents = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_str(doc, contents, "kind",  "markdown");
