@@ -109,11 +109,11 @@
       },
       "range": {
         "start": {
-          "line": 7,
+          "line": 10,
           "character": 12
         },
         "end": {
-          "line": 7,
+          "line": 10,
           "character": 26
         }
       }
@@ -122,6 +122,26 @@
   {
     "jsonrpc": "2.0",
     "id": 3,
+    "result": {
+      "contents": {
+        "kind": "markdown",
+        "value": "**Task `foo.bar.design`** \u2014 \"Design\""
+      },
+      "range": {
+        "start": {
+          "line": 5,
+          "character": 17
+        },
+        "end": {
+          "line": 5,
+          "character": 23
+        }
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
     "result": null
   }
 ]

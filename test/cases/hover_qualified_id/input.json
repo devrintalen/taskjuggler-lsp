@@ -22,7 +22,7 @@
         "uri": "file:///test/project.tjp",
         "languageId": "taskjuggler",
         "version": 1,
-        "text": "project p \"P\" 2026-01-01 +3m {\n  task foo \"Foo\" {\n    task bar \"Bar\" {\n      task design \"Design\" {}\n    }\n  }\n  task build \"Build\" {\n    depends foo.bar.design\n  }\n}\n"
+        "text": "project p \"P\" 2026-01-01 +3m {\n  task foo \"Foo\" {\n    task bar \"Bar\" {\n      task design \"Design\" {}\n      task other \"Other\" {\n        depends !design\n      }\n    }\n  }\n  task build \"Build\" {\n    depends foo.bar.design\n  }\n}\n"
       }
     }
   },
@@ -32,12 +32,21 @@
     "method": "textDocument/hover",
     "params": {
       "textDocument": { "uri": "file:///test/project.tjp" },
-      "position": { "line": 7, "character": 22 }
+      "position": { "line": 10, "character": 22 }
     }
   },
   {
     "jsonrpc": "2.0",
     "id": 3,
+    "method": "textDocument/hover",
+    "params": {
+      "textDocument": { "uri": "file:///test/project.tjp" },
+      "position": { "line": 5, "character": 19 }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
     "method": "shutdown",
     "params": {}
   }
