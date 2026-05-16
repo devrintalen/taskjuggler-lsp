@@ -62,12 +62,6 @@ static int tokens_equal(const uint32_t *a, const uint32_t *b) {
  * deletions at the same a-position become a single EditOp.
  */
 
-/** Append a single op kind to the raw script buffer. */
-static inline void raw_push(int *kinds, size_t *n, int kind) {
-    kinds[*n] = kind;
-    (*n)++;
-}
-
 /**
  * Compute the minimal edit script from sequence @p a (length @p na
  * tokens) to sequence @p b (length @p nb tokens) using Myers' diff,
@@ -77,45 +71,22 @@ static inline void raw_push(int *kinds, size_t *n, int kind) {
  * @p b_offset so the caller can position the edits inside larger
  * surrounding buffers (after prefix/suffix trimming).
  *
- * @return 0 on success.  Always succeeds: when @p na + @p nb exceeds
- *         #D_BOUND a single replace-everything edit is emitted.
+ * When @p na + @p nb exceeds #D_BOUND the algorithm falls back to a
+ * single replace-everything edit to bound snapshot memory.
  */
-static int myers_diff_run(const uint32_t *a, size_t na,
-                          const uint32_t *b, size_t nb,
-                          size_t a_offset, size_t b_offset,
-                          EditOp **out_ops, size_t *out_n_ops) {
-    /* Degenerate cases short-circuit the algorithm. */
+static void myers_diff_run(const uint32_t *a, size_t na,
+                           const uint32_t *b, size_t nb,
+                           size_t a_offset, size_t b_offset,
+                           EditOp **out_ops, size_t *out_n_ops) {
+    /* Trivial: nothing on either side. */
     if (na == 0 && nb == 0) {
         *out_ops   = NULL;
         *out_n_ops = 0;
-        return 0;
+        return;
     }
-    if (na == 0) {
-        EditOp *op = malloc(sizeof(EditOp));
-        op->start_tok      = a_offset;
-        op->delete_tok     = 0;
-        op->insert_b_start = b_offset;
-        op->insert_tok     = nb;
-        *out_ops   = op;
-        *out_n_ops = 1;
-        return 0;
-    }
-    if (nb == 0) {
-        EditOp *op = malloc(sizeof(EditOp));
-        op->start_tok      = a_offset;
-        op->delete_tok     = na;
-        op->insert_b_start = b_offset;
-        op->insert_tok     = 0;
-        *out_ops   = op;
-        *out_n_ops = 1;
-        return 0;
-    }
-
-    size_t max_total = na + nb;
-
-    /* Avoid pathological memory use on huge unrelated buffers.  The fallback
-     * is still a valid (just non-minimal) edit: replace the whole middle. */
-    if (max_total > D_BOUND) {
+    /* Trivial: one side empty, or input too large for Myers — emit one
+     * replace edit covering the whole middle. */
+    if (na == 0 || nb == 0 || na + nb > D_BOUND) {
         EditOp *op = malloc(sizeof(EditOp));
         op->start_tok      = a_offset;
         op->delete_tok     = na;
@@ -123,17 +94,17 @@ static int myers_diff_run(const uint32_t *a, size_t na,
         op->insert_tok     = nb;
         *out_ops   = op;
         *out_n_ops = 1;
-        return 0;
+        return;
     }
 
-    int max_total_i = (int)max_total;
-    size_t v_len = 2 * max_total + 1;
+    int max_total_i = (int)(na + nb);
+    size_t v_len = (size_t)(2 * max_total_i + 1);
     int *v = calloc(v_len, sizeof(int));
 
     /* Snapshot storage: snapshot d has d+1 entries starting at d*(d+1)/2.
      * Total = max_total * (max_total + 1) / 2 (snapshots 0..max_total-1). */
-    size_t snap_total = max_total * (max_total + 1) / 2;
-    int *snap = calloc(snap_total > 0 ? snap_total : 1, sizeof(int));
+    size_t snap_total = (size_t)max_total_i * (size_t)(max_total_i + 1) / 2;
+    int *snap = calloc(snap_total, sizeof(int));
 
     int d_found = -1;
     int x_final = 0, y_final = 0;
@@ -174,11 +145,21 @@ static int myers_diff_run(const uint32_t *a, size_t na,
 found:
     free(v);
 
+    /* d_found == 0 means the entire middle was a single snake — no edits.
+     * d_found < 0 is unreachable (the loop terminates by d = max_total_i
+     * at the latest) but guarding here lets the compiler narrow the range
+     * for the ops allocation below. */
+    if (d_found <= 0) {
+        free(snap);
+        *out_ops   = NULL;
+        *out_n_ops = 0;
+        return;
+    }
+
     /* Backtrace: walk from (x_final, y_final) at d_found down to (0, 0),
      * recording each step as a snake/delete/insert.  Steps are recorded
      * in reverse chronological order. */
-    size_t raw_cap = na + nb;
-    int   *raw_kinds = malloc((raw_cap > 0 ? raw_cap : 1) * sizeof(int));
+    int   *raw_kinds = malloc((na + nb) * sizeof(int));
     size_t n_raw     = 0;
 
     int x = x_final, y = y_final;
@@ -208,21 +189,21 @@ found:
         /* Snake from (x, y) back to (x_edge, y_edge). */
         while (x > x_edge && y > y_edge) {
             x--; y--;
-            raw_push(raw_kinds, &n_raw, 0);
+            raw_kinds[n_raw++] = 0;
         }
         /* Single edit step from (x_edge, y_edge) back to (x_prev, y_prev). */
         if (down) {
             y--;
-            raw_push(raw_kinds, &n_raw, 2);
+            raw_kinds[n_raw++] = 2;
         } else {
             x--;
-            raw_push(raw_kinds, &n_raw, 1);
+            raw_kinds[n_raw++] = 1;
         }
     }
     /* Leading snake from (0, 0) up to wherever the d=0 path landed. */
     while (x > 0 && y > 0) {
         x--; y--;
-        raw_push(raw_kinds, &n_raw, 0);
+        raw_kinds[n_raw++] = 0;
     }
 
     free(snap);
@@ -231,7 +212,7 @@ found:
      * recorded order) and group consecutive non-snake ops into a single
      * EditOp.  Snakes advance the running position in both a and b but
      * close any open edit run. */
-    EditOp *ops = malloc(((size_t)d_found > 0 ? (size_t)d_found : 1) * sizeof(EditOp));
+    EditOp *ops = malloc((size_t)d_found * sizeof(EditOp));
     size_t n_ops = 0;
     size_t cur_x = 0, cur_y = 0;
     size_t idx = n_raw;
@@ -266,7 +247,6 @@ found:
 
     *out_ops   = ops;
     *out_n_ops = n_ops;
-    return 0;
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
