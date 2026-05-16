@@ -1,0 +1,45 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/sample.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "project prj \"P\" 2024-01-01 +6m {\n}\ntask a \"Start + length (working days)\" {\n  start 2024-01-15\n  length 5d\n}\ntask b \"Start + duration (calendar days)\" {\n  start 2024-01-15\n  duration 5d\n}\ntask c \"End + length (compute start)\" {\n  end 2024-01-19\n  length 5d\n}\ntask d \"No endpoint, no lens\" {\n  length 5d\n}\ntask e \"Hours unit\" {\n  start 2024-01-15\n  length 4h\n}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "textDocument/codeLens",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/sample.tjp"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "shutdown",
+    "params": {}
+  }
+]

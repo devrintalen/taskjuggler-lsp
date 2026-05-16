@@ -35,6 +35,7 @@
 #include "semantic_tokens.h"
 #include "semantic_tokens_delta.h"
 #include "workspace_symbol.h"
+#include "code_lens.h"
 #include "version.h"
 
 #include <yyjson.h>
@@ -789,6 +790,9 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_obj_add_val(doc,  caps, "textDocumentSync",          tds);
     yyjson_mut_obj_add_bool(doc, caps, "documentSymbolProvider",    true);
     yyjson_mut_obj_add_bool(doc, caps, "foldingRangeProvider",      true);
+    yyjson_mut_val *code_lens_opts = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_bool(doc, code_lens_opts, "resolveProvider", false);
+    yyjson_mut_obj_add_val(doc,  caps, "codeLensProvider",          code_lens_opts);
     yyjson_mut_obj_add_bool(doc, caps, "hoverProvider",             true);
     yyjson_mut_obj_add_bool(doc, caps, "definitionProvider",        true);
     yyjson_mut_obj_add_bool(doc, caps, "referencesProvider",        true);
@@ -1261,6 +1265,38 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
                                                      d->parse.num_tok_spans,
                                                      d->parse.doc_symbols,
                                                      d->parse.num_doc_symbols);
+    return make_response(doc, id, arr);
+}
+
+/**
+ * Handle `textDocument/codeLens`.
+ *
+ * Returns code lenses derived from token-level analysis: a hint above
+ * each `length` / `duration` keyword whose enclosing task carries an
+ * explicit `start` or `end` date.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri`.
+ * @return The JSON-RPC response.
+ */
+static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
+                                         yyjson_val *params) {
+    const char *uri = NULL;
+    if (params) {
+        yyjson_val *td = yyjson_obj_get(params, "textDocument");
+        if (td) uri = json_str(td, "uri");
+    }
+    if (!uri) return make_response(doc, id, yyjson_mut_null(doc));
+
+    Document *d = doc_find(uri);
+    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
+
+    yyjson_mut_val *arr = build_code_lens_json(doc,
+                                                d->parse.tok_spans,
+                                                d->parse.num_tok_spans,
+                                                d->parse.doc_symbols,
+                                                d->parse.num_doc_symbols);
     return make_response(doc, id, arr);
 }
 
@@ -1786,6 +1822,9 @@ char *server_process(const char *json_text) {
 
     } else if (strcmp(m, "textDocument/foldingRange") == 0) {
         resp = handle_folding_range(out_doc, id_item, params);
+
+    } else if (strcmp(m, "textDocument/codeLens") == 0) {
+        resp = handle_code_lens(out_doc, id_item, params);
 
     } else if (strcmp(m, "textDocument/hover") == 0) {
         resp = handle_hover(out_doc, id_item, params);

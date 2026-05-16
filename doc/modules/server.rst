@@ -77,13 +77,15 @@ fan-out of feature handlers:
        folding_range → ``build_folding_ranges_json()`` (brackets, comments);
        semantic_tokens → ``compute_semantic_tokens_data()`` + ``build_semantic_tokens_json_from_buf()``;
        semantic_tokens_delta → ``build_semantic_tokens_delta_json()``;
-       document_highlight → ``build_document_highlight_json()``
+       document_highlight → ``build_document_highlight_json()``;
+       code_lens → ``build_code_lens_json()``
    * - ``doc_symbols[]``
      - document_symbol → ``build_document_symbols_json()``;
        workspace_symbol → ``collect_workspace_symbols()``;
        completion → ``build_completions_json()`` (IDs);
        folding_range → ``build_folding_ranges_json()`` (brace blocks);
-       document_highlight → ``build_document_highlight_json()``
+       document_highlight → ``build_document_highlight_json()``;
+       code_lens → ``build_code_lens_json()``
    * - ``def_links[]`` (on ``DocSymbol``)
      - definition → ``build_definition_json()``;
        hover → resolved-ref hover (primary path)
