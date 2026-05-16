@@ -33,12 +33,14 @@
 #include "signature.h"
 #include "completion.h"
 #include "semantic_tokens.h"
+#include "semantic_tokens_delta.h"
 #include "workspace_symbol.h"
 #include "version.h"
 
 #include <yyjson.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +60,13 @@ typedef struct {
     ParseResult parse;                /**< parse output for the current text */
     char       *doc_symbols_json;     /**< cached documentSymbol JSON array; NULL = invalid */
     size_t      doc_symbols_json_len; /**< byte length of doc_symbols_json (excluding NUL) */
+    /* Last semantic-tokens response sent to the client.  Retained across
+     * revalidations so semanticTokens/full/delta requests can diff against
+     * exactly what the client is holding.  NULL until the client makes its
+     * first semanticTokens request. */
+    uint32_t   *sem_tokens_data;
+    size_t      sem_tokens_count;     /**< entries in sem_tokens_data (multiple of 5) */
+    char       *sem_tokens_result_id; /**< resultId returned alongside the data */
     int         in_use;               /**< 1 if this slot holds a live document */
     int         disk_only;            /**< 1 = loaded from disk/watcher, not opened by editor */
 } Document;
@@ -147,6 +156,8 @@ static void doc_free(Document *d) {
     free(d->uri);
     free(d->text);
     free(d->doc_symbols_json);
+    free(d->sem_tokens_data);
+    free(d->sem_tokens_result_id);
     parse_result_free(&d->parse);
     memset(d, 0, sizeof(*d));
 }
@@ -770,7 +781,9 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_obj_add_val(doc, sem_legend, "tokenModifiers", sem_mods);
     yyjson_mut_val *sem_opts = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc,  sem_opts, "legend", sem_legend);
-    yyjson_mut_obj_add_bool(doc, sem_opts, "full",   true);
+    yyjson_mut_val *sem_full = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_bool(doc, sem_full, "delta", true);
+    yyjson_mut_obj_add_val(doc, sem_opts, "full", sem_full);
     /* TODO: add "range": true when textDocument/semanticTokens/range is implemented */
 
     yyjson_mut_obj_add_val(doc,  caps, "textDocumentSync",          tds);
@@ -1402,9 +1415,42 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
 }
 
 /**
+ * Monotonic counter used to mint resultIds for semanticTokens responses.
+ * One process-wide counter is sufficient: stale ids from prior sessions
+ * cannot match because the server restarts the counter at 1.
+ */
+static uint64_t next_sem_tokens_result_id = 1;
+
+/** Format the next resultId as a heap-allocated decimal string. */
+static char *mint_sem_tokens_result_id(void) {
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%" PRIu64, next_sem_tokens_result_id++);
+    if (n < 0) return NULL;
+    return strdup(buf);
+}
+
+/**
+ * Replace the cached semantic-tokens data stored on @p d with @p new_buf
+ * and @p new_result_id, freeing whatever was there before.  Ownership of
+ * both pointers transfers to @p d.
+ */
+static void doc_set_sem_tokens(Document *d,
+                                uint32_t *new_buf, size_t new_count,
+                                char *new_result_id) {
+    free(d->sem_tokens_data);
+    free(d->sem_tokens_result_id);
+    d->sem_tokens_data      = new_buf;
+    d->sem_tokens_count     = new_count;
+    d->sem_tokens_result_id = new_result_id;
+}
+
+/**
  * Handle `textDocument/semanticTokens/full`.
  *
- * Returns the full delta-encoded semantic token list for the document.
+ * Returns the full delta-encoded semantic token list for the document
+ * together with a fresh resultId.  The data is cached on the Document
+ * so a subsequent `semanticTokens/full/delta` request can diff against
+ * exactly what was sent.
  *
  * @param doc     Destination mutable JSON document.
  * @param id      Request id to echo back.
@@ -1423,10 +1469,71 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
-    yyjson_mut_val *result = build_semantic_tokens_json(doc,
-                                                         d->parse.tok_spans,
-                                                         d->parse.num_tok_spans,
-                                                         d->parse.num_sem_entries);
+    uint32_t *buf = NULL;
+    size_t    count = 0;
+    compute_semantic_tokens_data(d->parse.tok_spans,
+                                  d->parse.num_tok_spans,
+                                  d->parse.num_sem_entries,
+                                  &buf, &count);
+    char *result_id = mint_sem_tokens_result_id();
+    yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
+    /* Transfer ownership of buf and result_id to the document cache. */
+    doc_set_sem_tokens(d, buf, count, result_id);
+    return make_response(doc, id, result);
+}
+
+/**
+ * Handle `textDocument/semanticTokens/full/delta`.
+ *
+ * If the document has a cached previous response and its resultId
+ * matches the request's @c previousResultId, the response is a
+ * `SemanticTokensDelta` describing the minimal patch from the cached
+ * data to the current data.  Otherwise the response is a full
+ * `SemanticTokens` (the spec-mandated fallback when the server cannot
+ * compute a diff).  In either case the cache is replaced with the
+ * newly computed data and a fresh resultId.
+ *
+ * @param doc     Destination mutable JSON document.
+ * @param id      Request id to echo back.
+ * @param params  Request params containing `textDocument.uri` and
+ *                `previousResultId`.
+ * @return The JSON-RPC response.
+ */
+static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yyjson_val *id,
+                                                          yyjson_val *params) {
+    const char *uri = NULL;
+    const char *previous_result_id = NULL;
+    if (params) {
+        yyjson_val *td = yyjson_obj_get(params, "textDocument");
+        if (td) uri = json_str(td, "uri");
+        previous_result_id = json_str(params, "previousResultId");
+    }
+    if (!uri) return make_response(doc, id, yyjson_mut_null(doc));
+
+    Document *d = doc_find(uri);
+    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
+
+    uint32_t *new_buf = NULL;
+    size_t    new_count = 0;
+    compute_semantic_tokens_data(d->parse.tok_spans,
+                                  d->parse.num_tok_spans,
+                                  d->parse.num_sem_entries,
+                                  &new_buf, &new_count);
+    char *result_id = mint_sem_tokens_result_id();
+
+    yyjson_mut_val *result;
+    if (d->sem_tokens_data && d->sem_tokens_result_id && previous_result_id &&
+        strcmp(d->sem_tokens_result_id, previous_result_id) == 0) {
+        result = build_semantic_tokens_delta_json(doc,
+                                                   d->sem_tokens_data, d->sem_tokens_count,
+                                                   new_buf, new_count,
+                                                   result_id);
+    } else {
+        /* Fallback: client and server are out of sync — send a full set. */
+        result = build_semantic_tokens_json_from_buf(doc, new_buf, new_count, result_id);
+    }
+
+    doc_set_sem_tokens(d, new_buf, new_count, result_id);
     return make_response(doc, id, result);
 }
 
@@ -1710,10 +1817,8 @@ char *server_process(const char *json_text) {
     } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
         resp = handle_semantic_tokens_full(out_doc, id_item, params);
 
-    /* TODO: textDocument/semanticTokens/full/delta — requires storing a
-     * resultId per document and computing a token diff against the previously
-     * returned set.  Advertise "full": { "delta": true } in capabilities once
-     * implemented. */
+    } else if (strcmp(m, "textDocument/semanticTokens/full/delta") == 0) {
+        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params);
 
     /* TODO: textDocument/semanticTokens/range — requires filtering tok_spans
      * to the requested range before encoding.  Advertise "range": true in

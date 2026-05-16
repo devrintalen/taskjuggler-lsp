@@ -1,6 +1,8 @@
 .env
 .claude/
 *~
+__pycache__/
+*.pyc
 /src/*.o
 /taskjuggler-lsp
 /taskjuggler-lsp-debug

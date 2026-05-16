@@ -75,7 +75,8 @@ fan-out of feature handlers:
        signature_help → ``active_context()``;
        completion → ``build_completions_json()``;
        folding_range → ``build_folding_ranges_json()`` (brackets, comments);
-       semantic_tokens → ``build_semantic_tokens_json()``;
+       semantic_tokens → ``compute_semantic_tokens_data()`` + ``build_semantic_tokens_json_from_buf()``;
+       semantic_tokens_delta → ``build_semantic_tokens_delta_json()``;
        document_highlight → ``build_document_highlight_json()``
    * - ``doc_symbols[]``
      - document_symbol → ``build_document_symbols_json()``;

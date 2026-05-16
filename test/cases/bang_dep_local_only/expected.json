@@ -40,7 +40,9 @@
               "declaration"
             ]
           },
-          "full": true
+          "full": {
+            "delta": true
+          }
         },
         "workspaceSymbolProvider": true,
         "workspace": {

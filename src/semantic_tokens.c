@@ -264,11 +264,13 @@ static int write_uint32(char *buf, uint32_t val) {
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
-yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
-                                            const TokenSpan *spans, int num_spans,
-                                            int num_sem_entries) {
-    /* Allocate flat integer buffer sized during the lexer pass; no realloc needed. */
-    uint32_t *buf = malloc((size_t)num_sem_entries * 5 * sizeof(uint32_t));
+void compute_semantic_tokens_data(const TokenSpan *spans, int num_spans,
+                                   int num_sem_entries,
+                                   uint32_t **out_buf, size_t *out_count) {
+    /* Allocate flat integer buffer sized during the lexer pass; no realloc needed.
+     * Guard against zero-sized malloc when there are no semantic entries. */
+    size_t cap = (size_t)num_sem_entries * 5;
+    uint32_t *buf = malloc(cap > 0 ? cap * sizeof(uint32_t) : sizeof(uint32_t));
     int count = 0;
     uint32_t prev_line = 0, prev_char = 0;
 
@@ -286,26 +288,39 @@ yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
                    &prev_line, &prev_char);
     }
 
+    *out_buf   = buf;
+    *out_count = (size_t)count;
+}
+
+yyjson_mut_val *build_uint32_array_json(yyjson_mut_doc *doc,
+                                         const uint32_t *buf, size_t count) {
     /* Serialize the integer buffer to a JSON array string.
      * Each uint32 fits in at most 10 digits; include a comma and the brackets. */
-    size_t json_cap = 2 + (size_t)count * 11;
+    size_t json_cap = 2 + count * 11;
     char *json_str = malloc(json_cap);
     char *p = json_str;
     *p++ = '[';
-    for (int i = 0; i < count; i++) {
+    for (size_t i = 0; i < count; i++) {
         p += write_uint32(p, buf[i]);
         if (i + 1 < count) *p++ = ',';
     }
     *p++ = ']';
-    free(buf);
 
     /* rawncpy copies the string into the doc's memory pool so json_str can be
      * freed immediately.  The raw value is emitted verbatim during serialization,
      * bypassing any per-integer node traversal. */
     yyjson_mut_val *raw_data = yyjson_mut_rawncpy(doc, json_str, (size_t)(p - json_str));
     free(json_str);
+    return raw_data;
+}
 
+yyjson_mut_val *build_semantic_tokens_json_from_buf(yyjson_mut_doc *doc,
+                                                     const uint32_t *buf, size_t count,
+                                                     const char *result_id) {
+    yyjson_mut_val *raw_data = build_uint32_array_json(doc, buf, count);
     yyjson_mut_val *result = yyjson_mut_obj(doc);
+    if (result_id)
+        yyjson_mut_obj_add_strcpy(doc, result, "resultId", result_id);
     yyjson_mut_obj_add_val(doc, result, "data", raw_data);
     return result;
 }
