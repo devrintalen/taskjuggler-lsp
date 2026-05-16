@@ -189,6 +189,20 @@ void token_free(Token *t) {
     t->text = NULL;
 }
 
+int parse_tjp_date(const char *text, time_t *out) {
+    if (!text) return 0;
+    int year, month, day;
+    if (sscanf(text, "%4d-%2d-%2d", &year, &month, &day) != 3) return 0;
+    struct tm tm = {0};
+    tm.tm_year = year - 1900;
+    tm.tm_mon  = month - 1;
+    tm.tm_mday = day;
+    time_t t = timegm(&tm);
+    if (t == (time_t)-1) return 0;
+    *out = t;
+    return 1;
+}
+
 /* ── DocSymbol helpers ───────────────────────────────────────────────────── */
 
 void doc_symbol_free(DocSymbol *s) {

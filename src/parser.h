@@ -22,6 +22,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <time.h>
 
 /*
  * Positions / Ranges
@@ -144,6 +145,13 @@ struct DocSymbol {
     int        keyword;        /**< KW_* constant from grammar.tab.h */
     LspRange   range;          /**< full declaration range, including body */
     LspRange   selection_range;/**< range of just the identifier token */
+    /* Date attributes parsed from the body.  Meaningful only when
+     * keyword == KW_TASK; otherwise has_start/has_end remain 0.
+     * Populated by grammar actions for `start <date>` / `end <date>`. */
+    time_t     start_date;     /**< explicit `start` date, valid if has_start */
+    time_t     end_date;       /**< explicit `end` date, valid if has_end */
+    int        has_start;      /**< 1 if `start_date` is populated */
+    int        has_end;        /**< 1 if `end_date` is populated */
     DocSymbol *parent;         /**< parent node; NULL for root-level symbols */
     DocSymbol **children;      /**< array of pointers to heap-allocated children */
     int        num_children;   /**< number of entries in children */
@@ -439,6 +447,18 @@ void push_dep_ref(int bang_count, const char *path,
 
 /** Reset the transient dep-ref accumulator before a new parse. */
 void dep_refs_reset(void);
+
+/**
+ * Parse a `YYYY-MM-DD` date prefix from a TaskJuggler `TK_DATE` token's
+ * text into a UTC `time_t`.  Trailing time and timezone components
+ * (e.g. `-09:00`, `+0100`) are accepted but ignored — callers that
+ * need day-level resolution can pass token text as-is.
+ *
+ * @param text  NUL-terminated token text.  May be NULL.
+ * @param out   Receives the parsed time_t on success.
+ * @return 1 on success, 0 if @p text does not start with a valid date.
+ */
+int parse_tjp_date(const char *text, time_t *out);
 
 /**
  * Resolve @p r->cross_file_deps[] against the given set of other documents'

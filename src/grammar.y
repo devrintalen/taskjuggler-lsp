@@ -350,10 +350,30 @@ item
     /* ── Date attributes ── */
     /* Syntax: start <date>                                                   */
     | KW_START TK_DATE
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
+        {
+            DocSymbol *task = sym_stack_top();
+            if (task && task->keyword == KW_TASK) {
+                time_t parsed;
+                if (parse_tjp_date($2.text, &parsed)) {
+                    task->start_date = parsed;
+                    task->has_start  = 1;
+                }
+            }
+            token_free(&$1); token_free(&$2); $$.has_sym = 0;
+        }
     /* Syntax: end <date>                                                     */
     | KW_END TK_DATE
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
+        {
+            DocSymbol *task = sym_stack_top();
+            if (task && task->keyword == KW_TASK) {
+                time_t parsed;
+                if (parse_tjp_date($2.text, &parsed)) {
+                    task->end_date = parsed;
+                    task->has_end  = 1;
+                }
+            }
+            token_free(&$1); token_free(&$2); $$.has_sym = 0;
+        }
     /* Syntax: now <date>                                                     */
     | KW_NOW TK_DATE
         { token_free(&$1); token_free(&$2); $$.has_sym = 0; }

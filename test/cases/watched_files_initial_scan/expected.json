@@ -10,6 +10,9 @@
         },
         "documentSymbolProvider": true,
         "foldingRangeProvider": true,
+        "codeLensProvider": {
+          "resolveProvider": false
+        },
         "hoverProvider": true,
         "definitionProvider": true,
         "referencesProvider": true,

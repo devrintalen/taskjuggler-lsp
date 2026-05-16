@@ -168,11 +168,14 @@ Language features
      - No
      - Depends on ``codeAction``.
    * - ``textDocument/codeLens``
-     - No
-     - No code lenses are produced.
+     - Yes
+     - Shows the estimated completion (or start) date next to
+       ``length`` / ``duration`` inside tasks that have an explicit
+       ``start`` or ``end``.  Lenses are inert (display-only).
    * - ``codeLens/resolve``
      - No
-     - Depends on ``codeLens``.
+     - Not needed; ``textDocument/codeLens`` returns fully resolved
+       lenses (``resolveProvider: false``).
    * - ``textDocument/documentLink``
      - No
      - ``include`` paths are followed internally but not surfaced as
