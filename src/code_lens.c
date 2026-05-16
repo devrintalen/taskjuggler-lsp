@@ -41,38 +41,6 @@
  * is 365 days. */
 #define CALENDAR_SECONDS_PER_DAY   (24L * 60 * 60)
 
-/** Per-task index entry populated in pass 1 of the scan. */
-typedef struct {
-    DocSymbol *task;
-    time_t     start;
-    time_t     end;
-    int        has_start;
-    int        has_end;
-} TaskDates;
-
-/**
- * Parse a `YYYY-MM-DD` date prefix into a UTC `time_t`.  Accepts (and
- * ignores) the trailing time/timezone parts the TaskJuggler lexer
- * permits — the lens shows day-level resolution.
- *
- * @param text  NUL-terminated text from a `TK_DATE` token.
- * @param out   Receives the parsed time_t on success.
- * @return 1 on success, 0 if @p text does not start with a valid date.
- */
-static int parse_tjp_date(const char *text, time_t *out) {
-    if (!text) return 0;
-    int year, month, day;
-    if (sscanf(text, "%4d-%2d-%2d", &year, &month, &day) != 3) return 0;
-    struct tm tm = {0};
-    tm.tm_year = year - 1900;
-    tm.tm_mon  = month - 1;
-    tm.tm_mday = day;
-    time_t t = timegm(&tm);
-    if (t == (time_t)-1) return 0;
-    *out = t;
-    return 1;
-}
-
 /**
  * Map a duration unit string to a canonical character.  Returns 0 if
  * @p s is not a recognized unit.
@@ -258,94 +226,33 @@ static void push_lens(yyjson_mut_doc *doc, yyjson_mut_val *arr,
     yyjson_mut_arr_add_val(arr, lens);
 }
 
-/** Linear lookup; tasks-per-file is small enough that O(n) is fine. */
-static TaskDates *index_find(TaskDates *index, int num_index,
-                              DocSymbol *task) {
-    for (int i = 0; i < num_index; i++) {
-        if (index[i].task == task) return &index[i];
-    }
-    return NULL;
-}
-
-/** Find existing entry or claim a fresh slot from the preallocated pool. */
-static TaskDates *index_get_or_add(TaskDates *index, int *num_index,
-                                    int cap, DocSymbol *task) {
-    TaskDates *e = index_find(index, *num_index, task);
-    if (e) return e;
-    if (*num_index >= cap) return NULL;
-    e = &index[(*num_index)++];
-    e->task = task;
-    e->has_start = e->has_end = 0;
-    return e;
-}
-
-/** Recursively count KW_TASK symbols in the doc-symbol tree. */
-static int count_tasks(DocSymbol *const *syms, int n) {
-    int total = 0;
-    for (int i = 0; i < n; i++) {
-        if (syms[i]->keyword == KW_TASK) total++;
-        total += count_tasks(syms[i]->children, syms[i]->num_children);
-    }
-    return total;
-}
-
 /* Build the JSON array for a textDocument/codeLens response.
  *
- * Two-pass scan over tok_spans[]:
- *   1. Collect each task's explicit `start` and `end` dates.
- *   2. For each `length` / `duration` keyword inside a task with at
- *      least one endpoint, compute the other endpoint and emit a lens.
+ * Single linear scan of tok_spans[]: for each `length` / `duration`
+ * keyword whose owning task has an explicit `start` or `end` date
+ * (precomputed during parse and stored on the DocSymbol), compute the
+ * complementary endpoint and emit a lens.
+ *
+ * The `symbols` / `num_symbols` parameters are unused — endpoint data
+ * is read directly from each token's `owner` — but kept for symmetry
+ * with other build_*_json entry points.
  */
 yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
                                      const TokenSpan *spans, int num_spans,
                                      DocSymbol *const *symbols,
                                      int num_symbols) {
+    (void)symbols;
+    (void)num_symbols;
+
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     if (!spans || num_spans == 0) return arr;
 
-    int task_count = count_tasks(symbols, num_symbols);
-    if (task_count == 0) return arr;
-
-    TaskDates *index = calloc((size_t)task_count, sizeof(*index));
-    if (!index) return arr;
-    int num_index = 0;
-
-    /* Pass 1: gather start / end dates per task. */
-    for (int i = 0; i < num_spans; i++) {
-        const TokenSpan *t = &spans[i];
-        if (t->token_kind != KW_START && t->token_kind != KW_END) continue;
-        DocSymbol *owner = t->owner;
-        if (!owner || owner->keyword != KW_TASK) continue;
-
-        int j = i + 1;
-        while (j < num_spans && spans[j].token_kind != TK_DATE) j++;
-        if (j >= num_spans) continue;
-        if (spans[j].owner != owner) continue;
-
-        time_t parsed;
-        if (!parse_tjp_date(spans[j].text, &parsed)) continue;
-
-        TaskDates *e = index_get_or_add(index, &num_index, task_count, owner);
-        if (!e) continue;
-        if (t->token_kind == KW_START) {
-            e->start = parsed;
-            e->has_start = 1;
-        } else {
-            e->end = parsed;
-            e->has_end = 1;
-        }
-    }
-
-    /* Pass 2: emit lenses for length / duration inside known-endpoint tasks. */
     for (int i = 0; i < num_spans; i++) {
         const TokenSpan *t = &spans[i];
         if (t->token_kind != KW_LENGTH && t->token_kind != KW_DURATION) continue;
         DocSymbol *owner = t->owner;
         if (!owner || owner->keyword != KW_TASK) continue;
-
-        TaskDates *e = index_find(index, num_index, owner);
-        if (!e) continue;
-        if (!e->has_start && !e->has_end) continue;
+        if (!owner->has_start && !owner->has_end) continue;
 
         int value;
         char unit;
@@ -355,12 +262,12 @@ yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
         int direction;
         time_t base;
         const char *arrow;
-        if (e->has_start) {
-            base = e->start;
+        if (owner->has_start) {
+            base = owner->start_date;
             direction = +1;
             arrow = "\xE2\x86\x92 ends ";   /* "→ ends " */
         } else {
-            base = e->end;
+            base = owner->end_date;
             direction = -1;
             arrow = "\xE2\x86\x90 starts "; /* "← starts " */
         }
@@ -383,6 +290,5 @@ yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
         push_lens(doc, arr, range, title);
     }
 
-    free(index);
     return arr;
 }
