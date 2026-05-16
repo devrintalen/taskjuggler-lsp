@@ -21,6 +21,8 @@
 #pragma once
 
 #include "parser.h"
+#include <stddef.h>
+#include <stdint.h>
 #include <yyjson.h>
 
 /* ── Semantic token type indices ─────────────────────────────────────────── *
@@ -53,7 +55,7 @@
 /**
  * Marker applied to the five structural keywords that introduce named
  * declarations: project, task, resource, account, shift.  This allows
- * editors to style them distinctly from property keywords.
+ * editors to style them distinctly from plain property keywords.
  */
 #define SEMTOK_MOD_DECLARATION (1 << 0)
 
@@ -73,10 +75,9 @@ extern const char * const semantic_token_modifier_names[];
 extern const int          num_semantic_token_modifiers;
 
 /**
- * Build an LSP SemanticTokens object `{ "data": [...] }` for the given
- * token span array.  The data array uses the standard five-integer delta
- * encoding per token: [deltaLine, deltaStartChar, length, tokenType,
- * tokenModifiers].
+ * Compute the LSP-encoded semantic-tokens data array for the given token
+ * spans.  The output uses the standard five-integer delta encoding per
+ * token: [deltaLine, deltaStartChar, length, tokenType, tokenModifiers].
  *
  * Multi-line tokens (TK_BLOCK_COMMENT, TK_MULTI_LINE_STR) are split into
  * one entry per source line as required by the protocol.  The accumulated
@@ -85,16 +86,45 @@ extern const int          num_semantic_token_modifiers;
  * Tokens recorded in tok_spans solely for cursor-position queries
  * (TK_LBRACE, TK_RBRACE, TK_BANG, TK_DOT, TK_COMMA) are silently skipped.
  *
- * Values are allocated in @p doc; caller owns @p doc.
- *
- * @param doc              Destination mutable JSON document.
  * @param spans            Token spans of the current document.
  * @param num_spans        Length of @p spans.
  * @param num_sem_entries  Upper bound on the number of semantic-token
  *                         entries that will be emitted (used to
  *                         pre-allocate the result array).
- * @return The SemanticTokens JSON object `{ "data": [...] }`.
+ * @param out_buf          Receives a malloc'd flat uint32 buffer; caller
+ *                         owns and must free().
+ * @param out_count        Receives the number of uint32 entries written.
+ *                         Always a multiple of 5.
  */
-yyjson_mut_val *build_semantic_tokens_json(yyjson_mut_doc *doc,
-                                            const TokenSpan *spans, int num_spans,
-                                            int num_sem_entries);
+void compute_semantic_tokens_data(const TokenSpan *spans, int num_spans,
+                                   int num_sem_entries,
+                                   uint32_t **out_buf, size_t *out_count);
+
+/**
+ * Build an LSP SemanticTokens object `{ "resultId": "...", "data": [...] }`
+ * from a precomputed flat uint32 buffer.  The integer array is serialized
+ * via a fast text path and embedded as a raw JSON value.
+ *
+ * @param doc        Destination mutable JSON document.
+ * @param buf        Flat uint32 buffer (length is @p count).
+ * @param count      Number of uint32 entries in @p buf (multiple of 5).
+ * @param result_id  Result id string to include.  When NULL, the resultId
+ *                   field is omitted from the response.
+ * @return The SemanticTokens JSON object.
+ */
+yyjson_mut_val *build_semantic_tokens_json_from_buf(yyjson_mut_doc *doc,
+                                                     const uint32_t *buf, size_t count,
+                                                     const char *result_id);
+
+/**
+ * Serialize a uint32 buffer as a JSON array using the same fast text path
+ * used by the SemanticTokens response.  Exposed so that the delta builder
+ * can embed insert arrays without duplicating the code.
+ *
+ * @param doc    Destination mutable JSON document.
+ * @param buf    Flat uint32 buffer.
+ * @param count  Number of uint32 entries in @p buf.
+ * @return A mutable JSON value holding the serialized array.
+ */
+yyjson_mut_val *build_uint32_array_json(yyjson_mut_doc *doc,
+                                         const uint32_t *buf, size_t count);
