@@ -24,6 +24,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* Single query worker for V1.  The plan calls for four, but the lazy
  * caches on Document (doc_symbols_json, sem_tokens_data) and the
@@ -78,6 +79,13 @@ static void wait_for_in_flight_drain(void) {
  * Mutations dispatch synchronously after waiting for any in-flight queries
  * to drain.  Queries are pushed onto query_pool_queue and run on the
  * worker pool in parallel. */
+static void job_free(Job *job) {
+    if (!job) return;
+    yyjson_doc_free(job->request_doc);
+    free(job->coalesce_uri);
+    free(job);
+}
+
 static void *coordinator(void *arg) {
     (void)arg;
     while (1) {
@@ -86,8 +94,7 @@ static void *coordinator(void *arg) {
         if (job->is_mutation) {
             wait_for_in_flight_drain();
             server_dispatch_mutation(job->request_doc);
-            yyjson_doc_free(job->request_doc);
-            free(job);
+            job_free(job);
         } else {
             in_flight_inc();
             job_queue_push(query_pool_queue, job);
@@ -106,8 +113,7 @@ static void *query_worker(void *arg) {
         Job *job = job_queue_pop(query_pool_queue);
         if (!job) break;
         server_dispatch_query(job->request_doc);
-        yyjson_doc_free(job->request_doc);
-        free(job);
+        job_free(job);
         in_flight_dec();
     }
     return NULL;
@@ -139,6 +145,12 @@ void threadpool_stop(void) {
 
 void threadpool_enqueue_mutation(Job *job) {
     job->is_mutation = 1;
+    job_queue_push(work_queue, job);
+}
+
+void threadpool_enqueue_didchange(Job *job, const char *uri) {
+    job->is_mutation = 1;
+    job->coalesce_uri = strdup(uri);
     job_queue_push(work_queue, job);
 }
 

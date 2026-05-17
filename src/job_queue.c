@@ -23,6 +23,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 struct JobQueue {
     Job             *head;
@@ -50,6 +51,22 @@ void job_queue_destroy(JobQueue *q) {
 void job_queue_push(JobQueue *q, Job *job) {
     job->next = NULL;
     pthread_mutex_lock(&q->mutex);
+    /* Coalesce a same-URI didChange into the tail of the queue.  Only
+     * tail coalescing is safe: any other element between the new job
+     * and an older same-URI didChange could observe the older parse,
+     * so collapsing across it would change visible LSP semantics. */
+    if (q->tail
+        && q->tail->coalesce_uri
+        && job->coalesce_uri
+        && strcmp(q->tail->coalesce_uri, job->coalesce_uri) == 0) {
+        yyjson_doc_free(q->tail->request_doc);
+        q->tail->request_doc = job->request_doc;
+        job->request_doc = NULL;
+        pthread_mutex_unlock(&q->mutex);
+        free(job->coalesce_uri);
+        free(job);
+        return;
+    }
     if (q->tail) q->tail->next = job;
     else         q->head = job;
     q->tail = job;

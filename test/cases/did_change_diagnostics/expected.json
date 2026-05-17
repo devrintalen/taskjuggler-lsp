@@ -129,6 +129,63 @@
   },
   {
     "jsonrpc": "2.0",
+    "id": 10,
+    "result": [
+      {
+        "name": "\"P\"",
+        "kind": 2,
+        "location": {
+          "uri": "file:///test/sample.tjp",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 8
+            },
+            "end": {
+              "line": 0,
+              "character": 9
+            }
+          }
+        }
+      },
+      {
+        "name": "\"Backend\"",
+        "kind": 12,
+        "location": {
+          "uri": "file:///test/sample.tjp",
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 5
+            },
+            "end": {
+              "line": 2,
+              "character": 12
+            }
+          }
+        }
+      },
+      {
+        "name": "\"Frontend\"",
+        "kind": 12,
+        "location": {
+          "uri": "file:///test/sample.tjp",
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 5
+            },
+            "end": {
+              "line": 4,
+              "character": 13
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file:///test/sample.tjp",

@@ -34,10 +34,19 @@
  * the coordinator pops in arrival order and uses it to choose between
  * synchronous dispatch (mutations) and handing the job off to a query
  * worker (read-only queries).
+ *
+ * `coalesce_uri` is non-NULL on textDocument/didChange jobs and holds
+ * a heap-owned copy of the URI being edited.  job_queue_push collapses
+ * two adjacent same-URI didChange jobs into one: the queued job's
+ * request_doc is replaced with the newer one and the older parse is
+ * skipped.  Coalescing only happens with the queue's tail, so a query
+ * or different-URI mutation between two didChanges defeats it — which
+ * preserves observable LSP ordering.
  */
 typedef struct Job {
     yyjson_doc *request_doc;
     int         is_mutation;
+    char       *coalesce_uri;
     struct Job *next;
 } Job;
 

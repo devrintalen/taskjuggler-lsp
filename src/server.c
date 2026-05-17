@@ -1913,6 +1913,18 @@ void server_process(const char *json_text) {
     if (!job) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     job->request_doc = in_doc; /* ownership transferred */
 
+    /* didChange events on the same URI may arrive faster than parse(),
+     * so route them through the coalescing entry point. */
+    if (strcmp(m, "textDocument/didChange") == 0) {
+        yyjson_val *params  = yyjson_obj_get(root, "params");
+        yyjson_val *td      = params ? yyjson_obj_get(params, "textDocument") : NULL;
+        yyjson_val *uri_val = td ? yyjson_obj_get(td, "uri") : NULL;
+        if (uri_val && yyjson_is_str(uri_val)) {
+            threadpool_enqueue_didchange(job, yyjson_get_str(uri_val));
+            return;
+        }
+    }
+
     if (is_mutation_method(m))
         threadpool_enqueue_mutation(job);
     else
