@@ -56,9 +56,9 @@
 
 /** Document store slot — URI plus authoritative text and its parse result. */
 typedef struct {
-    char       *uri;                  /**< document URI, heap-allocated */
-    char       *text;                 /**< full source text, heap-allocated */
-    ParseResult parse;                /**< parse output for the current text */
+    char        *uri;                 /**< document URI, heap-allocated */
+    char        *text;                /**< full source text, heap-allocated */
+    ParseResult *parse;               /**< parse output for the current text; NULL when slot has no parse */
     char       *doc_symbols_json;     /**< cached documentSymbol JSON array; NULL = invalid */
     size_t      doc_symbols_json_len; /**< byte length of doc_symbols_json (excluding NUL) */
     /* Last semantic-tokens response sent to the client.  Retained across
@@ -139,7 +139,7 @@ static Document *doc_alloc(const char *uri) {
             docs[i].in_use = 1;
             docs[i].uri    = canon; /* ownership transferred */
             docs[i].text   = NULL;
-            memset(&docs[i].parse, 0, sizeof(docs[i].parse));
+            docs[i].parse  = NULL;
             return &docs[i];
         }
     }
@@ -159,7 +159,7 @@ static void doc_free(Document *d) {
     free(d->doc_symbols_json);
     free(d->sem_tokens_data);
     free(d->sem_tokens_result_id);
-    parse_result_free(&d->parse);
+    parse_result_release(d->parse);
     memset(d, 0, sizeof(*d));
 }
 
@@ -386,7 +386,7 @@ static void load_file_from_disk(const char *path) {
     document->text      = text;
     document->disk_only = 1;
     document->parse     = parse(text);
-    follow_includes(path, &document->parse);
+    follow_includes(path, document->parse);
 }
 
 /**
@@ -655,7 +655,7 @@ static void revalidate_all_docs(void) {
     /* Pass A: clear cross-file state in all open documents. */
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
-        clear_cross_file_state(&docs[i].parse);
+        clear_cross_file_state(docs[i].parse);
     }
 
     /* Pass B: resolve cross-file deps in each document against all others. */
@@ -668,13 +668,13 @@ static void revalidate_all_docs(void) {
         int num_extra = 0;
         for (int j = 0; j < MAX_DOCS; j++) {
             if (!docs[j].in_use || j == i) continue;
-            extra_roots[num_extra]  = docs[j].parse.doc_symbols;
-            extra_counts[num_extra] = docs[j].parse.num_doc_symbols;
+            extra_roots[num_extra]  = docs[j].parse->doc_symbols;
+            extra_counts[num_extra] = docs[j].parse->num_doc_symbols;
             extra_uris[num_extra]   = docs[j].uri;
             num_extra++;
         }
 
-        resolve_cross_file_deps(&docs[i].parse,
+        resolve_cross_file_deps(docs[i].parse,
                                 extra_roots, extra_counts, extra_uris,
                                 num_extra, docs[i].uri);
     }
@@ -687,7 +687,7 @@ static void revalidate_all_docs(void) {
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
         if (docs[i].disk_only) continue;
-        publish_diagnostics(docs[i].uri, &docs[i].parse);
+        publish_diagnostics(docs[i].uri, docs[i].parse);
     }
 }
 
@@ -955,9 +955,9 @@ static void handle_did_change_watched_files(yyjson_val *params) {
             document->doc_symbols_json_len = 0;
             document->text      = text;
             document->disk_only = 1;
-            parse_result_free(&document->parse);
+            parse_result_release(document->parse);
             document->parse = parse(text);
-            follow_includes(path, &document->parse);
+            follow_includes(path, document->parse);
             free(path);
             changed = 1;
         }
@@ -1016,11 +1016,11 @@ static void handle_did_rename_files(yyjson_val *params) {
         free(new_doc->doc_symbols_json);
         new_doc->doc_symbols_json     = NULL;
         new_doc->doc_symbols_json_len = 0;
-        parse_result_free(&new_doc->parse);
+        parse_result_release(new_doc->parse);
         new_doc->text      = text;
         new_doc->disk_only = 1;
         new_doc->parse     = parse(text);
-        follow_includes(path, &new_doc->parse);
+        follow_includes(path, new_doc->parse);
         free(path);
         changed = 1;
     }
@@ -1064,7 +1064,8 @@ static void handle_didopen(yyjson_val *params) {
         free(d->doc_symbols_json);
         d->doc_symbols_json     = NULL;
         d->doc_symbols_json_len = 0;
-        parse_result_free(&d->parse);
+        parse_result_release(d->parse);
+        d->parse = NULL;
     } else {
         d = doc_alloc(uri);
         if (!d) return; /* document store full */
@@ -1075,7 +1076,7 @@ static void handle_didopen(yyjson_val *params) {
 
     char *path = uri_to_path(uri);
     if (path) {
-        follow_includes(path, &d->parse);
+        follow_includes(path, d->parse);
         free(path);
     }
 
@@ -1144,13 +1145,13 @@ static void handle_didchange(yyjson_val *params) {
     d->doc_symbols_json     = NULL;
     d->doc_symbols_json_len = 0;
     d->text = current;
-    parse_result_free(&d->parse);
+    parse_result_release(d->parse);
     d->parse = parse(d->text);
 
     /* Pick up any new `include` directives the edit introduced. */
     char *path = uri_to_path(uri);
     if (path) {
-        follow_includes(path, &d->parse);
+        follow_includes(path, d->parse);
         free(path);
     }
 
@@ -1189,9 +1190,9 @@ static void handle_didclose(yyjson_val *params) {
         d->doc_symbols_json_len = 0;
         d->text      = text;
         d->disk_only = 1;
-        parse_result_free(&d->parse);
+        parse_result_release(d->parse);
         d->parse = parse(text);
-        follow_includes(path, &d->parse);
+        follow_includes(path, d->parse);
     } else {
         /* File gone from disk — remove and clear client-side diagnostics */
         ParseResult empty = {0};
@@ -1228,8 +1229,8 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
     if (!d->doc_symbols_json)
-        d->doc_symbols_json = build_document_symbols_json(d->parse.doc_symbols,
-                                                           d->parse.num_doc_symbols,
+        d->doc_symbols_json = build_document_symbols_json(d->parse->doc_symbols,
+                                                           d->parse->num_doc_symbols,
                                                            &d->doc_symbols_json_len);
     yyjson_mut_val *raw = yyjson_mut_rawncpy(doc,
                                               d->doc_symbols_json,
@@ -1261,10 +1262,10 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_mut_val *arr = build_folding_ranges_json(doc,
-                                                     d->parse.tok_spans,
-                                                     d->parse.num_tok_spans,
-                                                     d->parse.doc_symbols,
-                                                     d->parse.num_doc_symbols);
+                                                     d->parse->tok_spans,
+                                                     d->parse->num_tok_spans,
+                                                     d->parse->doc_symbols,
+                                                     d->parse->num_doc_symbols);
     return make_response(doc, id, arr);
 }
 
@@ -1293,10 +1294,10 @@ static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_mut_val *arr = build_code_lens_json(doc,
-                                                d->parse.tok_spans,
-                                                d->parse.num_tok_spans,
-                                                d->parse.doc_symbols,
-                                                d->parse.num_doc_symbols);
+                                                d->parse->tok_spans,
+                                                d->parse->num_tok_spans,
+                                                d->parse->doc_symbols,
+                                                d->parse->num_doc_symbols);
     return make_response(doc, id, arr);
 }
 
@@ -1360,7 +1361,7 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
     /* Check whether the cursor is on a resolved dependency/allocation reference.
      * If so, show the target symbol's kind, id, and name instead of keyword docs. */
     const DefinitionLink *hover_link = find_def_link_at(
-        d->parse.tok_spans, d->parse.num_tok_spans, pos);
+        d->parse->tok_spans, d->parse->num_tok_spans, pos);
     if (hover_link) {
         const DocSymbol *sym = hover_link->target;
         if (!sym) goto keyword_hover;
@@ -1386,7 +1387,7 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
 keyword_hover:;
     /* Fall back to keyword documentation */
-    ActiveKeyword ak = active_keyword_at(d->parse.tok_spans, d->parse.num_tok_spans, pos);
+    ActiveKeyword ak = active_keyword_at(d->parse->tok_spans, d->parse->num_tok_spans, pos);
     if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     const char *doc_text = keyword_docs(ak.keyword);
@@ -1441,7 +1442,7 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-    ActiveContext ac = active_context(d->parse.tok_spans, d->parse.num_tok_spans, pos);
+    ActiveContext ac = active_context(d->parse->tok_spans, d->parse->num_tok_spans, pos);
     if (!ac.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_mut_val *sig = build_signature_help_json(doc, ac.keyword, ac.arg_count);
@@ -1507,9 +1508,9 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
 
     uint32_t *buf = NULL;
     size_t    count = 0;
-    compute_semantic_tokens_data(d->parse.tok_spans,
-                                  d->parse.num_tok_spans,
-                                  d->parse.num_sem_entries,
+    compute_semantic_tokens_data(d->parse->tok_spans,
+                                  d->parse->num_tok_spans,
+                                  d->parse->num_sem_entries,
                                   &buf, &count);
     char *result_id = mint_sem_tokens_result_id();
     yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
@@ -1551,9 +1552,9 @@ static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yy
 
     uint32_t *new_buf = NULL;
     size_t    new_count = 0;
-    compute_semantic_tokens_data(d->parse.tok_spans,
-                                  d->parse.num_tok_spans,
-                                  d->parse.num_sem_entries,
+    compute_semantic_tokens_data(d->parse->tok_spans,
+                                  d->parse->num_tok_spans,
+                                  d->parse->num_sem_entries,
                                   &new_buf, &new_count);
     char *result_id = mint_sem_tokens_result_id();
 
@@ -1602,8 +1603,8 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_references_json(doc,
                                                     uri,
-                                                    d->parse.tok_spans,
-                                                    d->parse.num_tok_spans,
+                                                    d->parse->tok_spans,
+                                                    d->parse->num_tok_spans,
                                                     pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1638,10 +1639,10 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
 
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_document_highlight_json(doc,
-                                                            d->parse.doc_symbols,
-                                                            d->parse.num_doc_symbols,
-                                                            d->parse.tok_spans,
-                                                            d->parse.num_tok_spans,
+                                                            d->parse->doc_symbols,
+                                                            d->parse->num_doc_symbols,
+                                                            d->parse->tok_spans,
+                                                            d->parse->num_tok_spans,
                                                             pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1676,8 +1677,8 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
 
     LspPos pos         = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_definition_json(doc,
-                                                    d->parse.tok_spans,
-                                                    d->parse.num_tok_spans,
+                                                    d->parse->tok_spans,
+                                                    d->parse->num_tok_spans,
                                                     pos, uri);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1728,18 +1729,18 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use || &docs[i] == d) continue;
         if (docs[i].disk_only) continue;
-        extra_pools[num_extra]  = docs[i].parse.doc_symbols;
-        extra_counts[num_extra] = docs[i].parse.num_doc_symbols;
+        extra_pools[num_extra]  = docs[i].parse->doc_symbols;
+        extra_counts[num_extra] = docs[i].parse->num_doc_symbols;
         num_extra++;
     }
 
     LspPos pos             = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_completions_json(doc,
-                                                     d->parse.tok_spans,
-                                                     d->parse.num_tok_spans,
+                                                     d->parse->tok_spans,
+                                                     d->parse->num_tok_spans,
                                                      pos,
-                                                     d->parse.doc_symbols,
-                                                     d->parse.num_doc_symbols,
+                                                     d->parse->doc_symbols,
+                                                     d->parse->num_doc_symbols,
                                                      extra_pools,
                                                      extra_counts,
                                                      num_extra,
@@ -1767,8 +1768,8 @@ static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
         collect_workspace_symbols(doc, query,
-                                  docs[i].parse.doc_symbols,
-                                  docs[i].parse.num_doc_symbols,
+                                  docs[i].parse->doc_symbols,
+                                  docs[i].parse->num_doc_symbols,
                                   docs[i].uri, arr);
     }
     return make_response(doc, id, arr);

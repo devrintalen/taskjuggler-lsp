@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <time.h>
@@ -378,6 +379,7 @@ typedef struct {
  */
 
 typedef struct {
+    _Atomic int     refcount;           /**< reference count; managed by parse_result_acquire/release */
     Diagnostic     *diagnostics;        /**< parse + cross-file diagnostics */
     int             num_diagnostics;    /**< number of entries in diagnostics */
     int             diag_cap;           /**< allocated capacity of diagnostics */
@@ -401,16 +403,37 @@ typedef struct {
 
 /**
  * Parse @p src into a ParseResult.  Single entry point for the lexer +
- * grammar pipeline.  The returned ParseResult owns all dynamic arrays;
- * release with parse_result_free().
+ * grammar pipeline.  The returned ParseResult is heap-allocated with an
+ * initial refcount of 1; release with parse_result_release().
  *
  * @param src  NUL-terminated TaskJuggler source text.
- * @return Fully populated ParseResult.
+ * @return Fully populated ParseResult with refcount=1.
  */
-ParseResult parse(const char *src);
+ParseResult *parse(const char *src);
+
+/**
+ * Increment @p r's reference count and return @p r.  Use when storing an
+ * additional shared reference to an already-allocated ParseResult.
+ *
+ * @param r  ParseResult to acquire; must be non-NULL.
+ * @return @p r.
+ */
+ParseResult *parse_result_acquire(ParseResult *r);
+
+/**
+ * Decrement @p r's reference count.  When the count reaches zero, releases
+ * every dynamic allocation owned by @p r and frees the struct itself.
+ * Safe to call with @p r == NULL.
+ *
+ * @param r  ParseResult reference to release.
+ */
+void        parse_result_release(ParseResult *r);
 
 /**
  * Release every dynamic allocation owned by @p r and zero its fields.
+ * Does not free @p r itself or touch its refcount.  Intended for internal
+ * use by parse_result_release() and for stack-allocated ParseResults used
+ * as throwaway sentinels.
  *
  * @param r  ParseResult to release; the struct itself is not freed.
  */
