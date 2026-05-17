@@ -23,6 +23,7 @@
 
 #include "server.h"
 #include "parser.h"
+#include "threadpool.h"
 #include "diagnostics.h"
 #include "definition.h"
 #include "references.h"
@@ -170,7 +171,7 @@ static void doc_free(Document *d) {
 
 /* Serializes stdout writes from any thread.  Acquired around every
  * Content-Length-framed write so responses and notifications never
- * interleave mid-message once the worker pool is wired up. */
+ * interleave mid-message. */
 static pthread_mutex_t stdout_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void lsp_send_message(const char *msg) {
@@ -1787,15 +1788,40 @@ static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *
    Main dispatch
    ═══════════════════════════════════════════════════════════════════════════ */
 
-char *server_process(const char *json_text) {
-    yyjson_doc *in_doc = yyjson_read(json_text, strlen(json_text), 0);
-    if (!in_doc) return NULL;
+/* Return 1 when @p method names a state-mutating or lifecycle operation
+ * that must run on the single mutation worker; 0 for read-only queries.
+ * NULL or unknown methods are treated as queries so that the query
+ * worker pool's null-response fallback fires. */
+static int is_mutation_method(const char *method) {
+    if (!method) return 0;
+    return strcmp(method, "initialize") == 0
+        || strcmp(method, "initialized") == 0
+        || strcmp(method, "shutdown") == 0
+        || strcmp(method, "textDocument/didOpen") == 0
+        || strcmp(method, "textDocument/didChange") == 0
+        || strcmp(method, "textDocument/didClose") == 0
+        || strcmp(method, "workspace/didChangeWatchedFiles") == 0
+        || strcmp(method, "workspace/didRenameFiles") == 0;
+}
 
+/* Serialize a response yyjson tree to stdout while still holding the
+ * doc-store lock — the response strings may reference data owned by
+ * ParseResults that a mutation could otherwise free the instant we
+ * unlock.  After serialization the resulting text is independent. */
+static void send_response(yyjson_mut_doc *out_doc, yyjson_mut_val *resp) {
+    yyjson_mut_doc_set_root(out_doc, resp);
+    char *text = yyjson_mut_write(out_doc, 0, NULL);
+    if (text) {
+        lsp_send_message(text);
+        free(text);
+    }
+}
+
+void server_dispatch_mutation(yyjson_doc *in_doc) {
     yyjson_val *root    = yyjson_doc_get_root(in_doc);
     yyjson_val *id_item = yyjson_obj_get(root, "id");
     yyjson_val *method  = yyjson_obj_get(root, "method");
     yyjson_val *params  = yyjson_obj_get(root, "params");
-
     const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
 
     yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
@@ -1803,96 +1829,97 @@ char *server_process(const char *json_text) {
 
     if (strcmp(m, "initialize") == 0) {
         resp = handle_initialize(out_doc, id_item, params);
-
     } else if (strcmp(m, "initialized") == 0) {
         handle_initialized();
-        /* notification — no response to client */
-
     } else if (strcmp(m, "shutdown") == 0) {
         resp = handle_shutdown(out_doc, id_item);
-
-    } else if (strcmp(m, "exit") == 0) {
-        yyjson_doc_free(in_doc);
-        yyjson_mut_doc_free(out_doc);
-        exit(0);
-
     } else if (strcmp(m, "textDocument/didOpen") == 0) {
         handle_didopen(params);
-        /* no response needed */
-
     } else if (strcmp(m, "textDocument/didChange") == 0) {
         handle_didchange(params);
-
     } else if (strcmp(m, "textDocument/didClose") == 0) {
         handle_didclose(params);
-
-    } else if (strcmp(m, "textDocument/documentSymbol") == 0) {
-        resp = handle_document_symbol(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/foldingRange") == 0) {
-        resp = handle_folding_range(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/codeLens") == 0) {
-        resp = handle_code_lens(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/hover") == 0) {
-        resp = handle_hover(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/signatureHelp") == 0) {
-        resp = handle_signature_help(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/references") == 0) {
-        resp = handle_references(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/documentHighlight") == 0) {
-        resp = handle_document_highlight(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/definition") == 0) {
-        resp = handle_definition(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/completion") == 0) {
-        resp = handle_completion(out_doc, id_item, params);
-
     } else if (strcmp(m, "workspace/didChangeWatchedFiles") == 0) {
         handle_did_change_watched_files(params);
-
     } else if (strcmp(m, "workspace/didRenameFiles") == 0) {
         handle_did_rename_files(params);
-
-    } else if (strcmp(m, "workspace/symbol") == 0) {
-        resp = handle_workspace_symbol(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
-        resp = handle_semantic_tokens_full(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/semanticTokens/full/delta") == 0) {
-        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params);
-
-    /* TODO: textDocument/semanticTokens/range — requires filtering tok_spans
-     * to the requested range before encoding.  Advertise "range": true in
-     * capabilities once implemented. */
-
     } else if (id_item) {
-        /* Unknown request — return null result */
+        /* Misclassified or unknown request with an id — null result */
         resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
     }
 
-    yyjson_doc_free(in_doc);
+    if (resp) send_response(out_doc, resp);
+    yyjson_mut_doc_free(out_doc);
+}
 
-    if (!resp) {
-        yyjson_mut_doc_free(out_doc);
-        return NULL;
+void server_dispatch_query(yyjson_doc *in_doc) {
+    yyjson_val *root    = yyjson_doc_get_root(in_doc);
+    yyjson_val *id_item = yyjson_obj_get(root, "id");
+    yyjson_val *method  = yyjson_obj_get(root, "method");
+    yyjson_val *params  = yyjson_obj_get(root, "params");
+    const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
+
+    yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *resp = NULL;
+
+    if (strcmp(m, "textDocument/documentSymbol") == 0) {
+        resp = handle_document_symbol(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/foldingRange") == 0) {
+        resp = handle_folding_range(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/codeLens") == 0) {
+        resp = handle_code_lens(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/hover") == 0) {
+        resp = handle_hover(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/signatureHelp") == 0) {
+        resp = handle_signature_help(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/references") == 0) {
+        resp = handle_references(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/documentHighlight") == 0) {
+        resp = handle_document_highlight(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/definition") == 0) {
+        resp = handle_definition(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/completion") == 0) {
+        resp = handle_completion(out_doc, id_item, params);
+    } else if (strcmp(m, "workspace/symbol") == 0) {
+        resp = handle_workspace_symbol(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
+        resp = handle_semantic_tokens_full(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/semanticTokens/full/delta") == 0) {
+        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params);
+    } else if (id_item) {
+        /* Unknown request — null result */
+        resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
     }
 
-    yyjson_mut_doc_set_root(out_doc, resp);
-    char *text = yyjson_mut_write(out_doc, 0, NULL);
+    if (resp) send_response(out_doc, resp);
     yyjson_mut_doc_free(out_doc);
-    return text;
+}
+
+void server_process(const char *json_text) {
+    yyjson_doc *in_doc = yyjson_read(json_text, strlen(json_text), 0);
+    if (!in_doc) return;
+
+    yyjson_val *root   = yyjson_doc_get_root(in_doc);
+    yyjson_val *method = yyjson_obj_get(root, "method");
+    const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
+
+    if (strcmp(m, "exit") == 0) {
+        yyjson_doc_free(in_doc);
+        threadpool_stop();
+        exit(0);
+    }
+
+    Job *job = calloc(1, sizeof(Job));
+    if (!job) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    job->request_doc = in_doc; /* ownership transferred */
+
+    if (is_mutation_method(m))
+        threadpool_enqueue_mutation(job);
+    else
+        threadpool_enqueue_query(job);
 }
 
 void server_init() {
-     // Initialize array of Document objects
-     for (int i=0; i<MAX_DOCS; i++) {
-	  docs[i].in_use = 0;
-     }
+    for (int i = 0; i < MAX_DOCS; i++)
+        docs[i].in_use = 0;
 }

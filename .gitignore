@@ -4,6 +4,7 @@
 __pycache__/
 *.pyc
 /src/*.o
+/src/*.d
 /taskjuggler-lsp
 /taskjuggler-lsp-debug
 /src/lexer.yy.c

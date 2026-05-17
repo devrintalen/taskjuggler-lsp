@@ -1,7 +1,7 @@
 VERSION = 0.5.3
 
 CC      = gcc
-CFLAGS  = -Wall -Wextra -std=c11 -O2 -D_DEFAULT_SOURCE
+CFLAGS  = -Wall -Wextra -std=c11 -O2 -D_DEFAULT_SOURCE -MMD -MP
 LDFLAGS = -lyyjson -lpthread
 
 # Generated files from flex and bison
@@ -10,6 +10,7 @@ GEN_GRAM = src/grammar.tab.c
 GEN_HDR  = src/grammar.tab.h
 
 SRC = src/main.c src/server.c src/parser.c src/diagnostics.c \
+      src/job_queue.c src/threadpool.c \
       $(GEN_LEX) $(GEN_GRAM) \
       src/document_symbol.c src/folding_range.c src/hover.c src/signature.c src/completion.c src/semantic_tokens.c src/semantic_tokens_delta.c src/definition.c src/references.c src/document_highlight.c src/workspace_symbol.c src/code_lens.c
 
@@ -23,7 +24,7 @@ $(BIN): $(OBJ)
 
 # Debug build with symbols for use with perf/valgrind.
 # Output binary: taskjuggler-lsp-debug
-DEBUG_CFLAGS = -Wall -Wextra -std=c11 -O2 -g -no-pie -D_DEFAULT_SOURCE
+DEBUG_CFLAGS = -Wall -Wextra -std=c11 -O2 -g -no-pie -D_DEFAULT_SOURCE -MMD -MP
 DEBUG_OBJ    = $(SRC:.c=.debug.o)
 DEBUG_BIN    = taskjuggler-lsp-debug
 
@@ -77,6 +78,11 @@ clean:
 	rm -f $(OBJ) $(BIN) $(GEN_LEX) $(GEN_GRAM) $(GEN_HDR)
 	rm -f $(DEBUG_OBJ) $(DEBUG_BIN)
 	rm -f $(LEXTEST_BIN) tools/lexer_test.o
+	rm -f $(OBJ:.o=.d) $(DEBUG_OBJ:.o=.d)
+
+# Auto-generated header dependencies from -MMD.
+-include $(OBJ:.o=.d)
+-include $(DEBUG_OBJ:.o=.d)
 
 # ── Documentation ────────────────────────────────────────────────────────── #
 
