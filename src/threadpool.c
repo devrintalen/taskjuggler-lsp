@@ -26,11 +26,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Single query worker for V1.  The plan calls for four, but the lazy
- * caches on Document (doc_symbols_json, sem_tokens_data) and the
- * monotonic resultId counter in server.c are written by query handlers
- * and are not yet thread-safe.  A later step adds per-document cache
- * mutexes and atomics so the pool can grow to its intended size. */
+/* One query worker.  Per-document cache mutexes (Document.cache_lock
+ * in server.c) and the per-document sem-tokens result counter are in
+ * place for cache-safety once this scales up, but scaling to multiple
+ * workers also requires per-document query *ordering* — pthread_mutex_t
+ * is not FIFO, so two workers racing for a same-document handler can
+ * produce non-deterministic resultIds even when the cache writes are
+ * serialized.  Adding a per-document ticketed queue is the next step. */
 #define NUM_QUERY_WORKERS 1
 
 /* Single ordered FIFO populated by the reader thread.  Preserving arrival

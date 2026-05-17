@@ -70,6 +70,19 @@ typedef struct {
     uint32_t   *sem_tokens_data;
     size_t      sem_tokens_count;     /**< entries in sem_tokens_data (multiple of 5) */
     char       *sem_tokens_result_id; /**< resultId returned alongside the data */
+    /* Serializes concurrent query workers when they touch the lazy caches
+     * above.  doc_symbols_json is populated on first request; sem_tokens_*
+     * is read-modify-write for both semanticTokens/full and its delta
+     * variant.  Mutation handlers do not need this lock because the
+     * coordinator's in-flight barrier already mutually excludes them
+     * with all in-flight queries. */
+    pthread_mutex_t cache_lock;
+    /* Monotonic per-document counter used to mint resultIds for
+     * semanticTokens responses.  Scoped to the document so concurrent
+     * sem_tokens queries on different documents produce deterministic
+     * IDs regardless of thread scheduling.  Read-modify-write under
+     * cache_lock. */
+    uint64_t        next_sem_tokens_result_id;
     int         in_use;               /**< 1 if this slot holds a live document */
     int         disk_only;            /**< 1 = loaded from disk/watcher, not opened by editor */
 } Document;
@@ -142,6 +155,8 @@ static Document *doc_alloc(const char *uri) {
             docs[i].uri    = canon; /* ownership transferred */
             docs[i].text   = NULL;
             docs[i].parse  = NULL;
+            docs[i].next_sem_tokens_result_id = 1;
+            pthread_mutex_init(&docs[i].cache_lock, NULL);
             return &docs[i];
         }
     }
@@ -162,6 +177,7 @@ static void doc_free(Document *d) {
     free(d->sem_tokens_data);
     free(d->sem_tokens_result_id);
     parse_result_release(d->parse);
+    pthread_mutex_destroy(&d->cache_lock);
     memset(d, 0, sizeof(*d));
 }
 
@@ -1237,6 +1253,7 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
+    pthread_mutex_lock(&d->cache_lock);
     if (!d->doc_symbols_json)
         d->doc_symbols_json = build_document_symbols_json(d->parse->doc_symbols,
                                                            d->parse->num_doc_symbols,
@@ -1244,6 +1261,7 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
     yyjson_mut_val *raw = yyjson_mut_rawncpy(doc,
                                               d->doc_symbols_json,
                                               d->doc_symbols_json_len);
+    pthread_mutex_unlock(&d->cache_lock);
     return make_response(doc, id, raw);
 }
 
@@ -1460,17 +1478,13 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
     return make_response(doc, id, sig);
 }
 
-/**
- * Monotonic counter used to mint resultIds for semanticTokens responses.
- * One process-wide counter is sufficient: stale ids from prior sessions
- * cannot match because the server restarts the counter at 1.
- */
-static uint64_t next_sem_tokens_result_id = 1;
-
-/** Format the next resultId as a heap-allocated decimal string. */
-static char *mint_sem_tokens_result_id(void) {
+/** Format the document's next resultId as a heap-allocated decimal
+ * string.  Caller must hold @p d->cache_lock; this is a plain
+ * read-modify-write of @p d->next_sem_tokens_result_id. */
+static char *mint_sem_tokens_result_id(Document *d) {
     char buf[32];
-    int n = snprintf(buf, sizeof(buf), "%" PRIu64, next_sem_tokens_result_id++);
+    int n = snprintf(buf, sizeof(buf), "%" PRIu64,
+                     d->next_sem_tokens_result_id++);
     if (n < 0) return NULL;
     return strdup(buf);
 }
@@ -1515,16 +1529,18 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
+    pthread_mutex_lock(&d->cache_lock);
     uint32_t *buf = NULL;
     size_t    count = 0;
     compute_semantic_tokens_data(d->parse->tok_spans,
                                   d->parse->num_tok_spans,
                                   d->parse->num_sem_entries,
                                   &buf, &count);
-    char *result_id = mint_sem_tokens_result_id();
+    char *result_id = mint_sem_tokens_result_id(d);
     yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
     /* Transfer ownership of buf and result_id to the document cache. */
     doc_set_sem_tokens(d, buf, count, result_id);
+    pthread_mutex_unlock(&d->cache_lock);
     return make_response(doc, id, result);
 }
 
@@ -1559,13 +1575,14 @@ static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yy
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
+    pthread_mutex_lock(&d->cache_lock);
     uint32_t *new_buf = NULL;
     size_t    new_count = 0;
     compute_semantic_tokens_data(d->parse->tok_spans,
                                   d->parse->num_tok_spans,
                                   d->parse->num_sem_entries,
                                   &new_buf, &new_count);
-    char *result_id = mint_sem_tokens_result_id();
+    char *result_id = mint_sem_tokens_result_id(d);
 
     yyjson_mut_val *result;
     if (d->sem_tokens_data && d->sem_tokens_result_id && previous_result_id &&
@@ -1580,6 +1597,7 @@ static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yy
     }
 
     doc_set_sem_tokens(d, new_buf, new_count, result_id);
+    pthread_mutex_unlock(&d->cache_lock);
     return make_response(doc, id, result);
 }
 
