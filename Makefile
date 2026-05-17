@@ -2,7 +2,7 @@ VERSION = 0.5.3
 
 CC      = gcc
 CFLAGS  = -Wall -Wextra -std=c11 -O2 -D_DEFAULT_SOURCE
-LDFLAGS = -lyyjson
+LDFLAGS = -lyyjson -lpthread
 
 # Generated files from flex and bison
 GEN_LEX  = src/lexer.yy.c

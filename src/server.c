@@ -42,6 +42,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -167,9 +168,16 @@ static void doc_free(Document *d) {
    Server-to-client messaging
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Serializes stdout writes from any thread.  Acquired around every
+ * Content-Length-framed write so responses and notifications never
+ * interleave mid-message once the worker pool is wired up. */
+static pthread_mutex_t stdout_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 void lsp_send_message(const char *msg) {
+    pthread_mutex_lock(&stdout_mutex);
     printf("Content-Length: %zu\r\n\r\n%s", strlen(msg), msg);
     fflush(stdout);
+    pthread_mutex_unlock(&stdout_mutex);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
