@@ -41,7 +41,14 @@ void cancellation_init(void);
 
 /** Record that the client cancelled request @p id.  Idempotent.
  *  If the set is full the call is dropped, leaving the request to run
- *  as if uncancelled — same behaviour as before this module existed. */
+ *  as if uncancelled — same behaviour as before this module existed.
+ *
+ *  Note: a cancel that arrives after the matching request has already
+ *  been responded to (some clients emit "stale" cancels) has no path
+ *  to be cleared and will sit in the set until init time.  Set
+ *  capacity is large enough that this is acceptable for any realistic
+ *  session length; a future enhancement could add aging if a server
+ *  is restarted infrequently. */
 void cancellation_mark(int64_t id);
 
 /** Atomically test-and-remove.  Returns 1 if @p id was in the set, 0 otherwise.

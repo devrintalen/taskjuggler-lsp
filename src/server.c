@@ -1898,6 +1898,15 @@ void server_dispatch_stale(yyjson_doc *in_doc) {
     yyjson_val *id_item = yyjson_obj_get(root, "id");
     if (!id_item) return;
 
+    /* Drop any pending cancellation for this id — we're responding to
+     * the request right now (with ContentModified), so the cancel can
+     * never apply.  Without this, a cancel that arrives between the
+     * stale-detection point and now would sit in the set indefinitely
+     * since this path skips the end-of-dispatch_query clear. */
+    if (yyjson_is_int(id_item)) {
+        cancellation_clear(yyjson_get_sint(id_item));
+    }
+
     yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *resp = make_error_response(out_doc, id_item, -32801,
                                                 "Content modified");
@@ -1916,9 +1925,10 @@ void server_dispatch_query(yyjson_doc *in_doc) {
     yyjson_mut_val *resp = NULL;
 
     /* Numeric ids only; string/null ids are passed through uncancellable.
-     * LSP clients in practice all use integer ids for cancellable requests. */
+     * LSP clients in practice all use integer ids for cancellable requests.
+     * yyjson_is_int matches both signed and unsigned integer subtypes. */
     int64_t req_id        = 0;
-    int     have_int_id   = id_item && (yyjson_is_int(id_item) || yyjson_is_uint(id_item));
+    int     have_int_id   = id_item && yyjson_is_int(id_item);
     if (have_int_id) {
         req_id = yyjson_get_sint(id_item);
         if (cancellation_check_and_clear(req_id)) {
@@ -1987,7 +1997,7 @@ void server_process(const char *json_text) {
     if (strcmp(m, "$/cancelRequest") == 0) {
         yyjson_val *p      = yyjson_obj_get(root, "params");
         yyjson_val *id_val = p ? yyjson_obj_get(p, "id") : NULL;
-        if (id_val && (yyjson_is_int(id_val) || yyjson_is_uint(id_val))) {
+        if (id_val && yyjson_is_int(id_val)) {
             cancellation_mark(yyjson_get_sint(id_val));
         }
         yyjson_doc_free(in_doc);

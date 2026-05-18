@@ -101,3 +101,16 @@ void job_free(Job *job) {
     free(job->uri);
     free(job);
 }
+
+void job_queue_mark_stale_for_uri(JobQueue *q, const char *uri) {
+    if (!q || !uri) return;
+    pthread_mutex_lock(&q->mutex);
+    for (Job *j = q->head; j != NULL; j = j->next) {
+        if (j->is_stale_droppable
+            && j->uri
+            && strcmp(j->uri, uri) == 0) {
+            j->is_marked_stale = 1;
+        }
+    }
+    pthread_mutex_unlock(&q->mutex);
+}

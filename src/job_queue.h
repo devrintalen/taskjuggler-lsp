@@ -60,6 +60,12 @@
  * are NOT, because they maintain per-document baseline state on the
  * server (sem_tokens_data + result_id) that a subsequent delta diffs
  * against — silently dropping the baseline would corrupt the delta chain.
+ *
+ * `is_marked_stale` is set in-place when a same-URI mutation is pushed
+ * to the same queue this job is in.  Read by the worker as a deterministic
+ * staleness signal that doesn't depend on whether the version bump has
+ * raced ahead of the worker's mutation_versions read.  Set under the
+ * queue mutex so the marking is atomic relative to concurrent pops.
  */
 typedef struct Job {
     yyjson_doc *request_doc;
@@ -67,6 +73,7 @@ typedef struct Job {
     char       *uri;
     int         is_coalesceable;
     int         is_stale_droppable;
+    int         is_marked_stale;
     int64_t     snapshot_version;
     struct Job *next;
 } Job;
@@ -115,3 +122,13 @@ void      job_queue_close(JobQueue *q);
  * job.
  */
 void      job_free(Job *job);
+
+/**
+ * Walk @p q under its mutex, setting is_marked_stale=1 on every
+ * is_stale_droppable job whose URI equals @p uri.  Called by the
+ * reader when enqueuing a mutation, so that any same-URI droppable
+ * queries already in the queue are deterministically flagged before
+ * the worker pops them — eliminating the race between the reader's
+ * mutation_versions bump and the worker's snapshot read.
+ */
+void      job_queue_mark_stale_for_uri(JobQueue *q, const char *uri);
