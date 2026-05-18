@@ -56,9 +56,11 @@ void job_queue_push(JobQueue *q, Job *job) {
      * and an older same-URI didChange could observe the older parse,
      * so collapsing across it would change visible LSP semantics. */
     if (q->tail
-        && q->tail->coalesce_uri
-        && job->coalesce_uri
-        && strcmp(q->tail->coalesce_uri, job->coalesce_uri) == 0) {
+        && q->tail->is_coalesceable
+        && job->is_coalesceable
+        && q->tail->uri
+        && job->uri
+        && strcmp(q->tail->uri, job->uri) == 0) {
         yyjson_doc_free(q->tail->request_doc);
         q->tail->request_doc = job->request_doc;
         job->request_doc = NULL;
@@ -96,6 +98,6 @@ void job_queue_close(JobQueue *q) {
 void job_free(Job *job) {
     if (!job) return;
     yyjson_doc_free(job->request_doc);
-    free(job->coalesce_uri);
+    free(job->uri);
     free(job);
 }

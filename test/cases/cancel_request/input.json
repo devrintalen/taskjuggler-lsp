@@ -1,0 +1,61 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": null,
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///test/cancel.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "project test \"Test\" 2026-01-01 +1y {}\ntask a \"A\" {}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "$/cancelRequest",
+    "params": { "id": 42 }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 42,
+    "method": "textDocument/documentSymbol",
+    "params": {
+      "textDocument": { "uri": "file:///test/cancel.tjp" }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 43,
+    "method": "textDocument/documentSymbol",
+    "params": {
+      "textDocument": { "uri": "file:///test/cancel.tjp" }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "$/cancelRequest",
+    "params": { "id": 99999 }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 100,
+    "method": "shutdown",
+    "params": {}
+  }
+]

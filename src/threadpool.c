@@ -19,6 +19,7 @@
 /** @file */
 
 #include "threadpool.h"
+#include "mutation_versions.h"
 #include "server.h"
 
 #include <pthread.h>
@@ -113,7 +114,19 @@ static void *query_worker(void *arg) {
     while (1) {
         Job *job = job_queue_pop(query_pool_queue);
         if (!job) break;
-        server_dispatch_query(job->request_doc);
+        /* Stale-query short-circuit: if a same-URI mutation has been
+         * enqueued since this query was, the client has typed past the
+         * state this query was asked against.  Skip the handler and
+         * return a ContentModified error instead.  Only applied to
+         * queries flagged droppable — semanticTokens variants opt out
+         * because dropping their baseline corrupts the delta chain. */
+        if (job->is_stale_droppable
+            && job->uri
+            && mutation_versions_snapshot(job->uri) != job->snapshot_version) {
+            server_dispatch_stale(job->request_doc);
+        } else {
+            server_dispatch_query(job->request_doc);
+        }
         job_free(job);
         in_flight_dec();
     }
@@ -150,8 +163,9 @@ void threadpool_enqueue_mutation(Job *job) {
 }
 
 void threadpool_enqueue_didchange(Job *job, const char *uri) {
-    job->is_mutation = 1;
-    job->coalesce_uri = strdup(uri);
+    job->is_mutation     = 1;
+    job->is_coalesceable = 1;
+    if (!job->uri) job->uri = strdup(uri);
     job_queue_push(work_queue, job);
 }
 

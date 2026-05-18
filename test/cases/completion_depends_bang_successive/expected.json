@@ -107,46 +107,9 @@
   {
     "jsonrpc": "2.0",
     "id": 2,
-    "result": {
-      "isIncomplete": false,
-      "items": [
-        {
-          "kind": 3,
-          "detail": "\"A\"",
-          "sortText": "0",
-          "label": "A"
-        },
-        {
-          "kind": 3,
-          "detail": "\"A1\"",
-          "sortText": "0",
-          "label": "A.A1"
-        },
-        {
-          "kind": 3,
-          "detail": "\"Leaf\"",
-          "sortText": "0",
-          "label": "A.A1.leaf"
-        },
-        {
-          "kind": 3,
-          "detail": "\"Sibling\"",
-          "sortText": "0",
-          "label": "A.A1.sib"
-        },
-        {
-          "kind": 3,
-          "detail": "\"A-Leaf\"",
-          "sortText": "0",
-          "label": "A.aleaf"
-        },
-        {
-          "kind": 3,
-          "detail": "\"B\"",
-          "sortText": "0",
-          "label": "B"
-        }
-      ]
+    "error": {
+      "code": -32801,
+      "message": "Content modified"
     }
   },
   {
@@ -160,48 +123,9 @@
   {
     "jsonrpc": "2.0",
     "id": 3,
-    "result": {
-      "isIncomplete": true,
-      "items": [
-        {
-          "kind": 3,
-          "detail": "\"Leaf\"",
-          "sortText": "0",
-          "label": "!leaf",
-          "textEdit": {
-            "range": {
-              "start": {
-                "line": 4,
-                "character": 16
-              },
-              "end": {
-                "line": 4,
-                "character": 17
-              }
-            },
-            "newText": "!leaf"
-          }
-        },
-        {
-          "kind": 3,
-          "detail": "\"Sibling\"",
-          "sortText": "0",
-          "label": "!sib",
-          "textEdit": {
-            "range": {
-              "start": {
-                "line": 4,
-                "character": 16
-              },
-              "end": {
-                "line": 4,
-                "character": 17
-              }
-            },
-            "newText": "!sib"
-          }
-        }
-      ]
+    "error": {
+      "code": -32801,
+      "message": "Content modified"
     }
   },
   {
@@ -215,86 +139,9 @@
   {
     "jsonrpc": "2.0",
     "id": 4,
-    "result": {
-      "isIncomplete": true,
-      "items": [
-        {
-          "kind": 3,
-          "detail": "\"A1\"",
-          "sortText": "0",
-          "label": "!!A1",
-          "textEdit": {
-            "range": {
-              "start": {
-                "line": 4,
-                "character": 16
-              },
-              "end": {
-                "line": 4,
-                "character": 18
-              }
-            },
-            "newText": "!!A1"
-          }
-        },
-        {
-          "kind": 3,
-          "detail": "\"Leaf\"",
-          "sortText": "0",
-          "label": "!!A1.leaf",
-          "textEdit": {
-            "range": {
-              "start": {
-                "line": 4,
-                "character": 16
-              },
-              "end": {
-                "line": 4,
-                "character": 18
-              }
-            },
-            "newText": "!!A1.leaf"
-          }
-        },
-        {
-          "kind": 3,
-          "detail": "\"Sibling\"",
-          "sortText": "0",
-          "label": "!!A1.sib",
-          "textEdit": {
-            "range": {
-              "start": {
-                "line": 4,
-                "character": 16
-              },
-              "end": {
-                "line": 4,
-                "character": 18
-              }
-            },
-            "newText": "!!A1.sib"
-          }
-        },
-        {
-          "kind": 3,
-          "detail": "\"A-Leaf\"",
-          "sortText": "0",
-          "label": "!!aleaf",
-          "textEdit": {
-            "range": {
-              "start": {
-                "line": 4,
-                "character": 16
-              },
-              "end": {
-                "line": 4,
-                "character": 18
-              }
-            },
-            "newText": "!!aleaf"
-          }
-        }
-      ]
+    "error": {
+      "code": -32801,
+      "message": "Content modified"
     }
   },
   {
