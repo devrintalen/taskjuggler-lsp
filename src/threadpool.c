@@ -23,7 +23,6 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* One query worker.  Per-document cache mutexes (Document.cache_lock
@@ -81,13 +80,6 @@ static void wait_for_in_flight_drain(void) {
  * Mutations dispatch synchronously after waiting for any in-flight queries
  * to drain.  Queries are pushed onto query_pool_queue and run on the
  * worker pool in parallel. */
-static void job_free(Job *job) {
-    if (!job) return;
-    yyjson_doc_free(job->request_doc);
-    free(job->coalesce_uri);
-    free(job);
-}
-
 static void *coordinator(void *arg) {
     (void)arg;
     while (1) {
@@ -109,6 +101,13 @@ static void *coordinator(void *arg) {
     return NULL;
 }
 
+/* Query handlers in server_dispatch_query read Document.parse without
+ * calling parse_result_acquire().  That is safe today because the
+ * coordinator blocks every mutation on wait_for_in_flight_drain(), so
+ * no mutation can release or swap a ParseResult while a worker holds
+ * a pointer to it.  If a future change drops the barrier (e.g. to
+ * unblock mutations during long-running queries), handlers must start
+ * acquiring/releasing around their access to Document.parse. */
 static void *query_worker(void *arg) {
     (void)arg;
     while (1) {

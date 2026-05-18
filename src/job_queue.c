@@ -63,8 +63,7 @@ void job_queue_push(JobQueue *q, Job *job) {
         q->tail->request_doc = job->request_doc;
         job->request_doc = NULL;
         pthread_mutex_unlock(&q->mutex);
-        free(job->coalesce_uri);
-        free(job);
+        job_free(job);
         return;
     }
     if (q->tail) q->tail->next = job;
@@ -92,4 +91,11 @@ void job_queue_close(JobQueue *q) {
     q->closed = 1;
     pthread_cond_broadcast(&q->cond);
     pthread_mutex_unlock(&q->mutex);
+}
+
+void job_free(Job *job) {
+    if (!job) return;
+    yyjson_doc_free(job->request_doc);
+    free(job->coalesce_uri);
+    free(job);
 }

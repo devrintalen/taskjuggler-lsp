@@ -85,3 +85,12 @@ Job      *job_queue_pop(JobQueue *q);
  * then their next pop returns NULL.
  */
 void      job_queue_close(JobQueue *q);
+
+/**
+ * Free a Job and any heap fields it owns.  NULL-safe per field, so
+ * callers may transfer ownership of an owned field elsewhere by
+ * NULL-ing it before calling.  Used by workers after dispatch and by
+ * the coalesce branch of job_queue_push when collapsing a redundant
+ * job.
+ */
+void      job_free(Job *job);
