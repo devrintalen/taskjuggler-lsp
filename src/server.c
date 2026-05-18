@@ -23,6 +23,7 @@
 
 #include "server.h"
 #include "parser.h"
+#include "threadpool.h"
 #include "diagnostics.h"
 #include "definition.h"
 #include "references.h"
@@ -42,6 +43,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,9 +58,9 @@
 
 /** Document store slot — URI plus authoritative text and its parse result. */
 typedef struct {
-    char       *uri;                  /**< document URI, heap-allocated */
-    char       *text;                 /**< full source text, heap-allocated */
-    ParseResult parse;                /**< parse output for the current text */
+    char        *uri;                 /**< document URI, heap-allocated */
+    char        *text;                /**< full source text, heap-allocated */
+    ParseResult *parse;               /**< parse output for the current text; NULL when slot has no parse */
     char       *doc_symbols_json;     /**< cached documentSymbol JSON array; NULL = invalid */
     size_t      doc_symbols_json_len; /**< byte length of doc_symbols_json (excluding NUL) */
     /* Last semantic-tokens response sent to the client.  Retained across
@@ -68,6 +70,19 @@ typedef struct {
     uint32_t   *sem_tokens_data;
     size_t      sem_tokens_count;     /**< entries in sem_tokens_data (multiple of 5) */
     char       *sem_tokens_result_id; /**< resultId returned alongside the data */
+    /* Serializes concurrent query workers when they touch the lazy caches
+     * above.  doc_symbols_json is populated on first request; sem_tokens_*
+     * is read-modify-write for both semanticTokens/full and its delta
+     * variant.  Mutation handlers do not need this lock because the
+     * coordinator's in-flight barrier already mutually excludes them
+     * with all in-flight queries. */
+    pthread_mutex_t cache_lock;
+    /* Monotonic per-document counter used to mint resultIds for
+     * semanticTokens responses.  Scoped to the document so concurrent
+     * sem_tokens queries on different documents produce deterministic
+     * IDs regardless of thread scheduling.  Read-modify-write under
+     * cache_lock. */
+    uint64_t        next_sem_tokens_result_id;
     int         in_use;               /**< 1 if this slot holds a live document */
     int         disk_only;            /**< 1 = loaded from disk/watcher, not opened by editor */
 } Document;
@@ -139,7 +154,9 @@ static Document *doc_alloc(const char *uri) {
             docs[i].in_use = 1;
             docs[i].uri    = canon; /* ownership transferred */
             docs[i].text   = NULL;
-            memset(&docs[i].parse, 0, sizeof(docs[i].parse));
+            docs[i].parse  = NULL;
+            docs[i].next_sem_tokens_result_id = 1;
+            pthread_mutex_init(&docs[i].cache_lock, NULL);
             return &docs[i];
         }
     }
@@ -159,7 +176,8 @@ static void doc_free(Document *d) {
     free(d->doc_symbols_json);
     free(d->sem_tokens_data);
     free(d->sem_tokens_result_id);
-    parse_result_free(&d->parse);
+    parse_result_release(d->parse);
+    pthread_mutex_destroy(&d->cache_lock);
     memset(d, 0, sizeof(*d));
 }
 
@@ -167,9 +185,16 @@ static void doc_free(Document *d) {
    Server-to-client messaging
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Serializes stdout writes from any thread.  Acquired around every
+ * Content-Length-framed write so responses and notifications never
+ * interleave mid-message. */
+static pthread_mutex_t stdout_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 void lsp_send_message(const char *msg) {
+    pthread_mutex_lock(&stdout_mutex);
     printf("Content-Length: %zu\r\n\r\n%s", strlen(msg), msg);
     fflush(stdout);
+    pthread_mutex_unlock(&stdout_mutex);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -386,7 +411,7 @@ static void load_file_from_disk(const char *path) {
     document->text      = text;
     document->disk_only = 1;
     document->parse     = parse(text);
-    follow_includes(path, &document->parse);
+    follow_includes(path, document->parse);
 }
 
 /**
@@ -655,7 +680,7 @@ static void revalidate_all_docs(void) {
     /* Pass A: clear cross-file state in all open documents. */
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
-        clear_cross_file_state(&docs[i].parse);
+        clear_cross_file_state(docs[i].parse);
     }
 
     /* Pass B: resolve cross-file deps in each document against all others. */
@@ -668,13 +693,13 @@ static void revalidate_all_docs(void) {
         int num_extra = 0;
         for (int j = 0; j < MAX_DOCS; j++) {
             if (!docs[j].in_use || j == i) continue;
-            extra_roots[num_extra]  = docs[j].parse.doc_symbols;
-            extra_counts[num_extra] = docs[j].parse.num_doc_symbols;
+            extra_roots[num_extra]  = docs[j].parse->doc_symbols;
+            extra_counts[num_extra] = docs[j].parse->num_doc_symbols;
             extra_uris[num_extra]   = docs[j].uri;
             num_extra++;
         }
 
-        resolve_cross_file_deps(&docs[i].parse,
+        resolve_cross_file_deps(docs[i].parse,
                                 extra_roots, extra_counts, extra_uris,
                                 num_extra, docs[i].uri);
     }
@@ -687,7 +712,7 @@ static void revalidate_all_docs(void) {
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
         if (docs[i].disk_only) continue;
-        publish_diagnostics(docs[i].uri, &docs[i].parse);
+        publish_diagnostics(docs[i].uri, docs[i].parse);
     }
 }
 
@@ -955,9 +980,9 @@ static void handle_did_change_watched_files(yyjson_val *params) {
             document->doc_symbols_json_len = 0;
             document->text      = text;
             document->disk_only = 1;
-            parse_result_free(&document->parse);
+            parse_result_release(document->parse);
             document->parse = parse(text);
-            follow_includes(path, &document->parse);
+            follow_includes(path, document->parse);
             free(path);
             changed = 1;
         }
@@ -1016,11 +1041,11 @@ static void handle_did_rename_files(yyjson_val *params) {
         free(new_doc->doc_symbols_json);
         new_doc->doc_symbols_json     = NULL;
         new_doc->doc_symbols_json_len = 0;
-        parse_result_free(&new_doc->parse);
+        parse_result_release(new_doc->parse);
         new_doc->text      = text;
         new_doc->disk_only = 1;
         new_doc->parse     = parse(text);
-        follow_includes(path, &new_doc->parse);
+        follow_includes(path, new_doc->parse);
         free(path);
         changed = 1;
     }
@@ -1064,7 +1089,8 @@ static void handle_didopen(yyjson_val *params) {
         free(d->doc_symbols_json);
         d->doc_symbols_json     = NULL;
         d->doc_symbols_json_len = 0;
-        parse_result_free(&d->parse);
+        parse_result_release(d->parse);
+        d->parse = NULL;
     } else {
         d = doc_alloc(uri);
         if (!d) return; /* document store full */
@@ -1075,7 +1101,7 @@ static void handle_didopen(yyjson_val *params) {
 
     char *path = uri_to_path(uri);
     if (path) {
-        follow_includes(path, &d->parse);
+        follow_includes(path, d->parse);
         free(path);
     }
 
@@ -1144,13 +1170,13 @@ static void handle_didchange(yyjson_val *params) {
     d->doc_symbols_json     = NULL;
     d->doc_symbols_json_len = 0;
     d->text = current;
-    parse_result_free(&d->parse);
+    parse_result_release(d->parse);
     d->parse = parse(d->text);
 
     /* Pick up any new `include` directives the edit introduced. */
     char *path = uri_to_path(uri);
     if (path) {
-        follow_includes(path, &d->parse);
+        follow_includes(path, d->parse);
         free(path);
     }
 
@@ -1189,9 +1215,9 @@ static void handle_didclose(yyjson_val *params) {
         d->doc_symbols_json_len = 0;
         d->text      = text;
         d->disk_only = 1;
-        parse_result_free(&d->parse);
+        parse_result_release(d->parse);
         d->parse = parse(text);
-        follow_includes(path, &d->parse);
+        follow_includes(path, d->parse);
     } else {
         /* File gone from disk — remove and clear client-side diagnostics */
         ParseResult empty = {0};
@@ -1227,13 +1253,15 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
+    pthread_mutex_lock(&d->cache_lock);
     if (!d->doc_symbols_json)
-        d->doc_symbols_json = build_document_symbols_json(d->parse.doc_symbols,
-                                                           d->parse.num_doc_symbols,
+        d->doc_symbols_json = build_document_symbols_json(d->parse->doc_symbols,
+                                                           d->parse->num_doc_symbols,
                                                            &d->doc_symbols_json_len);
     yyjson_mut_val *raw = yyjson_mut_rawncpy(doc,
                                               d->doc_symbols_json,
                                               d->doc_symbols_json_len);
+    pthread_mutex_unlock(&d->cache_lock);
     return make_response(doc, id, raw);
 }
 
@@ -1261,10 +1289,10 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_mut_val *arr = build_folding_ranges_json(doc,
-                                                     d->parse.tok_spans,
-                                                     d->parse.num_tok_spans,
-                                                     d->parse.doc_symbols,
-                                                     d->parse.num_doc_symbols);
+                                                     d->parse->tok_spans,
+                                                     d->parse->num_tok_spans,
+                                                     d->parse->doc_symbols,
+                                                     d->parse->num_doc_symbols);
     return make_response(doc, id, arr);
 }
 
@@ -1293,10 +1321,10 @@ static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_mut_val *arr = build_code_lens_json(doc,
-                                                d->parse.tok_spans,
-                                                d->parse.num_tok_spans,
-                                                d->parse.doc_symbols,
-                                                d->parse.num_doc_symbols);
+                                                d->parse->tok_spans,
+                                                d->parse->num_tok_spans,
+                                                d->parse->doc_symbols,
+                                                d->parse->num_doc_symbols);
     return make_response(doc, id, arr);
 }
 
@@ -1360,7 +1388,7 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
     /* Check whether the cursor is on a resolved dependency/allocation reference.
      * If so, show the target symbol's kind, id, and name instead of keyword docs. */
     const DefinitionLink *hover_link = find_def_link_at(
-        d->parse.tok_spans, d->parse.num_tok_spans, pos);
+        d->parse->tok_spans, d->parse->num_tok_spans, pos);
     if (hover_link) {
         const DocSymbol *sym = hover_link->target;
         if (!sym) goto keyword_hover;
@@ -1386,7 +1414,7 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
 keyword_hover:;
     /* Fall back to keyword documentation */
-    ActiveKeyword ak = active_keyword_at(d->parse.tok_spans, d->parse.num_tok_spans, pos);
+    ActiveKeyword ak = active_keyword_at(d->parse->tok_spans, d->parse->num_tok_spans, pos);
     if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     const char *doc_text = keyword_docs(ak.keyword);
@@ -1441,7 +1469,7 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-    ActiveContext ac = active_context(d->parse.tok_spans, d->parse.num_tok_spans, pos);
+    ActiveContext ac = active_context(d->parse->tok_spans, d->parse->num_tok_spans, pos);
     if (!ac.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_mut_val *sig = build_signature_help_json(doc, ac.keyword, ac.arg_count);
@@ -1450,17 +1478,13 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
     return make_response(doc, id, sig);
 }
 
-/**
- * Monotonic counter used to mint resultIds for semanticTokens responses.
- * One process-wide counter is sufficient: stale ids from prior sessions
- * cannot match because the server restarts the counter at 1.
- */
-static uint64_t next_sem_tokens_result_id = 1;
-
-/** Format the next resultId as a heap-allocated decimal string. */
-static char *mint_sem_tokens_result_id(void) {
+/** Format the document's next resultId as a heap-allocated decimal
+ * string.  Caller must hold @p d->cache_lock; this is a plain
+ * read-modify-write of @p d->next_sem_tokens_result_id. */
+static char *mint_sem_tokens_result_id(Document *d) {
     char buf[32];
-    int n = snprintf(buf, sizeof(buf), "%" PRIu64, next_sem_tokens_result_id++);
+    int n = snprintf(buf, sizeof(buf), "%" PRIu64,
+                     d->next_sem_tokens_result_id++);
     if (n < 0) return NULL;
     return strdup(buf);
 }
@@ -1505,16 +1529,18 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
+    pthread_mutex_lock(&d->cache_lock);
     uint32_t *buf = NULL;
     size_t    count = 0;
-    compute_semantic_tokens_data(d->parse.tok_spans,
-                                  d->parse.num_tok_spans,
-                                  d->parse.num_sem_entries,
+    compute_semantic_tokens_data(d->parse->tok_spans,
+                                  d->parse->num_tok_spans,
+                                  d->parse->num_sem_entries,
                                   &buf, &count);
-    char *result_id = mint_sem_tokens_result_id();
+    char *result_id = mint_sem_tokens_result_id(d);
     yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
     /* Transfer ownership of buf and result_id to the document cache. */
     doc_set_sem_tokens(d, buf, count, result_id);
+    pthread_mutex_unlock(&d->cache_lock);
     return make_response(doc, id, result);
 }
 
@@ -1549,13 +1575,14 @@ static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yy
     Document *d = doc_find(uri);
     if (!d) return make_response(doc, id, yyjson_mut_null(doc));
 
+    pthread_mutex_lock(&d->cache_lock);
     uint32_t *new_buf = NULL;
     size_t    new_count = 0;
-    compute_semantic_tokens_data(d->parse.tok_spans,
-                                  d->parse.num_tok_spans,
-                                  d->parse.num_sem_entries,
+    compute_semantic_tokens_data(d->parse->tok_spans,
+                                  d->parse->num_tok_spans,
+                                  d->parse->num_sem_entries,
                                   &new_buf, &new_count);
-    char *result_id = mint_sem_tokens_result_id();
+    char *result_id = mint_sem_tokens_result_id(d);
 
     yyjson_mut_val *result;
     if (d->sem_tokens_data && d->sem_tokens_result_id && previous_result_id &&
@@ -1570,6 +1597,7 @@ static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yy
     }
 
     doc_set_sem_tokens(d, new_buf, new_count, result_id);
+    pthread_mutex_unlock(&d->cache_lock);
     return make_response(doc, id, result);
 }
 
@@ -1602,8 +1630,8 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_references_json(doc,
                                                     uri,
-                                                    d->parse.tok_spans,
-                                                    d->parse.num_tok_spans,
+                                                    d->parse->tok_spans,
+                                                    d->parse->num_tok_spans,
                                                     pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1638,10 +1666,10 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
 
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_document_highlight_json(doc,
-                                                            d->parse.doc_symbols,
-                                                            d->parse.num_doc_symbols,
-                                                            d->parse.tok_spans,
-                                                            d->parse.num_tok_spans,
+                                                            d->parse->doc_symbols,
+                                                            d->parse->num_doc_symbols,
+                                                            d->parse->tok_spans,
+                                                            d->parse->num_tok_spans,
                                                             pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1676,8 +1704,8 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
 
     LspPos pos         = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_definition_json(doc,
-                                                    d->parse.tok_spans,
-                                                    d->parse.num_tok_spans,
+                                                    d->parse->tok_spans,
+                                                    d->parse->num_tok_spans,
                                                     pos, uri);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1728,18 +1756,18 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use || &docs[i] == d) continue;
         if (docs[i].disk_only) continue;
-        extra_pools[num_extra]  = docs[i].parse.doc_symbols;
-        extra_counts[num_extra] = docs[i].parse.num_doc_symbols;
+        extra_pools[num_extra]  = docs[i].parse->doc_symbols;
+        extra_counts[num_extra] = docs[i].parse->num_doc_symbols;
         num_extra++;
     }
 
     LspPos pos             = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_completions_json(doc,
-                                                     d->parse.tok_spans,
-                                                     d->parse.num_tok_spans,
+                                                     d->parse->tok_spans,
+                                                     d->parse->num_tok_spans,
                                                      pos,
-                                                     d->parse.doc_symbols,
-                                                     d->parse.num_doc_symbols,
+                                                     d->parse->doc_symbols,
+                                                     d->parse->num_doc_symbols,
                                                      extra_pools,
                                                      extra_counts,
                                                      num_extra,
@@ -1767,8 +1795,8 @@ static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
         collect_workspace_symbols(doc, query,
-                                  docs[i].parse.doc_symbols,
-                                  docs[i].parse.num_doc_symbols,
+                                  docs[i].parse->doc_symbols,
+                                  docs[i].parse->num_doc_symbols,
                                   docs[i].uri, arr);
     }
     return make_response(doc, id, arr);
@@ -1778,15 +1806,40 @@ static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *
    Main dispatch
    ═══════════════════════════════════════════════════════════════════════════ */
 
-char *server_process(const char *json_text) {
-    yyjson_doc *in_doc = yyjson_read(json_text, strlen(json_text), 0);
-    if (!in_doc) return NULL;
+/* Return 1 when @p method names a state-mutating or lifecycle operation
+ * that must run on the single mutation worker; 0 for read-only queries.
+ * NULL or unknown methods are treated as queries so that the query
+ * worker pool's null-response fallback fires. */
+static int is_mutation_method(const char *method) {
+    if (!method) return 0;
+    return strcmp(method, "initialize") == 0
+        || strcmp(method, "initialized") == 0
+        || strcmp(method, "shutdown") == 0
+        || strcmp(method, "textDocument/didOpen") == 0
+        || strcmp(method, "textDocument/didChange") == 0
+        || strcmp(method, "textDocument/didClose") == 0
+        || strcmp(method, "workspace/didChangeWatchedFiles") == 0
+        || strcmp(method, "workspace/didRenameFiles") == 0;
+}
 
+/* Serialize a response yyjson tree to stdout while still holding the
+ * doc-store lock — the response strings may reference data owned by
+ * ParseResults that a mutation could otherwise free the instant we
+ * unlock.  After serialization the resulting text is independent. */
+static void send_response(yyjson_mut_doc *out_doc, yyjson_mut_val *resp) {
+    yyjson_mut_doc_set_root(out_doc, resp);
+    char *text = yyjson_mut_write(out_doc, 0, NULL);
+    if (text) {
+        lsp_send_message(text);
+        free(text);
+    }
+}
+
+void server_dispatch_mutation(yyjson_doc *in_doc) {
     yyjson_val *root    = yyjson_doc_get_root(in_doc);
     yyjson_val *id_item = yyjson_obj_get(root, "id");
     yyjson_val *method  = yyjson_obj_get(root, "method");
     yyjson_val *params  = yyjson_obj_get(root, "params");
-
     const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
 
     yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
@@ -1794,96 +1847,109 @@ char *server_process(const char *json_text) {
 
     if (strcmp(m, "initialize") == 0) {
         resp = handle_initialize(out_doc, id_item, params);
-
     } else if (strcmp(m, "initialized") == 0) {
         handle_initialized();
-        /* notification — no response to client */
-
     } else if (strcmp(m, "shutdown") == 0) {
         resp = handle_shutdown(out_doc, id_item);
-
-    } else if (strcmp(m, "exit") == 0) {
-        yyjson_doc_free(in_doc);
-        yyjson_mut_doc_free(out_doc);
-        exit(0);
-
     } else if (strcmp(m, "textDocument/didOpen") == 0) {
         handle_didopen(params);
-        /* no response needed */
-
     } else if (strcmp(m, "textDocument/didChange") == 0) {
         handle_didchange(params);
-
     } else if (strcmp(m, "textDocument/didClose") == 0) {
         handle_didclose(params);
-
-    } else if (strcmp(m, "textDocument/documentSymbol") == 0) {
-        resp = handle_document_symbol(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/foldingRange") == 0) {
-        resp = handle_folding_range(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/codeLens") == 0) {
-        resp = handle_code_lens(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/hover") == 0) {
-        resp = handle_hover(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/signatureHelp") == 0) {
-        resp = handle_signature_help(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/references") == 0) {
-        resp = handle_references(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/documentHighlight") == 0) {
-        resp = handle_document_highlight(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/definition") == 0) {
-        resp = handle_definition(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/completion") == 0) {
-        resp = handle_completion(out_doc, id_item, params);
-
     } else if (strcmp(m, "workspace/didChangeWatchedFiles") == 0) {
         handle_did_change_watched_files(params);
-
     } else if (strcmp(m, "workspace/didRenameFiles") == 0) {
         handle_did_rename_files(params);
-
-    } else if (strcmp(m, "workspace/symbol") == 0) {
-        resp = handle_workspace_symbol(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
-        resp = handle_semantic_tokens_full(out_doc, id_item, params);
-
-    } else if (strcmp(m, "textDocument/semanticTokens/full/delta") == 0) {
-        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params);
-
-    /* TODO: textDocument/semanticTokens/range — requires filtering tok_spans
-     * to the requested range before encoding.  Advertise "range": true in
-     * capabilities once implemented. */
-
     } else if (id_item) {
-        /* Unknown request — return null result */
+        /* Misclassified or unknown request with an id — null result */
         resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
     }
 
-    yyjson_doc_free(in_doc);
+    if (resp) send_response(out_doc, resp);
+    yyjson_mut_doc_free(out_doc);
+}
 
-    if (!resp) {
-        yyjson_mut_doc_free(out_doc);
-        return NULL;
+void server_dispatch_query(yyjson_doc *in_doc) {
+    yyjson_val *root    = yyjson_doc_get_root(in_doc);
+    yyjson_val *id_item = yyjson_obj_get(root, "id");
+    yyjson_val *method  = yyjson_obj_get(root, "method");
+    yyjson_val *params  = yyjson_obj_get(root, "params");
+    const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
+
+    yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *resp = NULL;
+
+    if (strcmp(m, "textDocument/documentSymbol") == 0) {
+        resp = handle_document_symbol(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/foldingRange") == 0) {
+        resp = handle_folding_range(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/codeLens") == 0) {
+        resp = handle_code_lens(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/hover") == 0) {
+        resp = handle_hover(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/signatureHelp") == 0) {
+        resp = handle_signature_help(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/references") == 0) {
+        resp = handle_references(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/documentHighlight") == 0) {
+        resp = handle_document_highlight(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/definition") == 0) {
+        resp = handle_definition(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/completion") == 0) {
+        resp = handle_completion(out_doc, id_item, params);
+    } else if (strcmp(m, "workspace/symbol") == 0) {
+        resp = handle_workspace_symbol(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
+        resp = handle_semantic_tokens_full(out_doc, id_item, params);
+    } else if (strcmp(m, "textDocument/semanticTokens/full/delta") == 0) {
+        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params);
+    } else if (id_item) {
+        /* Unknown request — null result */
+        resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
     }
 
-    yyjson_mut_doc_set_root(out_doc, resp);
-    char *text = yyjson_mut_write(out_doc, 0, NULL);
+    if (resp) send_response(out_doc, resp);
     yyjson_mut_doc_free(out_doc);
-    return text;
+}
+
+void server_process(const char *json_text) {
+    yyjson_doc *in_doc = yyjson_read(json_text, strlen(json_text), 0);
+    if (!in_doc) return;
+
+    yyjson_val *root   = yyjson_doc_get_root(in_doc);
+    yyjson_val *method = yyjson_obj_get(root, "method");
+    const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
+
+    if (strcmp(m, "exit") == 0) {
+        yyjson_doc_free(in_doc);
+        threadpool_stop();
+        exit(0);
+    }
+
+    Job *job = calloc(1, sizeof(Job));
+    if (!job) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    job->request_doc = in_doc; /* ownership transferred */
+
+    /* didChange events on the same URI may arrive faster than parse(),
+     * so route them through the coalescing entry point. */
+    if (strcmp(m, "textDocument/didChange") == 0) {
+        yyjson_val *params  = yyjson_obj_get(root, "params");
+        yyjson_val *td      = params ? yyjson_obj_get(params, "textDocument") : NULL;
+        yyjson_val *uri_val = td ? yyjson_obj_get(td, "uri") : NULL;
+        if (uri_val && yyjson_is_str(uri_val)) {
+            threadpool_enqueue_didchange(job, yyjson_get_str(uri_val));
+            return;
+        }
+    }
+
+    if (is_mutation_method(m))
+        threadpool_enqueue_mutation(job);
+    else
+        threadpool_enqueue_query(job);
 }
 
 void server_init() {
-     // Initialize array of Document objects
-     for (int i=0; i<MAX_DOCS; i++) {
-	  docs[i].in_use = 0;
-     }
+    for (int i = 0; i < MAX_DOCS; i++)
+        docs[i].in_use = 0;
 }

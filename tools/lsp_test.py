@@ -122,19 +122,9 @@ def format_json(obj):
     return json.dumps(obj, indent=2, sort_keys=True)
 
 
-def diff_output(expected, actual):
-    """Return a colored unified diff string, or empty string if equal."""
-    expected_lines = format_json(expected).splitlines(keepends=True)
-    actual_lines = format_json(actual).splitlines(keepends=True)
-    diff = list(difflib.unified_diff(
-        expected_lines, actual_lines,
-        fromfile='expected.json',
-        tofile='actual output',
-    ))
-    if not diff:
-        return ''
+def _colorize_diff(diff_lines):
     result = []
-    for line in diff:
+    for line in diff_lines:
         if line.startswith('+') and not line.startswith('+++'):
             result.append(green(line))
         elif line.startswith('-') and not line.startswith('---'):
@@ -144,6 +134,94 @@ def diff_output(expected, actual):
         else:
             result.append(dim(line))
     return ''.join(result)
+
+
+def _is_response(message):
+    """A JSON-RPC response has an `id` and no `method` field.
+
+    Notifications have `method` and no `id`. Server-initiated requests
+    have both `id` and `method` and are treated as notifications for
+    ordering purposes (they are server-emitted, not replies).
+    """
+    return isinstance(message, dict) \
+        and 'id' in message \
+        and 'method' not in message
+
+
+def _partition(messages):
+    """Split a message stream into (responses_by_id, ordered_notifications).
+
+    Async dispatch may reorder responses relative to one another and
+    relative to notifications, but the order of notifications among
+    themselves is semantically meaningful (e.g. diagnostics for file A
+    before file B). Compare responses by id, notifications by position.
+    """
+    responses = {}
+    notifications = []
+    duplicate_ids = []
+    for message in messages:
+        if _is_response(message):
+            mid = message['id']
+            key = json.dumps(mid, sort_keys=True)
+            if key in responses:
+                duplicate_ids.append(mid)
+            responses[key] = message
+        else:
+            notifications.append(message)
+    return responses, notifications, duplicate_ids
+
+
+def diff_output(expected, actual):
+    """Return a colored diff string, or empty string if equal.
+
+    Responses are matched by id (order-insensitive); notifications and
+    server-initiated requests are diffed in order.
+    """
+    exp_responses, exp_notifications, exp_dups = _partition(expected)
+    act_responses, act_notifications, act_dups = _partition(actual)
+
+    sections = []
+
+    if act_dups:
+        sections.append(red(
+            f"duplicate response ids in actual output: {act_dups}\n"
+        ))
+    if exp_dups:
+        sections.append(red(
+            f"duplicate response ids in expected output: {exp_dups}\n"
+        ))
+
+    missing_ids = sorted(set(exp_responses) - set(act_responses))
+    extra_ids = sorted(set(act_responses) - set(exp_responses))
+    if missing_ids:
+        sections.append(red(f"missing response ids: {missing_ids}\n"))
+    if extra_ids:
+        sections.append(red(f"unexpected response ids: {extra_ids}\n"))
+
+    for key in sorted(set(exp_responses) & set(act_responses)):
+        if exp_responses[key] != act_responses[key]:
+            exp_lines = format_json(exp_responses[key]).splitlines(keepends=True)
+            act_lines = format_json(act_responses[key]).splitlines(keepends=True)
+            diff = list(difflib.unified_diff(
+                exp_lines, act_lines,
+                fromfile=f'expected response id={key}',
+                tofile=f'actual response id={key}',
+            ))
+            if diff:
+                sections.append(_colorize_diff(diff))
+
+    if exp_notifications != act_notifications:
+        exp_lines = format_json(exp_notifications).splitlines(keepends=True)
+        act_lines = format_json(act_notifications).splitlines(keepends=True)
+        diff = list(difflib.unified_diff(
+            exp_lines, act_lines,
+            fromfile='expected notifications',
+            tofile='actual notifications',
+        ))
+        if diff:
+            sections.append(_colorize_diff(diff))
+
+    return ''.join(sections)
 
 
 def apply_substitutions(obj, case_dir):

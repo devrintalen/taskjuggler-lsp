@@ -19,6 +19,7 @@
 /** @file */
 
 #include "server.h"
+#include "threadpool.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,17 +76,14 @@ static char *read_message(void) {
  */
 int main(void) {
     server_init();
+    threadpool_start();
     for (;;) {
         char *body = read_message();
         if (!body) break;
 
-        char *response = server_process(body);
+        server_process(body);
         free(body);
-
-        if (response) {
-            lsp_send_message(response);
-            free(response);
-        }
     }
+    threadpool_stop();
     return 0;
 }

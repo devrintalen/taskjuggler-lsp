@@ -252,6 +252,19 @@ void parse_result_free(ParseResult *r) {
     memset(r, 0, sizeof(*r));
 }
 
+ParseResult *parse_result_acquire(ParseResult *r) {
+    atomic_fetch_add(&r->refcount, 1);
+    return r;
+}
+
+void parse_result_release(ParseResult *r) {
+    if (!r) return;
+    if (atomic_fetch_sub(&r->refcount, 1) == 1) {
+        parse_result_free(r);
+        free(r);
+    }
+}
+
 /**
  * Append @p s to @p r's `doc_symbols` pointer array, growing it if needed.
  *
@@ -743,10 +756,13 @@ void resolve_cross_file_deps(ParseResult *r,
 
 /* ── Public parse() entry point ──────────────────────────────────────────── */
 
-ParseResult parse(const char *src) {
+ParseResult *parse(const char *src) {
+    ParseResult *result = calloc(1, sizeof(ParseResult));
+    if (!result) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    atomic_store(&result->refcount, 1);
+
     /* Set up global state for lexer.l and grammar.y */
-    ParseResult result = {0};
-    g_result          = &result;
+    g_result          = result;
     g_tok_spans       = NULL;
     g_num_tok_spans   = 0;
     g_tok_span_cap    = 0;
@@ -761,9 +777,9 @@ ParseResult parse(const char *src) {
     yy_delete_buffer(buf);
 
     /* Transfer tok_spans array ownership to the ParseResult */
-    result.tok_spans       = g_tok_spans;
-    result.num_tok_spans   = g_num_tok_spans;
-    result.num_sem_entries = g_num_sem_entries;
+    result->tok_spans       = g_tok_spans;
+    result->num_tok_spans   = g_num_tok_spans;
+    result->num_sem_entries = g_num_sem_entries;
 
     /* Clear globals */
     g_result          = NULL;
@@ -773,14 +789,14 @@ ParseResult parse(const char *src) {
     g_num_sem_entries = 0;
 
     /* Build cross-references between tokens, symbols, and dep edges */
-    assign_parents(result.doc_symbols, result.num_doc_symbols, NULL);
-    assign_token_owners(&result);
-    resolve_dep_refs(&result);
+    assign_parents(result->doc_symbols, result->num_doc_symbols, NULL);
+    assign_token_owners(result);
+    resolve_dep_refs(result);
 
     /* Everything up to here is permanent: syntax errors plus in-file dep
      * diagnostics.  Cross-file diagnostics added later by the server's
      * revalidation pass start at this index and are truncated each cycle. */
-    result.dep_diag_start = result.num_diagnostics;
+    result->dep_diag_start = result->num_diagnostics;
 
     return result;
 }

@@ -52,6 +52,13 @@ void push_diagnostic(ParseResult *r, LspRange range, int severity,
 
 /* ── LSP publishDiagnostics notification ─────────────────────────────────── */
 
+/* Must only be called from the coordinator thread.  The test harness in
+ * tools/lsp_test.py compares notifications positionally (responses are
+ * matched by id, but notifications are an ordered list), so a worker
+ * emitting publishDiagnostics concurrently with the coordinator would
+ * interleave nondeterministically with mutation-emitted notifications
+ * and break golden-file diffs.  Today every call site sits inside a
+ * mutation handler (or revalidate_all_docs, which is called from one). */
 void publish_diagnostics(const char *uri, const ParseResult *r) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
 
