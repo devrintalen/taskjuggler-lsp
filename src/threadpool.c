@@ -19,6 +19,7 @@
 /** @file */
 
 #include "threadpool.h"
+#include "mutation_versions.h"
 #include "server.h"
 
 #include <pthread.h>
@@ -113,7 +114,30 @@ static void *query_worker(void *arg) {
     while (1) {
         Job *job = job_queue_pop(query_pool_queue);
         if (!job) break;
-        server_dispatch_query(job->request_doc);
+        /* Stale-query short-circuit: if a same-URI mutation has been
+         * enqueued since this query was, the client has typed past the
+         * state this query was asked against.  Skip the handler and
+         * return a ContentModified error instead.  Only applied to
+         * queries flagged droppable — semanticTokens variants opt out
+         * because dropping their baseline corrupts the delta chain.
+         *
+         * Two staleness signals, either one fires:
+         *  - is_marked_stale was set by a same-URI mutation enqueue under
+         *    the queue mutex; deterministic for queries still in a queue
+         *    when the mutation arrived.
+         *  - version mismatch catches queries that had already moved past
+         *    both queues when the mutation arrived (i.e., this worker
+         *    popped them between the mutation's queue walk and its bump).
+         */
+        int stale = job->is_stale_droppable
+                 && job->uri
+                 && (job->is_marked_stale
+                     || mutation_versions_snapshot(job->uri) != job->snapshot_version);
+        if (stale) {
+            server_dispatch_stale(job->request_doc);
+        } else {
+            server_dispatch_query(job->request_doc);
+        }
         job_free(job);
         in_flight_dec();
     }
@@ -144,14 +168,32 @@ void threadpool_stop(void) {
     pool_started     = 0;
 }
 
+/* Mark any same-URI droppable queries currently in either work or query-pool
+ * queue as stale, atomically with respect to concurrent pops, BEFORE pushing
+ * the mutation.  This makes the stale-detection deterministic for queries
+ * still residing in a queue at mutation-push time, eliminating the race
+ * between the reader's mutation_versions_bump and the worker's snapshot read.
+ * Queries that have moved past both queues into a worker's hands are still
+ * covered by the version-check fallback in query_worker(). */
+static void mark_stale_for_uri_in_all_queues(const char *uri) {
+    if (!uri) return;
+    /* Lock order: work_queue then query_pool_queue.  Matches the coordinator's
+     * pop-then-push direction, so no deadlock. */
+    job_queue_mark_stale_for_uri(work_queue, uri);
+    job_queue_mark_stale_for_uri(query_pool_queue, uri);
+}
+
 void threadpool_enqueue_mutation(Job *job) {
     job->is_mutation = 1;
+    mark_stale_for_uri_in_all_queues(job->uri);
     job_queue_push(work_queue, job);
 }
 
 void threadpool_enqueue_didchange(Job *job, const char *uri) {
-    job->is_mutation = 1;
-    job->coalesce_uri = strdup(uri);
+    job->is_mutation     = 1;
+    job->is_coalesceable = 1;
+    if (!job->uri) job->uri = strdup(uri);
+    mark_stale_for_uri_in_all_queues(job->uri);
     job_queue_push(work_queue, job);
 }
 

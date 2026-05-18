@@ -56,9 +56,11 @@ void job_queue_push(JobQueue *q, Job *job) {
      * and an older same-URI didChange could observe the older parse,
      * so collapsing across it would change visible LSP semantics. */
     if (q->tail
-        && q->tail->coalesce_uri
-        && job->coalesce_uri
-        && strcmp(q->tail->coalesce_uri, job->coalesce_uri) == 0) {
+        && q->tail->is_coalesceable
+        && job->is_coalesceable
+        && q->tail->uri
+        && job->uri
+        && strcmp(q->tail->uri, job->uri) == 0) {
         yyjson_doc_free(q->tail->request_doc);
         q->tail->request_doc = job->request_doc;
         job->request_doc = NULL;
@@ -96,6 +98,19 @@ void job_queue_close(JobQueue *q) {
 void job_free(Job *job) {
     if (!job) return;
     yyjson_doc_free(job->request_doc);
-    free(job->coalesce_uri);
+    free(job->uri);
     free(job);
+}
+
+void job_queue_mark_stale_for_uri(JobQueue *q, const char *uri) {
+    if (!q || !uri) return;
+    pthread_mutex_lock(&q->mutex);
+    for (Job *j = q->head; j != NULL; j = j->next) {
+        if (j->is_stale_droppable
+            && j->uri
+            && strcmp(j->uri, uri) == 0) {
+            j->is_marked_stale = 1;
+        }
+    }
+    pthread_mutex_unlock(&q->mutex);
 }

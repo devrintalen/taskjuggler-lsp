@@ -24,6 +24,8 @@
 #include "server.h"
 #include "parser.h"
 #include "threadpool.h"
+#include "cancellation.h"
+#include "mutation_versions.h"
 #include "diagnostics.h"
 #include "definition.h"
 #include "references.h"
@@ -656,6 +658,27 @@ static yyjson_mut_val *make_response(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_obj_add_str(doc, resp, "jsonrpc", "2.0");
     yyjson_mut_obj_add_val(doc, resp, "id", copy_id(doc, id));
     yyjson_mut_obj_add_val(doc, resp, "result", result);
+    return resp;
+}
+
+/**
+ * Build a JSON-RPC error response envelope.
+ *
+ * @param doc      Destination mutable JSON document.
+ * @param id       Request id to echo back.
+ * @param code     JSON-RPC error code (e.g. -32800 for RequestCancelled).
+ * @param message  Human-readable description.
+ * @return The JSON-RPC error response object.
+ */
+static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
+                                            int code, const char *message) {
+    yyjson_mut_val *resp = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, resp, "jsonrpc", "2.0");
+    yyjson_mut_obj_add_val(doc, resp, "id", copy_id(doc, id));
+    yyjson_mut_val *err = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_int(doc, err, "code", code);
+    yyjson_mut_obj_add_str(doc, err, "message", message);
+    yyjson_mut_obj_add_val(doc, resp, "error", err);
     return resp;
 }
 
@@ -1870,6 +1893,27 @@ void server_dispatch_mutation(yyjson_doc *in_doc) {
     yyjson_mut_doc_free(out_doc);
 }
 
+void server_dispatch_stale(yyjson_doc *in_doc) {
+    yyjson_val *root    = yyjson_doc_get_root(in_doc);
+    yyjson_val *id_item = yyjson_obj_get(root, "id");
+    if (!id_item) return;
+
+    /* Drop any pending cancellation for this id — we're responding to
+     * the request right now (with ContentModified), so the cancel can
+     * never apply.  Without this, a cancel that arrives between the
+     * stale-detection point and now would sit in the set indefinitely
+     * since this path skips the end-of-dispatch_query clear. */
+    if (yyjson_is_int(id_item)) {
+        cancellation_clear(yyjson_get_sint(id_item));
+    }
+
+    yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *resp = make_error_response(out_doc, id_item, -32801,
+                                                "Content modified");
+    send_response(out_doc, resp);
+    yyjson_mut_doc_free(out_doc);
+}
+
 void server_dispatch_query(yyjson_doc *in_doc) {
     yyjson_val *root    = yyjson_doc_get_root(in_doc);
     yyjson_val *id_item = yyjson_obj_get(root, "id");
@@ -1879,6 +1923,21 @@ void server_dispatch_query(yyjson_doc *in_doc) {
 
     yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *resp = NULL;
+
+    /* Numeric ids only; string/null ids are passed through uncancellable.
+     * LSP clients in practice all use integer ids for cancellable requests.
+     * yyjson_is_int matches both signed and unsigned integer subtypes. */
+    int64_t req_id        = 0;
+    int     have_int_id   = id_item && yyjson_is_int(id_item);
+    if (have_int_id) {
+        req_id = yyjson_get_sint(id_item);
+        if (cancellation_check_and_clear(req_id)) {
+            resp = make_error_response(out_doc, id_item, -32800, "Request cancelled");
+            send_response(out_doc, resp);
+            yyjson_mut_doc_free(out_doc);
+            return;
+        }
+    }
 
     if (strcmp(m, "textDocument/documentSymbol") == 0) {
         resp = handle_document_symbol(out_doc, id_item, params);
@@ -1911,6 +1970,10 @@ void server_dispatch_query(yyjson_doc *in_doc) {
 
     if (resp) send_response(out_doc, resp);
     yyjson_mut_doc_free(out_doc);
+
+    /* A cancel that arrived after the top-of-dispatch check would otherwise
+     * sit in the set indefinitely.  Clear it so the set doesn't slowly fill. */
+    if (have_int_id) cancellation_clear(req_id);
 }
 
 void server_process(const char *json_text) {
@@ -1927,23 +1990,65 @@ void server_process(const char *json_text) {
         exit(0);
     }
 
+    /* Cancellation is handled inline in the reader thread — not via the
+     * work_queue — so it races ahead of the queued request being picked up
+     * by a worker.  The query worker then sees the cancellation flag at the
+     * top of dispatch and short-circuits without running the handler. */
+    if (strcmp(m, "$/cancelRequest") == 0) {
+        yyjson_val *p      = yyjson_obj_get(root, "params");
+        yyjson_val *id_val = p ? yyjson_obj_get(p, "id") : NULL;
+        if (id_val && yyjson_is_int(id_val)) {
+            cancellation_mark(yyjson_get_sint(id_val));
+        }
+        yyjson_doc_free(in_doc);
+        return;
+    }
+
     Job *job = calloc(1, sizeof(Job));
     if (!job) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     job->request_doc = in_doc; /* ownership transferred */
 
-    /* didChange events on the same URI may arrive faster than parse(),
-     * so route them through the coalescing entry point. */
-    if (strcmp(m, "textDocument/didChange") == 0) {
-        yyjson_val *params  = yyjson_obj_get(root, "params");
-        yyjson_val *td      = params ? yyjson_obj_get(params, "textDocument") : NULL;
+    /* Extract textDocument.uri if the message targets a single document.
+     * Used for two distinct purposes downstream: didChange coalescing
+     * (same-URI tail merge) and query staleness (snapshot/compare against
+     * mutation_versions).  Both happen at reader time so the snapshot
+     * captures the version visible to a same-thread bump from earlier
+     * messages, and so the coalesce tail-match has the URI to compare. */
+    const char *uri = NULL;
+    yyjson_val *params = yyjson_obj_get(root, "params");
+    if (params) {
+        yyjson_val *td      = yyjson_obj_get(params, "textDocument");
         yyjson_val *uri_val = td ? yyjson_obj_get(td, "uri") : NULL;
-        if (uri_val && yyjson_is_str(uri_val)) {
-            threadpool_enqueue_didchange(job, yyjson_get_str(uri_val));
-            return;
+        if (uri_val && yyjson_is_str(uri_val))
+            uri = yyjson_get_str(uri_val);
+    }
+    if (uri) job->uri = strdup(uri);
+
+    int mutation = is_mutation_method(m);
+
+    if (mutation && uri) {
+        /* Bump must happen before any same-URI query enqueued later in
+         * this reader thread snapshots the version. */
+        mutation_versions_bump(uri);
+    } else if (!mutation && uri) {
+        job->snapshot_version = mutation_versions_snapshot(uri);
+        /* Most queries are safe to drop when a later same-URI mutation
+         * has overtaken them.  The exception is the semanticTokens family:
+         * full establishes the per-document baseline that delta diffs
+         * against, so silently dropping a baseline would corrupt the
+         * delta chain across the next handful of requests. */
+        if (strcmp(m, "textDocument/semanticTokens/full") != 0
+            && strcmp(m, "textDocument/semanticTokens/full/delta") != 0) {
+            job->is_stale_droppable = 1;
         }
     }
 
-    if (is_mutation_method(m))
+    if (strcmp(m, "textDocument/didChange") == 0 && uri) {
+        threadpool_enqueue_didchange(job, uri);
+        return;
+    }
+
+    if (mutation)
         threadpool_enqueue_mutation(job);
     else
         threadpool_enqueue_query(job);
@@ -1952,4 +2057,6 @@ void server_process(const char *json_text) {
 void server_init() {
     for (int i = 0; i < MAX_DOCS; i++)
         docs[i].in_use = 0;
+    cancellation_init();
+    mutation_versions_init();
 }
