@@ -100,25 +100,17 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file:///test/cancel.tjp",
+      "uri": "file:///test/cancel_dangling.tjp",
       "diagnostics": []
     }
   },
   {
     "jsonrpc": "2.0",
-    "id": 42,
-    "error": {
-      "code": -32800,
-      "message": "Request cancelled"
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 43,
+    "id": 10,
     "result": [
       {
-        "name": "\"Test\"",
-        "detail": "test",
+        "name": "\"P\"",
+        "detail": "p",
         "kind": 2,
         "range": {
           "start": {
@@ -127,7 +119,7 @@
           },
           "end": {
             "line": 0,
-            "character": 37
+            "character": 31
           }
         },
         "selectionRange": {
@@ -137,7 +129,7 @@
           },
           "end": {
             "line": 0,
-            "character": 12
+            "character": 9
           }
         }
       },
@@ -170,7 +162,7 @@
   },
   {
     "jsonrpc": "2.0",
-    "id": 100,
+    "id": 20,
     "result": null
   }
 ]

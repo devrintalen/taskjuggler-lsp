@@ -23,7 +23,6 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 struct JobQueue {
     Job             *head;
@@ -51,23 +50,6 @@ void job_queue_destroy(JobQueue *q) {
 void job_queue_push(JobQueue *q, Job *job) {
     job->next = NULL;
     pthread_mutex_lock(&q->mutex);
-    /* Coalesce a same-URI didChange into the tail of the queue.  Only
-     * tail coalescing is safe: any other element between the new job
-     * and an older same-URI didChange could observe the older parse,
-     * so collapsing across it would change visible LSP semantics. */
-    if (q->tail
-        && q->tail->is_coalesceable
-        && job->is_coalesceable
-        && q->tail->uri
-        && job->uri
-        && strcmp(q->tail->uri, job->uri) == 0) {
-        yyjson_doc_free(q->tail->request_doc);
-        q->tail->request_doc = job->request_doc;
-        job->request_doc = NULL;
-        pthread_mutex_unlock(&q->mutex);
-        job_free(job);
-        return;
-    }
     if (q->tail) q->tail->next = job;
     else         q->head = job;
     q->tail = job;
@@ -98,28 +80,19 @@ void job_queue_close(JobQueue *q) {
 void job_free(Job *job) {
     if (!job) return;
     yyjson_doc_free(job->request_doc);
-    free(job->uri);
     free(job);
-}
-
-void job_queue_mark_stale_for_uri(JobQueue *q, const char *uri) {
-    if (!q || !uri) return;
-    pthread_mutex_lock(&q->mutex);
-    for (Job *j = q->head; j != NULL; j = j->next) {
-        if (j->is_stale_droppable
-            && j->uri
-            && strcmp(j->uri, uri) == 0) {
-            j->is_marked_stale = 1;
-        }
-    }
-    pthread_mutex_unlock(&q->mutex);
 }
 
 void job_queue_mark_cancelled_by_id(JobQueue *q, int64_t id) {
     if (!q) return;
     pthread_mutex_lock(&q->mutex);
     for (Job *j = q->head; j != NULL; j = j->next) {
-        if (j->has_id && j->id == id) {
+        /* Mutations bypass the worker's is_cancelled check (the coordinator
+         * dispatches them inline), so marking them would be a no-op that
+         * misleads readers into thinking the flag took effect.  Lifecycle
+         * methods (initialize/shutdown) aren't cancellable in practice
+         * either — clients never cancel them. */
+        if (!j->is_mutation && j->has_id && j->id == id) {
             j->is_cancelled = 1;
         }
     }

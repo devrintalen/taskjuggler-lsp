@@ -19,7 +19,7 @@
     "method": "textDocument/didOpen",
     "params": {
       "textDocument": {
-        "uri": "file:///test/stale.tjp",
+        "uri": "file:///test/cancel_dangling.tjp",
         "languageId": "taskjuggler",
         "version": 1,
         "text": "project p \"P\" 2026-01-01 +1y {}\ntask a \"A\" {}\n"
@@ -28,35 +28,20 @@
   },
   {
     "jsonrpc": "2.0",
+    "method": "$/cancelRequest",
+    "params": { "id": 999999 }
+  },
+  {
+    "jsonrpc": "2.0",
     "id": 10,
     "method": "textDocument/documentSymbol",
     "params": {
-      "textDocument": { "uri": "file:///test/stale.tjp" }
+      "textDocument": { "uri": "file:///test/cancel_dangling.tjp" }
     }
   },
   {
     "jsonrpc": "2.0",
-    "method": "textDocument/didChange",
-    "params": {
-      "textDocument": { "uri": "file:///test/stale.tjp", "version": 2 },
-      "contentChanges": [
-        {
-          "text": "project p \"P\" 2026-01-01 +1y {}\ntask a \"A\" {}\ntask b \"B\" {}\n"
-        }
-      ]
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 11,
-    "method": "textDocument/documentSymbol",
-    "params": {
-      "textDocument": { "uri": "file:///test/stale.tjp" }
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 12,
+    "id": 20,
     "method": "shutdown",
     "params": {}
   }

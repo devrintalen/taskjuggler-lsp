@@ -43,19 +43,6 @@ void threadpool_stop(void);
 void threadpool_enqueue_mutation(Job *job);
 
 /**
- * Push a parsed textDocument/didChange message onto the work queue,
- * coalescing with a same-URI didChange at the tail when possible.
- * If coalescing happens, @p job is consumed (freed) and the previously
- * queued job's `request_doc` is replaced with this job's; otherwise
- * @p job is enqueued normally.  Ownership of @p job transfers to the
- * queue (or is consumed) in both cases.
- *
- * @param job  Job whose `request_doc` carries the didChange envelope.
- * @param uri  Document URI being edited; copied internally.
- */
-void threadpool_enqueue_didchange(Job *job, const char *uri);
-
-/**
  * Push a parsed read-only query message onto the work queue.
  * Ownership of @p job transfers to the queue.
  */
@@ -63,10 +50,15 @@ void threadpool_enqueue_query(Job *job);
 
 /**
  * Walk both the reader-facing work queue and the worker-facing pool queue
- * and set is_cancelled=1 on any Job whose id matches @p id.  Called by
- * the reader when a $/cancelRequest arrives.  Deterministic for any Job
- * still resident in either queue at the time of the call; Jobs that have
- * already been popped by a worker are covered by the cancellation set
- * (src/cancellation.h) fallback.
+ * and mark any matching read-only Job as cancelled.  Mutation jobs are
+ * not cancellable (see job_queue_mark_cancelled_by_id).  Called by the
+ * reader when a $/cancelRequest arrives.
+ *
+ * Best-effort, not exhaustive: the two queues are locked separately with
+ * a gap between, so a Job in transit (popped from work_queue by the
+ * coordinator and not yet pushed to query_pool_queue) can be missed.
+ * Same for Jobs already popped from query_pool_queue by a worker.  Both
+ * windows are sub-microsecond and real LSP clients cancel only requests
+ * sent milliseconds earlier, so the gaps are not realistically hit.
  */
 void threadpool_cancel_by_id(int64_t id);
