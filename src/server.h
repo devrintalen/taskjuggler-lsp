@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include "job_queue.h"
+
 #include <yyjson.h>
 
 /**
@@ -42,33 +44,45 @@ void server_init();
 void server_process(const char *json_text);
 
 /**
- * Run a mutation / lifecycle JSON-RPC message under the doc-store
- * write lock.  Called only by the threadpool's mutation worker.
- * Builds and emits any response or notification via lsp_send_message().
+ * Capture a workspace snapshot, parse / clone / resolve as the
+ * mutation requires, then commit the result under the docs-store
+ * mutex.  Runs on the mutation worker thread.  Builds and emits any
+ * response or notification via lsp_send_message().
  *
- * @param request_doc  Parsed JSON-RPC envelope.  Not freed by this
- *                     function; the worker frees it after return.
+ * @param job  Pending mutation job.  Worker frees it after return.
  */
-void server_dispatch_mutation(yyjson_doc *request_doc);
+void server_dispatch_mutation(Job *job);
 
 /**
- * Run a read-only query JSON-RPC message under the doc-store read
- * lock.  Called by any threadpool query worker.  Builds and emits
- * the response via lsp_send_message().
+ * Capture a workspace snapshot onto @p job and attach it.  Called by
+ * the threadpool coordinator just before handing the job off to the
+ * query worker pool — taking the snapshot here (in arrival order, with
+ * docs_mutex briefly held) ensures the query observes exactly the
+ * state that would have been visible if every job ran sequentially in
+ * arrival order, even when later mutations race ahead while the query
+ * is still in flight.
  *
- * @param request_doc  Parsed JSON-RPC envelope.  Not freed by this
- *                     function; the worker frees it after return.
+ * @param job  Query job to snapshot.
  */
-void server_dispatch_query(yyjson_doc *request_doc);
+void server_capture_snapshot_for(Job *job);
 
 /**
- * Respond to @p request_doc with a JSON-RPC `RequestCancelled` (-32800)
- * error without running the handler.  Called by the query worker when
- * the Job was marked is_cancelled by a $/cancelRequest that arrived
- * while the Job was still queued.  No-op for notifications (no id to
- * reply to).
+ * Run the query handler against the snapshot already attached to
+ * @p job, then send the response.  Runs on any query worker thread.
+ * Builds and emits the response via lsp_send_message().
+ *
+ * @param job  Pending query job.  Worker frees it after return.
  */
-void server_dispatch_cancelled(yyjson_doc *request_doc);
+void server_dispatch_query(Job *job);
+
+/**
+ * Respond to @p job's request with a JSON-RPC `RequestCancelled`
+ * (-32800) error without running the handler.  Called by the query
+ * worker when the Job was marked is_cancelled by a $/cancelRequest
+ * that arrived while the Job was still queued.  No-op for
+ * notifications (no id to reply to).
+ */
+void server_dispatch_cancelled(Job *job);
 
 /**
  * Write one LSP-framed message to stdout, prepending the required

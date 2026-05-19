@@ -20,8 +20,52 @@
 
 #pragma once
 
+#include "parser.h"
+
+#include <stddef.h>
 #include <stdint.h>
 #include <yyjson.h>
+
+/**
+ * A pinned read-only view of a single document captured at a point in
+ * time.  Each entry holds owned copies of the URI and text plus a
+ * refcount on the ParseResult, so the snapshot is valid for the entire
+ * lifetime of the owning Job — independent of subsequent mutations.
+ *
+ * `version` records the Document.doc_version at capture time.  Query
+ * workers compare it against the current version before sending their
+ * response; a mismatch means the document changed mid-query, and the
+ * worker replies with LSP ContentModified (-32801).
+ */
+typedef struct DocSnapshot {
+    char        *uri;     /**< owned copy of the document URI */
+    char        *text;    /**< owned copy of the document text (may be NULL) */
+    ParseResult *parse;   /**< refcount held; released on job free */
+    uint64_t     version; /**< Document.doc_version at capture time */
+    int          disk_only; /**< 1 = background workspace entry, 0 = editor-managed */
+} DocSnapshot;
+
+/**
+ * A pinned view of every open / background document in the workspace.
+ * Captured once per Job at the start of worker execution; the rest of
+ * the handler runs without touching the live document store.
+ *
+ * `primary_uri` is the URI of the request's target document (when the
+ * method has one) — handlers do a linear scan of `docs[]` to find the
+ * matching DocSnapshot.  NULL for methods with no target (workspace
+ * methods, initialize, etc.).
+ */
+typedef struct WorkspaceSnapshot {
+    DocSnapshot *docs;          /**< pinned views of every active slot */
+    size_t       count;         /**< number of entries in docs */
+    char        *primary_uri;   /**< owned; URI of the request target, or NULL */
+} WorkspaceSnapshot;
+
+/**
+ * Release every dynamic resource held by @p snap, including the
+ * per-document ParseResult refcounts.  Zeroes the struct on return.
+ */
+void workspace_snapshot_release(WorkspaceSnapshot *snap);
 
 /**
  * One pending unit of work parsed off stdin by the reader thread and
@@ -30,31 +74,31 @@
  * `request_doc` owns the parsed JSON-RPC envelope.  The worker is
  * responsible for freeing it after dispatch.
  *
- * `is_mutation` is set by the reader when classifying the message;
- * the coordinator pops in arrival order and uses it to choose between
- * synchronous dispatch (mutations) and handing the job off to a query
- * worker (read-only queries).
+ * `is_mutation` is set by the reader when classifying the message; it
+ * determines which queue the Job lands on (mutation_queue runs on a
+ * single worker; query_queue feeds a pool).
  *
- * `id` / `has_id` carry the JSON-RPC request id as a first-class field on
- * the Job, making it the primary key for any per-job operation.  The first
- * such operation is $/cancelRequest: the reader walks both queues looking
- * for a matching id and sets `is_cancelled`, so cancellation is
- * deterministic for any Job still resident in a queue when the cancel
- * arrives.  Notifications and string/null ids leave `has_id = 0` and are
- * therefore not cancellable by id (matching the existing int-only policy
- * in server.c).
+ * `snapshot` is filled by the worker just before running the handler.
+ * The reader leaves it zeroed — taking the snapshot at the moment of
+ * execution (rather than at enqueue time) keeps it fresh even when a
+ * job sits in the queue for a long time.
  *
- * `is_cancelled` is set in-place by job_queue_mark_cancelled_by_id when a
- * matching $/cancelRequest is processed.  The worker checks it before
- * dispatching the handler and returns RequestCancelled instead.
+ * `id` / `has_id` carry the JSON-RPC request id as a first-class field
+ * on the Job.  The first per-job operation is $/cancelRequest: the
+ * reader walks both queues looking for a matching id and sets
+ * `is_cancelled`, so cancellation is deterministic for any Job still
+ * resident in a queue when the cancel arrives.  Notifications and
+ * string/null ids leave `has_id = 0` and are therefore not cancellable
+ * by id (matching the existing int-only policy in server.c).
  */
 typedef struct Job {
-    yyjson_doc *request_doc;
-    int         is_mutation;
-    int         is_cancelled;
-    int         has_id;
-    int64_t     id;
-    struct Job *next;
+    yyjson_doc        *request_doc;
+    WorkspaceSnapshot  snapshot;
+    int                is_mutation;
+    int                is_cancelled;
+    int                has_id;
+    int64_t            id;
+    struct Job        *next;
 } Job;
 
 /** Opaque thread-safe FIFO of Job pointers. */
@@ -103,10 +147,10 @@ void      job_free(Job *job);
 /**
  * Walk @p q under its mutex, setting is_cancelled=1 on every read-only
  * Job whose has_id is set and whose id equals @p id.  Mutation jobs are
- * skipped — the coordinator dispatches them inline and never consults
- * is_cancelled, and lifecycle methods aren't cancelled in practice.
- * Called by the reader when a $/cancelRequest arrives.  The worker
- * checks is_cancelled before dispatching the handler and returns
- * RequestCancelled in its place.
+ * skipped — they aren't cancellable in practice (clients only cancel
+ * read-only requests like hover/completion/etc.).  Called by the reader
+ * when a $/cancelRequest arrives.  The worker checks is_cancelled
+ * before dispatching the handler and returns RequestCancelled in its
+ * place.
  */
 void      job_queue_mark_cancelled_by_id(JobQueue *q, int64_t id);

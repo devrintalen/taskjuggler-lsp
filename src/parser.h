@@ -496,8 +496,11 @@ int parse_tjp_date(const char *text, time_t *out);
  * in-file resolution, so only top-level symbols (as surfaced by include
  * statements) are visible.
  *
- * Call clear_cross_file_state(@p r) before calling this to wipe any
- * cross-file state left over from a previous resolution pass.
+ * Pre-condition: @p r's cross-file def_links / ref_links arrays are
+ * empty and @p r->num_diagnostics == @p r->dep_diag_start.
+ * parse_result_clone_for_revalidate() guarantees this on the
+ * freshly-cloned ParseResults the server feeds in each revalidation
+ * cycle.
  *
  * @param r            ParseResult whose cross_file_deps[] are resolved.
  * @param extra_roots  Per-document arrays of top-level symbols to consult.
@@ -516,16 +519,28 @@ void resolve_cross_file_deps(ParseResult *r,
                              const char *self_uri);
 
 /**
- * Strip cross-file state from @p r.
+ * Deep-clone @p src into a fresh ParseResult ready for cross-file
+ * resolution.
  *
- * Removes def_links entries with a non-NULL target_uri and ref_links
- * entries with a non-NULL source_uri (freeing the URI strings), and
- * truncates @p r->diagnostics back to dep_diag_start.  Called by the
- * server before each cross-file resolution cycle.
+ * The returned ParseResult is an independent copy with refcount=1.
+ * All in-file state — DocSymbol tree (pointers retargeted into the
+ * new tree), token spans with translated owners, permanent
+ * diagnostics, included_files, cross_file_deps, and in-file
+ * def_links/ref_links — is carried over.  Cross-file def_links /
+ * ref_links and cross-file diagnostics are NOT carried over: the
+ * returned result's link arrays hold only in-file links, and its
+ * diagnostics array is truncated to dep_diag_start.  The caller is
+ * expected to follow up with resolve_cross_file_deps() to rebuild
+ * the cross-file state against the current workspace.
  *
- * @param r  ParseResult whose cross-file state should be cleared.
+ * Used by the server's revalidation pipeline to produce a fresh
+ * immutable snapshot per cycle instead of mutating the previously
+ * published result in place.
+ *
+ * @param src  Source ParseResult.
+ * @return A freshly allocated ParseResult with refcount=1.
  */
-void clear_cross_file_state(ParseResult *r);
+ParseResult *parse_result_clone_for_revalidate(const ParseResult *src);
 
 /**
  * Return the innermost DocSymbol whose range contains @p pos (inclusive

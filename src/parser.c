@@ -26,6 +26,55 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ── TODO(doc-symbol-tree) ────────────────────────────────────────────────
+ *
+ * The current DocSymbol storage is an array of pointers to heap-
+ * allocated nodes, each with its own malloc'd children[] array of
+ * pointers.  parse_result_clone_for_revalidate() below pays for that
+ * shape with a three-pass clone and a sorted old→new SymbolRemap.  A
+ * uniform representation would make cloning a trivial memcpy.  Two
+ * concrete options to evaluate when this becomes a priority:
+ *
+ *   1. Flat array + indices.  Store every node for a parse in a single
+ *      contiguous DocSymbol[] on the ParseResult.  Replace
+ *      parent/children pointers with int32_t indices into that array.
+ *      Indices stay valid across cloning, so a clone is `memcpy` of
+ *      the array plus `memcpy` of the link arrays — no remap needed.
+ *      TokenSpan.owner and DefinitionLink.target become indices too;
+ *      cross-file targets pair an index with a target_uri.
+ *
+ *   2. Arena-allocated tree.  Keep pointers, but allocate every
+ *      DocSymbol for one parse from a single bump-allocated arena
+ *      hung off the ParseResult.  Cloning is `memcpy` of the arena
+ *      plus offset-arithmetic pointer fixups.
+ *
+ * Option 1 is the bigger win — better cache locality during the
+ * binary-search-by-position used by hover / completion, simpler
+ * ownership in destructors, and trivial cloning.
+ *
+ * Three related follow-ups worth doing alongside / after that:
+ *
+ *   - parse_result_clone_for_revalidate() reclones every document on
+ *     every mutation.  Many revalidations don't actually need that;
+ *     a doc whose cross_file_deps[] do not reference the changed file
+ *     is unaffected.  Add an affected-set computation in the
+ *     revalidation pipeline so only docs that need new cross-file
+ *     links get re-cloned.
+ *
+ *   - Once (1) lands, SymbolRemap below either degenerates to identity
+ *     or vanishes entirely; the symbol_remap_* helpers either become
+ *     trivial or disappear.  The three clone passes themselves should
+ *     mostly survive — they're just spine copies + translation calls.
+ *
+ *   - Threadpool is single-threaded for queries today
+ *     (NUM_QUERY_WORKERS = 1 in threadpool.c).  The snapshot +
+ *     immutable-parse contract is already in place; raising the
+ *     worker count just needs per-document FIFO ordering for the
+ *     sem_tokens cache (mutex isn't FIFO, so racing workers mint
+ *     non-deterministic resultIds).  A per-document ticket counter
+ *     or a dedicated sem_tokens worker would do it.
+ */
+
 /* ── Raw dependency reference accumulator ──────────────────────────────── *
  *
  * grammar.y calls push_dep_ref() for each dependency reference encountered
@@ -668,49 +717,6 @@ static void resolve_dep_refs(ParseResult *r) {
     free_dep_refs();
 }
 
-/**
- * Walk @p s and its descendants, compacting link arrays in place by
- * dropping any entry that carries a cross-document URI.  Frees the URI
- * strings of dropped entries.
- *
- * @param s  Root of the subtree to clean.
- */
-static void strip_cross_file_links(DocSymbol *s) {
-    int keep = 0;
-    for (int i = 0; i < s->num_def_links; i++) {
-        if (s->def_links[i].target_uri) {
-            free(s->def_links[i].target_uri);
-        } else {
-            if (keep != i) s->def_links[keep] = s->def_links[i];
-            keep++;
-        }
-    }
-    s->num_def_links = keep;
-
-    keep = 0;
-    for (int i = 0; i < s->num_ref_links; i++) {
-        if (s->ref_links[i].source_uri) {
-            free(s->ref_links[i].source_uri);
-        } else {
-            if (keep != i) s->ref_links[keep] = s->ref_links[i];
-            keep++;
-        }
-    }
-    s->num_ref_links = keep;
-
-    for (int i = 0; i < s->num_children; i++)
-        strip_cross_file_links(s->children[i]);
-}
-
-void clear_cross_file_state(ParseResult *r) {
-    for (int i = r->dep_diag_start; i < r->num_diagnostics; i++)
-        free(r->diagnostics[i].message);
-    r->num_diagnostics = r->dep_diag_start;
-
-    for (int i = 0; i < r->num_doc_symbols; i++)
-        strip_cross_file_links(r->doc_symbols[i]);
-}
-
 void resolve_cross_file_deps(ParseResult *r,
                              DocSymbol *const *const *extra_roots,
                              const int *extra_counts,
@@ -752,6 +758,301 @@ void resolve_cross_file_deps(ParseResult *r,
         for (int j = 0; j < nseg; j++) free(segs[j]);
         free(segs);
     }
+}
+
+/* ── Symbol-tree clone helpers ───────────────────────────────────────────
+ *
+ * All DocSymbol-tree-shape knowledge in the clone path is confined to
+ * the three helpers below.  Pass 2 (token spans) and pass 3 (per-symbol
+ * link arrays) only touch the opaque SymbolRemap API, so a future
+ * change to the tree representation (see TODO at top of file) should
+ * not need to touch them.
+ */
+
+/** One entry in the opaque old→new pointer map. */
+typedef struct {
+    DocSymbol *old_ptr;
+    DocSymbol *new_ptr;
+} SymbolRemapEntry;
+
+struct SymbolRemap {
+    SymbolRemapEntry *entries;
+    size_t            count;
+    size_t            cap;
+};
+typedef struct SymbolRemap SymbolRemap;
+
+/** Sort helper: order entries by `old_ptr` ascending for bsearch. */
+static int symbol_remap_cmp(const void *a, const void *b) {
+    DocSymbol *pa = ((const SymbolRemapEntry *)a)->old_ptr;
+    DocSymbol *pb = ((const SymbolRemapEntry *)b)->old_ptr;
+    if (pa < pb) return -1;
+    if (pa > pb) return  1;
+    return 0;
+}
+
+/** Append `(old, new)` to the remap, growing storage if needed. */
+static void symbol_remap_push(SymbolRemap *r, DocSymbol *old, DocSymbol *new_) {
+    if (r->count >= r->cap) {
+        size_t nc = r->cap ? r->cap * 2 : 32;
+        SymbolRemapEntry *tmp = realloc(r->entries, nc * sizeof(*tmp));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        r->entries = tmp;
+        r->cap     = nc;
+    }
+    r->entries[r->count].old_ptr = old;
+    r->entries[r->count].new_ptr = new_;
+    r->count++;
+}
+
+/**
+ * Translate an old-tree DocSymbol pointer to its new-tree counterpart.
+ * NULL → NULL.  Caller must have finished filling and sorting the
+ * remap (symbol_tree_clone does both).
+ */
+static DocSymbol *symbol_remap_lookup(const SymbolRemap *r, DocSymbol *old) {
+    if (!old) return NULL;
+    SymbolRemapEntry key = { .old_ptr = old, .new_ptr = NULL };
+    SymbolRemapEntry *hit = bsearch(&key, r->entries, r->count,
+                                    sizeof(*r->entries), symbol_remap_cmp);
+    return hit ? hit->new_ptr : NULL;
+}
+
+/** Visitor walking every (old, new) pair recorded in the remap. */
+static void symbol_remap_for_each(const SymbolRemap *r,
+                                  void (*fn)(DocSymbol *old, DocSymbol *new_, void *ctx),
+                                  void *ctx) {
+    for (size_t i = 0; i < r->count; i++)
+        fn(r->entries[i].old_ptr, r->entries[i].new_ptr, ctx);
+}
+
+/** Release storage owned by @p r.  Safe with @p r == NULL. */
+static void symbol_remap_free(SymbolRemap *r) {
+    if (!r) return;
+    free(r->entries);
+    free(r);
+}
+
+/**
+ * Recursive DFS clone of one subtree.  Allocates a fresh DocSymbol,
+ * deep-copies scalar fields and owned strings, sets parent, recursively
+ * clones children, and records the old→new mapping.  Leaves
+ * def_links / ref_links empty — those are filled in clone pass 3.
+ */
+static DocSymbol *clone_symbol_subtree(DocSymbol *src, DocSymbol *parent,
+                                       SymbolRemap *remap) {
+    DocSymbol *dst = calloc(1, sizeof(DocSymbol));
+    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    dst->name            = src->name ? strdup(src->name) : NULL;
+    dst->id              = src->id   ? strdup(src->id)   : NULL;
+    dst->keyword         = src->keyword;
+    dst->range           = src->range;
+    dst->selection_range = src->selection_range;
+    dst->start_date      = src->start_date;
+    dst->end_date        = src->end_date;
+    dst->has_start       = src->has_start;
+    dst->has_end         = src->has_end;
+    dst->parent          = parent;
+    dst->num_children    = src->num_children;
+    dst->children_cap    = src->num_children;  /* exact-fit */
+    dst->children        = src->num_children
+        ? malloc((size_t)src->num_children * sizeof(DocSymbol *))
+        : NULL;
+    if (src->num_children && !dst->children) {
+        fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+    }
+    /* def_links / ref_links left zero — populated in pass 3 */
+
+    symbol_remap_push(remap, src, dst);
+
+    for (int i = 0; i < src->num_children; i++)
+        dst->children[i] = clone_symbol_subtree(src->children[i], dst, remap);
+    return dst;
+}
+
+/**
+ * Clone the entire symbol forest from @p src_roots.  Allocates a fresh
+ * roots array (`*out_new_roots`, length `*out_n_new_roots`) and a
+ * SymbolRemap ready for lookup.  The returned remap is sorted so
+ * symbol_remap_lookup can bsearch it.
+ */
+static SymbolRemap *symbol_tree_clone(DocSymbol *const *src_roots,
+                                      int n_roots,
+                                      DocSymbol ***out_new_roots,
+                                      int *out_n_new_roots) {
+    SymbolRemap *remap = calloc(1, sizeof(*remap));
+    if (!remap) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+
+    DocSymbol **new_roots = n_roots
+        ? malloc((size_t)n_roots * sizeof(DocSymbol *))
+        : NULL;
+    if (n_roots && !new_roots) {
+        fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+    }
+    for (int i = 0; i < n_roots; i++)
+        new_roots[i] = clone_symbol_subtree(src_roots[i], NULL, remap);
+
+    qsort(remap->entries, remap->count, sizeof(*remap->entries),
+          symbol_remap_cmp);
+
+    *out_new_roots   = new_roots;
+    *out_n_new_roots = n_roots;
+    return remap;
+}
+
+/**
+ * Pass 2: copy and translate `tok_spans`, `diagnostics[0..dep_diag_start)`,
+ * `included_files`, and `cross_file_deps` from @p src onto the fresh
+ * ParseResult @p dst.  Token-span owners are translated through the
+ * remap; everything else is a deep copy.
+ */
+static void clone_spine_and_translate_owners(ParseResult *dst,
+                                             const ParseResult *src,
+                                             const SymbolRemap *remap) {
+    /* tok_spans */
+    if (src->num_tok_spans) {
+        dst->tok_spans = malloc((size_t)src->num_tok_spans * sizeof(TokenSpan));
+        if (!dst->tok_spans) {
+            fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+        }
+        memcpy(dst->tok_spans, src->tok_spans,
+               (size_t)src->num_tok_spans * sizeof(TokenSpan));
+        for (int i = 0; i < src->num_tok_spans; i++) {
+            TokenSpan *ts = &dst->tok_spans[i];
+            ts->text  = src->tok_spans[i].text
+                ? strdup(src->tok_spans[i].text) : NULL;
+            ts->owner = symbol_remap_lookup(remap, src->tok_spans[i].owner);
+        }
+        dst->num_tok_spans = src->num_tok_spans;
+        dst->tok_span_cap  = src->num_tok_spans;
+    }
+    dst->num_sem_entries = src->num_sem_entries;
+
+    /* diagnostics[0..dep_diag_start) — the permanent region */
+    if (src->dep_diag_start > 0) {
+        dst->diagnostics = malloc((size_t)src->dep_diag_start * sizeof(Diagnostic));
+        if (!dst->diagnostics) {
+            fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+        }
+        for (int i = 0; i < src->dep_diag_start; i++) {
+            dst->diagnostics[i].range    = src->diagnostics[i].range;
+            dst->diagnostics[i].severity = src->diagnostics[i].severity;
+            dst->diagnostics[i].message  = src->diagnostics[i].message
+                ? strdup(src->diagnostics[i].message) : NULL;
+        }
+        dst->num_diagnostics = src->dep_diag_start;
+        dst->diag_cap        = src->dep_diag_start;
+    }
+    dst->dep_diag_start = src->dep_diag_start;
+
+    /* included_files */
+    if (src->num_included_files) {
+        dst->included_files = malloc((size_t)src->num_included_files * sizeof(char *));
+        if (!dst->included_files) {
+            fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+        }
+        for (int i = 0; i < src->num_included_files; i++)
+            dst->included_files[i] = src->included_files[i]
+                ? strdup(src->included_files[i]) : NULL;
+        dst->num_included_files = src->num_included_files;
+        dst->included_files_cap = src->num_included_files;
+    }
+
+    /* cross_file_deps — owner pointers translated; path deep-copied */
+    if (src->num_cross_file_deps) {
+        dst->cross_file_deps = malloc((size_t)src->num_cross_file_deps * sizeof(RawDepRef));
+        if (!dst->cross_file_deps) {
+            fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+        }
+        for (int i = 0; i < src->num_cross_file_deps; i++) {
+            const RawDepRef *s = &src->cross_file_deps[i];
+            RawDepRef *d = &dst->cross_file_deps[i];
+            d->bang_count = s->bang_count;
+            d->path       = s->path ? strdup(s->path) : NULL;
+            d->owner      = symbol_remap_lookup(remap, s->owner);
+            d->range      = s->range;
+        }
+        dst->num_cross_file_deps = src->num_cross_file_deps;
+        dst->cross_file_deps_cap = src->num_cross_file_deps;
+    }
+}
+
+/** Visitor context for clone_in_file_links(). */
+typedef struct { const SymbolRemap *remap; } CloneLinksCtx;
+
+/** Visitor: copy @p old's in-file def_links/ref_links onto @p new_,
+ *  translating pointer targets through the remap. */
+static void clone_in_file_links_visit(DocSymbol *old, DocSymbol *new_, void *ctx) {
+    const SymbolRemap *remap = ((CloneLinksCtx *)ctx)->remap;
+
+    int in_file_def = 0;
+    for (int i = 0; i < old->num_def_links; i++)
+        if (!old->def_links[i].target_uri) in_file_def++;
+    if (in_file_def > 0) {
+        new_->def_links     = malloc((size_t)in_file_def * sizeof(DefinitionLink));
+        new_->def_links_cap = in_file_def;
+        if (!new_->def_links) {
+            fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+        }
+        int w = 0;
+        for (int i = 0; i < old->num_def_links; i++) {
+            if (old->def_links[i].target_uri) continue;
+            new_->def_links[w].source     = old->def_links[i].source;
+            new_->def_links[w].target     = symbol_remap_lookup(remap,
+                                                old->def_links[i].target);
+            new_->def_links[w].target_uri = NULL;
+            w++;
+        }
+        new_->num_def_links = w;
+    }
+
+    int in_file_ref = 0;
+    for (int i = 0; i < old->num_ref_links; i++)
+        if (!old->ref_links[i].source_uri) in_file_ref++;
+    if (in_file_ref > 0) {
+        new_->ref_links     = malloc((size_t)in_file_ref * sizeof(ReferenceLink));
+        new_->ref_links_cap = in_file_ref;
+        if (!new_->ref_links) {
+            fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+        }
+        int w = 0;
+        for (int i = 0; i < old->num_ref_links; i++) {
+            if (old->ref_links[i].source_uri) continue;
+            new_->ref_links[w].source     = old->ref_links[i].source;
+            new_->ref_links[w].origin     = symbol_remap_lookup(remap,
+                                                old->ref_links[i].origin);
+            new_->ref_links[w].source_uri = NULL;
+            w++;
+        }
+        new_->num_ref_links = w;
+    }
+}
+
+ParseResult *parse_result_clone_for_revalidate(const ParseResult *src) {
+    ParseResult *dst = calloc(1, sizeof(ParseResult));
+    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    atomic_store(&dst->refcount, 1);
+
+    /* Pass 1: clone the symbol forest, build the remap. */
+    DocSymbol **new_roots = NULL;
+    int         n_new_roots = 0;
+    SymbolRemap *remap = symbol_tree_clone(src->doc_symbols,
+                                           src->num_doc_symbols,
+                                           &new_roots, &n_new_roots);
+    dst->doc_symbols     = new_roots;
+    dst->num_doc_symbols = n_new_roots;
+    dst->doc_sym_cap     = n_new_roots;
+
+    /* Pass 2: tok_spans (translated owners), permanent diagnostics,
+     * included_files, cross_file_deps. */
+    clone_spine_and_translate_owners(dst, src, remap);
+
+    /* Pass 3: per-symbol in-file def_links / ref_links (translated targets). */
+    CloneLinksCtx ctx = { .remap = remap };
+    symbol_remap_for_each(remap, clone_in_file_links_visit, &ctx);
+
+    symbol_remap_free(remap);
+    return dst;
 }
 
 /* ── Public parse() entry point ──────────────────────────────────────────── */

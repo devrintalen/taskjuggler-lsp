@@ -37,28 +37,28 @@ void threadpool_start(void);
 void threadpool_stop(void);
 
 /**
- * Push a parsed mutation/lifecycle message onto the work queue.
- * Ownership of @p job transfers to the queue.
+ * Push a parsed mutation/lifecycle message onto the mutation queue.
+ * Ownership of @p job transfers to the queue.  Mutations run on a
+ * single worker so arrival order is preserved.
  */
 void threadpool_enqueue_mutation(Job *job);
 
 /**
- * Push a parsed read-only query message onto the work queue.
- * Ownership of @p job transfers to the queue.
+ * Push a parsed read-only query message onto the query queue.  Multiple
+ * query workers consume the queue concurrently; per-document
+ * cache_lock and the immutable-after-publication ParseResult contract
+ * keep that safe.  Ownership of @p job transfers to the queue.
  */
 void threadpool_enqueue_query(Job *job);
 
 /**
- * Walk both the reader-facing work queue and the worker-facing pool queue
- * and mark any matching read-only Job as cancelled.  Mutation jobs are
- * not cancellable (see job_queue_mark_cancelled_by_id).  Called by the
- * reader when a $/cancelRequest arrives.
+ * Walk both queues under their mutexes and mark any matching read-only
+ * Job as cancelled.  Mutation jobs are skipped.  Called by the reader
+ * when a $/cancelRequest arrives.
  *
- * Best-effort, not exhaustive: the two queues are locked separately with
- * a gap between, so a Job in transit (popped from work_queue by the
- * coordinator and not yet pushed to query_pool_queue) can be missed.
- * Same for Jobs already popped from query_pool_queue by a worker.  Both
- * windows are sub-microsecond and real LSP clients cancel only requests
- * sent milliseconds earlier, so the gaps are not realistically hit.
+ * Best-effort, not exhaustive: a Job already popped by a worker can be
+ * missed.  The window is sub-microsecond and real LSP clients cancel
+ * only requests sent milliseconds earlier, so the gap is not
+ * realistically hit.
  */
 void threadpool_cancel_by_id(int64_t id);

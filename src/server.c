@@ -23,6 +23,7 @@
 
 #include "server.h"
 #include "parser.h"
+#include "job_queue.h"
 #include "threadpool.h"
 #include "diagnostics.h"
 #include "definition.h"
@@ -44,6 +45,8 @@
 #include <dirent.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,34 +64,36 @@ typedef struct {
     char        *uri;                 /**< document URI, heap-allocated */
     char        *text;                /**< full source text, heap-allocated */
     ParseResult *parse;               /**< parse output for the current text; NULL when slot has no parse */
-    char       *doc_symbols_json;     /**< cached documentSymbol JSON array; NULL = invalid */
-    size_t      doc_symbols_json_len; /**< byte length of doc_symbols_json (excluding NUL) */
     /* Last semantic-tokens response sent to the client.  Retained across
      * revalidations so semanticTokens/full/delta requests can diff against
      * exactly what the client is holding.  NULL until the client makes its
-     * first semanticTokens request. */
+     * first semanticTokens request.  All sem_tokens_* fields are
+     * read/written under docs_mutex. */
     uint32_t   *sem_tokens_data;
     size_t      sem_tokens_count;     /**< entries in sem_tokens_data (multiple of 5) */
     char       *sem_tokens_result_id; /**< resultId returned alongside the data */
-    /* Serializes concurrent query workers when they touch the lazy caches
-     * above.  doc_symbols_json is populated on first request; sem_tokens_*
-     * is read-modify-write for both semanticTokens/full and its delta
-     * variant.  Mutation handlers do not need this lock because the
-     * coordinator's in-flight barrier already mutually excludes them
-     * with all in-flight queries. */
-    pthread_mutex_t cache_lock;
     /* Monotonic per-document counter used to mint resultIds for
-     * semanticTokens responses.  Scoped to the document so concurrent
-     * sem_tokens queries on different documents produce deterministic
-     * IDs regardless of thread scheduling.  Read-modify-write under
-     * cache_lock. */
+     * semanticTokens responses.  Scoped to the document so different
+     * documents produce independent ID sequences. */
     uint64_t        next_sem_tokens_result_id;
+    /* Monotonic per-document version, incremented under docs_mutex on
+     * every mutation that swaps `parse` or `text`.  Query workers
+     * compare the snapshot's captured version against this on send and
+     * reply with ContentModified (-32801) on mismatch. */
+    _Atomic uint64_t doc_version;
     int         in_use;               /**< 1 if this slot holds a live document */
     int         disk_only;            /**< 1 = loaded from disk/watcher, not opened by editor */
 } Document;
 
 /** Fixed-size document store; entries with `in_use == 0` are free. */
 static Document docs[MAX_DOCS];
+
+/* Serializes every read or write of the docs[] array — the slots
+ * themselves, and all per-slot fields (uri, text, parse, doc_version,
+ * sem_tokens_*, in_use, disk_only).  Held throughout each mutation
+ * handler and briefly during query snapshot capture / sem_tokens cache
+ * writes. */
+static pthread_mutex_t docs_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /** Maximum number of workspace root URIs the server tracks. */
 #define MAX_WORKSPACE_ROOTS 16
@@ -156,12 +161,27 @@ static Document *doc_alloc(const char *uri) {
             docs[i].text   = NULL;
             docs[i].parse  = NULL;
             docs[i].next_sem_tokens_result_id = 1;
-            pthread_mutex_init(&docs[i].cache_lock, NULL);
+            atomic_store(&docs[i].doc_version, 1);
             return &docs[i];
         }
     }
     free(canon);
     return NULL; /* shouldn't happen in practice */
+}
+
+/**
+ * Replace @p d's parse with @p new_parse, atomically bumping
+ * doc_version.  The old parse's refcount is dropped; any snapshot
+ * still referencing it keeps it alive until its workers finish.
+ * Caller must hold docs_mutex.
+ *
+ * @param d          Document to update.
+ * @param new_parse  Fresh ParseResult (ownership transferred).
+ */
+static void doc_install_new_parse(Document *d, ParseResult *new_parse) {
+    parse_result_release(d->parse);
+    d->parse = new_parse;
+    atomic_fetch_add(&d->doc_version, 1);
 }
 
 /**
@@ -173,11 +193,9 @@ static Document *doc_alloc(const char *uri) {
 static void doc_free(Document *d) {
     free(d->uri);
     free(d->text);
-    free(d->doc_symbols_json);
     free(d->sem_tokens_data);
     free(d->sem_tokens_result_id);
     parse_result_release(d->parse);
-    pthread_mutex_destroy(&d->cache_lock);
     memset(d, 0, sizeof(*d));
 }
 
@@ -196,6 +214,7 @@ void lsp_send_message(const char *msg) {
     fflush(stdout);
     pthread_mutex_unlock(&stdout_mutex);
 }
+
 
 /* ═══════════════════════════════════════════════════════════════════════════
    File I/O helpers
@@ -681,6 +700,114 @@ static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   Workspace snapshots
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Capture a pinned read-only view of every in-use document slot.
+ * For each slot: strdup the URI and text, parse_result_acquire the
+ * parse, record doc_version.  The returned snapshot is independent
+ * of subsequent mutations; release it with workspace_snapshot_release().
+ *
+ * @param primary_uri  URI of the request's target document (or NULL).
+ *                     Copied into snap->primary_uri so handlers can
+ *                     pick out their target without rescanning params.
+ */
+static WorkspaceSnapshot snapshot_workspace_for(const char *primary_uri) {
+    WorkspaceSnapshot snap = {0};
+
+    pthread_mutex_lock(&docs_mutex);
+
+    int in_use_count = 0;
+    for (int i = 0; i < MAX_DOCS; i++)
+        if (docs[i].in_use) in_use_count++;
+
+    if (in_use_count > 0) {
+        snap.docs = calloc((size_t)in_use_count, sizeof(DocSnapshot));
+        if (!snap.docs) {
+            pthread_mutex_unlock(&docs_mutex);
+            fprintf(stderr, "taskjuggler-lsp: out of memory\n");
+            exit(1);
+        }
+        size_t w = 0;
+        for (int i = 0; i < MAX_DOCS; i++) {
+            if (!docs[i].in_use) continue;
+            DocSnapshot *s = &snap.docs[w++];
+            s->uri       = docs[i].uri  ? strdup(docs[i].uri)  : NULL;
+            s->text      = docs[i].text ? strdup(docs[i].text) : NULL;
+            s->parse     = docs[i].parse ? parse_result_acquire(docs[i].parse) : NULL;
+            s->version   = atomic_load(&docs[i].doc_version);
+            s->disk_only = docs[i].disk_only;
+        }
+        snap.count = w;
+    }
+
+    pthread_mutex_unlock(&docs_mutex);
+
+    if (primary_uri) {
+        char *canon = normalize_uri(primary_uri);
+        snap.primary_uri = canon ? canon : strdup(primary_uri);
+    }
+    return snap;
+}
+
+/**
+ * Find the DocSnapshot for @p uri in @p snap.  Returns NULL when no
+ * match exists.  Compares against the canonical URI form that
+ * snapshot_workspace_for stored.
+ */
+static const DocSnapshot *snapshot_find(const WorkspaceSnapshot *snap,
+                                        const char *uri) {
+    if (!snap || !uri) return NULL;
+    /* Fast path: exact match (most clients send canonical URIs). */
+    for (size_t i = 0; i < snap->count; i++)
+        if (snap->docs[i].uri && strcmp(snap->docs[i].uri, uri) == 0)
+            return &snap->docs[i];
+    /* Slow path: normalize and retry. */
+    char *canon = normalize_uri(uri);
+    if (!canon) return NULL;
+    const DocSnapshot *found = NULL;
+    if (strcmp(canon, uri) != 0) {
+        for (size_t i = 0; i < snap->count; i++)
+            if (snap->docs[i].uri && strcmp(snap->docs[i].uri, canon) == 0) {
+                found = &snap->docs[i];
+                break;
+            }
+    }
+    free(canon);
+    return found;
+}
+
+/**
+ * Return the snapshot's primary document (the one named by primary_uri
+ * at capture time).  NULL when the request had no target URI or the
+ * URI wasn't in the workspace.
+ */
+static const DocSnapshot *snapshot_primary(const WorkspaceSnapshot *snap) {
+    if (!snap || !snap->primary_uri) return NULL;
+    return snapshot_find(snap, snap->primary_uri);
+}
+
+void server_capture_snapshot_for(Job *job) {
+    if (!job) return;
+    yyjson_val *root   = yyjson_doc_get_root(job->request_doc);
+    yyjson_val *params = yyjson_obj_get(root, "params");
+    const char *primary_uri = NULL;
+    if (params) {
+        yyjson_val *td = yyjson_obj_get(params, "textDocument");
+        if (td) primary_uri = json_str(td, "uri");
+        if (!primary_uri) {
+            yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
+            if (tdp) {
+                td = yyjson_obj_get(tdp, "textDocument");
+                if (td) primary_uri = json_str(td, "uri");
+            }
+        }
+    }
+    job->snapshot = snapshot_workspace_for(primary_uri);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    Cross-file revalidation
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -688,48 +815,65 @@ static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
  * Revalidate cross-file dep refs in all open documents, then publish updated
  * diagnostics.  Called after any document open, change, or close.
  *
- * Three passes, in order:
- *   A. Clear any cross-file state accumulated by the previous cycle.  This
- *      must happen for ALL documents before any resolution — pass B adds
- *      ref_links to symbols in other documents, so mixing clear and resolve
- *      would wipe links we just added.
- *   B. For each document, collect the other open documents' top-level
- *      symbols and re-resolve cross_file_deps[] against them.
- *   C. Publish diagnostics.
+ * Under the immutable-after-publication contract, this is a four-phase
+ * sequence:
+ *   A. Clone every doc's current ParseResult via
+ *      parse_result_clone_for_revalidate().  The clones start with
+ *      cross-file link arrays empty and transient diagnostics truncated.
+ *   B. For each clone, resolve cross_file_deps[] against the OTHER
+ *      clones' freshly-built symbol trees (so all cross-file links go
+ *      onto the new immutable copies, not the old ones).
+ *   C. Atomic swap: install the new ParseResults via
+ *      doc_install_new_parse() — bumps doc_version, releases the old
+ *      parse.  Snapshots still holding refs to the old ParseResult
+ *      keep it alive.
+ *   D. Publish diagnostics for editor-managed documents only.
+ *
+ * Caller must hold docs_mutex.
  */
 static void revalidate_all_docs(void) {
-    /* Pass A: clear cross-file state in all open documents. */
+    /* Phase A: clone every doc's parse. */
+    ParseResult *new_parses[MAX_DOCS] = {0};
     for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use) continue;
-        clear_cross_file_state(docs[i].parse);
+        if (!docs[i].in_use || !docs[i].parse) continue;
+        new_parses[i] = parse_result_clone_for_revalidate(docs[i].parse);
     }
 
-    /* Pass B: resolve cross-file deps in each document against all others. */
+    /* Phase B: resolve cross-file deps on each clone using the other
+     * clones' symbol trees. */
     DocSymbol *const *extra_roots[MAX_DOCS];
     int               extra_counts[MAX_DOCS];
     const char       *extra_uris[MAX_DOCS];
     for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use) continue;
+        if (!new_parses[i]) continue;
 
         int num_extra = 0;
         for (int j = 0; j < MAX_DOCS; j++) {
-            if (!docs[j].in_use || j == i) continue;
-            extra_roots[num_extra]  = docs[j].parse->doc_symbols;
-            extra_counts[num_extra] = docs[j].parse->num_doc_symbols;
+            if (!new_parses[j] || j == i) continue;
+            extra_roots[num_extra]  = new_parses[j]->doc_symbols;
+            extra_counts[num_extra] = new_parses[j]->num_doc_symbols;
             extra_uris[num_extra]   = docs[j].uri;
             num_extra++;
         }
 
-        resolve_cross_file_deps(docs[i].parse,
+        resolve_cross_file_deps(new_parses[i],
                                 extra_roots, extra_counts, extra_uris,
                                 num_extra, docs[i].uri);
     }
 
-    /* Pass C: publish diagnostics for editor-managed documents only.
-     * disk_only documents are loaded by the workspace scan and by include
-     * resolution; the editor hasn't asked about them, so publishing
-     * diagnostics for them would spam the client with noise (and potentially
-     * huge payloads from unrelated files in the workspace). */
+    /* Phase C: atomic swap.  Old parses are released after install;
+     * snapshots still referencing them keep them alive. */
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!new_parses[i]) continue;
+        doc_install_new_parse(&docs[i], new_parses[i]);
+    }
+
+    /* Phase D: publish diagnostics for editor-managed documents only.
+     * disk_only documents are loaded by the workspace scan and by
+     * include resolution; the editor hasn't asked about them, so
+     * publishing diagnostics for them would spam the client with noise
+     * (and potentially huge payloads from unrelated files in the
+     * workspace). */
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
         if (docs[i].disk_only) continue;
@@ -996,9 +1140,6 @@ static void handle_did_change_watched_files(yyjson_val *params) {
             if (!document) { free(text); free(path); continue; }
 
             free(document->text);
-            free(document->doc_symbols_json);
-            document->doc_symbols_json     = NULL;
-            document->doc_symbols_json_len = 0;
             document->text      = text;
             document->disk_only = 1;
             parse_result_release(document->parse);
@@ -1059,9 +1200,6 @@ static void handle_did_rename_files(yyjson_val *params) {
         if (!new_doc) { free(text); free(path); continue; }
 
         free(new_doc->text);
-        free(new_doc->doc_symbols_json);
-        new_doc->doc_symbols_json     = NULL;
-        new_doc->doc_symbols_json_len = 0;
         parse_result_release(new_doc->parse);
         new_doc->text      = text;
         new_doc->disk_only = 1;
@@ -1107,9 +1245,6 @@ static void handle_didopen(yyjson_val *params) {
         }
         /* Text differs from disk — replace with authoritative editor content */
         free(d->text);
-        free(d->doc_symbols_json);
-        d->doc_symbols_json     = NULL;
-        d->doc_symbols_json_len = 0;
         parse_result_release(d->parse);
         d->parse = NULL;
     } else {
@@ -1187,9 +1322,6 @@ static void handle_didchange(yyjson_val *params) {
     }
 
     free(d->text);
-    free(d->doc_symbols_json);
-    d->doc_symbols_json     = NULL;
-    d->doc_symbols_json_len = 0;
     d->text = current;
     parse_result_release(d->parse);
     d->parse = parse(d->text);
@@ -1231,9 +1363,6 @@ static void handle_didclose(yyjson_val *params) {
     if (text) {
         /* Reload from disk — keep the document as a background (disk-only) entry */
         free(d->text);
-        free(d->doc_symbols_json);
-        d->doc_symbols_json     = NULL;
-        d->doc_symbols_json_len = 0;
         d->text      = text;
         d->disk_only = 1;
         parse_result_release(d->parse);
@@ -1263,26 +1392,19 @@ static void handle_didclose(yyjson_val *params) {
  * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                               yyjson_val *params) {
-    const char *uri = NULL;
-    if (params) {
-        yyjson_val *td = yyjson_obj_get(params, "textDocument");
-        if (td) uri = json_str(td, "uri");
-    }
-    if (!uri) return make_response(doc, id, yyjson_mut_null(doc));
+                                               yyjson_val *params,
+                                               const WorkspaceSnapshot *snap) {
+    (void)params;
+    const DocSnapshot *primary = snapshot_primary(snap);
+    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
-    Document *d = doc_find(uri);
-    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
-
-    pthread_mutex_lock(&d->cache_lock);
-    if (!d->doc_symbols_json)
-        d->doc_symbols_json = build_document_symbols_json(d->parse->doc_symbols,
-                                                           d->parse->num_doc_symbols,
-                                                           &d->doc_symbols_json_len);
-    yyjson_mut_val *raw = yyjson_mut_rawncpy(doc,
-                                              d->doc_symbols_json,
-                                              d->doc_symbols_json_len);
-    pthread_mutex_unlock(&d->cache_lock);
+    size_t  json_len = 0;
+    char   *json     = build_document_symbols_json(primary->parse->doc_symbols,
+                                                    primary->parse->num_doc_symbols,
+                                                    &json_len);
+    if (!json) return make_response(doc, id, yyjson_mut_null(doc));
+    yyjson_mut_val *raw = yyjson_mut_rawncpy(doc, json, json_len);
+    free(json);
     return make_response(doc, id, raw);
 }
 
@@ -1298,22 +1420,17 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
  * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
-                                             yyjson_val *params) {
-    const char *uri = NULL;
-    if (params) {
-        yyjson_val *td = yyjson_obj_get(params, "textDocument");
-        if (td) uri = json_str(td, "uri");
-    }
-    if (!uri) return make_response(doc, id, yyjson_mut_null(doc));
-
-    Document *d = doc_find(uri);
-    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
+                                             yyjson_val *params,
+                                             const WorkspaceSnapshot *snap) {
+    (void)params;
+    const DocSnapshot *primary = snapshot_primary(snap);
+    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_mut_val *arr = build_folding_ranges_json(doc,
-                                                     d->parse->tok_spans,
-                                                     d->parse->num_tok_spans,
-                                                     d->parse->doc_symbols,
-                                                     d->parse->num_doc_symbols);
+                                                     primary->parse->tok_spans,
+                                                     primary->parse->num_tok_spans,
+                                                     primary->parse->doc_symbols,
+                                                     primary->parse->num_doc_symbols);
     return make_response(doc, id, arr);
 }
 
@@ -1330,22 +1447,17 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
  * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
-                                         yyjson_val *params) {
-    const char *uri = NULL;
-    if (params) {
-        yyjson_val *td = yyjson_obj_get(params, "textDocument");
-        if (td) uri = json_str(td, "uri");
-    }
-    if (!uri) return make_response(doc, id, yyjson_mut_null(doc));
-
-    Document *d = doc_find(uri);
-    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
+                                         yyjson_val *params,
+                                         const WorkspaceSnapshot *snap) {
+    (void)params;
+    const DocSnapshot *primary = snapshot_primary(snap);
+    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_mut_val *arr = build_code_lens_json(doc,
-                                                d->parse->tok_spans,
-                                                d->parse->num_tok_spans,
-                                                d->parse->doc_symbols,
-                                                d->parse->num_doc_symbols);
+                                                primary->parse->tok_spans,
+                                                primary->parse->num_tok_spans,
+                                                primary->parse->doc_symbols,
+                                                primary->parse->num_doc_symbols);
     return make_response(doc, id, arr);
 }
 
@@ -1382,34 +1494,26 @@ static const char *sym_kind_label(int keyword) {
  * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
-                                     yyjson_val *params) {
+                                     yyjson_val *params,
+                                     const WorkspaceSnapshot *snap) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
     if (!tdp) tdp = params; /* some clients pass position at top level */
 
-    const char *uri = NULL;
-    yyjson_val *td = yyjson_obj_get(tdp, "textDocument");
-    if (td) uri = json_str(td, "uri");
-    if (!uri) {
-        td = yyjson_obj_get(params, "textDocument");
-        if (td) uri = json_str(td, "uri");
-    }
-
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
+    if (!pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
 
-    if (!uri || !pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
-
-    Document *d = doc_find(uri);
-    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
+    const DocSnapshot *primary = snapshot_primary(snap);
+    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
 
     /* Check whether the cursor is on a resolved dependency/allocation reference.
      * If so, show the target symbol's kind, id, and name instead of keyword docs. */
     const DefinitionLink *hover_link = find_def_link_at(
-        d->parse->tok_spans, d->parse->num_tok_spans, pos);
+        primary->parse->tok_spans, primary->parse->num_tok_spans, pos);
     if (hover_link) {
         const DocSymbol *sym = hover_link->target;
         if (!sym) goto keyword_hover;
@@ -1435,7 +1539,8 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
 keyword_hover:;
     /* Fall back to keyword documentation */
-    ActiveKeyword ak = active_keyword_at(d->parse->tok_spans, d->parse->num_tok_spans, pos);
+    ActiveKeyword ak = active_keyword_at(primary->parse->tok_spans,
+                                          primary->parse->num_tok_spans, pos);
     if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     const char *doc_text = keyword_docs(ak.keyword);
@@ -1467,30 +1572,23 @@ keyword_hover:;
  * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id,
-                                              yyjson_val *params) {
+                                              yyjson_val *params,
+                                              const WorkspaceSnapshot *snap) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
     if (!tdp) tdp = params;
 
-    const char *uri = NULL;
-    yyjson_val *td = yyjson_obj_get(tdp, "textDocument");
-    if (td) uri = json_str(td, "uri");
-    if (!uri) {
-        td = yyjson_obj_get(params, "textDocument");
-        if (td) uri = json_str(td, "uri");
-    }
-
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
+    if (!pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
 
-    if (!uri || !pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
-
-    Document *d = doc_find(uri);
-    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
+    const DocSnapshot *primary = snapshot_primary(snap);
+    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-    ActiveContext ac = active_context(d->parse->tok_spans, d->parse->num_tok_spans, pos);
+    ActiveContext ac = active_context(primary->parse->tok_spans,
+                                       primary->parse->num_tok_spans, pos);
     if (!ac.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_mut_val *sig = build_signature_help_json(doc, ac.keyword, ac.arg_count);
@@ -1500,8 +1598,8 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
 }
 
 /** Format the document's next resultId as a heap-allocated decimal
- * string.  Caller must hold @p d->cache_lock; this is a plain
- * read-modify-write of @p d->next_sem_tokens_result_id. */
+ * string.  Caller must hold docs_mutex (the field is a plain
+ * non-atomic uint64_t — read-modify-write). */
 static char *mint_sem_tokens_result_id(Document *d) {
     char buf[32];
     int n = snprintf(buf, sizeof(buf), "%" PRIu64,
@@ -1513,7 +1611,7 @@ static char *mint_sem_tokens_result_id(Document *d) {
 /**
  * Replace the cached semantic-tokens data stored on @p d with @p new_buf
  * and @p new_result_id, freeing whatever was there before.  Ownership of
- * both pointers transfers to @p d.
+ * both pointers transfers to @p d.  Caller must hold docs_mutex.
  */
 static void doc_set_sem_tokens(Document *d,
                                 uint32_t *new_buf, size_t new_count,
@@ -1533,35 +1631,43 @@ static void doc_set_sem_tokens(Document *d,
  * so a subsequent `semanticTokens/full/delta` request can diff against
  * exactly what was sent.
  *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Request params containing `textDocument.uri`.
- * @return The JSON-RPC response.
+ * Computes from the snapshot's parse (so the response reflects
+ * arrival-order state, not whatever a racing mutation has done since).
+ * Takes docs_mutex only for the brief cache read / mint / write.
  */
 static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
-                                                    yyjson_val *params) {
-    const char *uri = NULL;
-    if (params) {
-        yyjson_val *td = yyjson_obj_get(params, "textDocument");
-        if (td) uri = json_str(td, "uri");
-    }
-    if (!uri) return make_response(doc, id, yyjson_mut_null(doc));
+                                                    yyjson_val *params,
+                                                    const WorkspaceSnapshot *snap) {
+    (void)params;
+    const DocSnapshot *primary = snapshot_primary(snap);
+    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
-    Document *d = doc_find(uri);
-    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
-
-    pthread_mutex_lock(&d->cache_lock);
     uint32_t *buf = NULL;
     size_t    count = 0;
-    compute_semantic_tokens_data(d->parse->tok_spans,
-                                  d->parse->num_tok_spans,
-                                  d->parse->num_sem_entries,
+    compute_semantic_tokens_data(primary->parse->tok_spans,
+                                  primary->parse->num_tok_spans,
+                                  primary->parse->num_sem_entries,
                                   &buf, &count);
+
+    pthread_mutex_lock(&docs_mutex);
+    Document *d = doc_find(primary->uri);
+    if (!d) {
+        /* Document was closed/freed between snapshot and now.  Return
+         * the computed full data with a fixed resultId; no cache write
+         * needed because there's no document to cache against. */
+        pthread_mutex_unlock(&docs_mutex);
+        char *result_id = strdup("0");
+        yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
+        free(buf);
+        free(result_id);
+        return make_response(doc, id, result);
+    }
+
     char *result_id = mint_sem_tokens_result_id(d);
     yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
     /* Transfer ownership of buf and result_id to the document cache. */
     doc_set_sem_tokens(d, buf, count, result_id);
-    pthread_mutex_unlock(&d->cache_lock);
+    pthread_mutex_unlock(&docs_mutex);
     return make_response(doc, id, result);
 }
 
@@ -1575,34 +1681,32 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
  * `SemanticTokens` (the spec-mandated fallback when the server cannot
  * compute a diff).  In either case the cache is replaced with the
  * newly computed data and a fresh resultId.
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Request params containing `textDocument.uri` and
- *                `previousResultId`.
- * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yyjson_val *id,
-                                                          yyjson_val *params) {
-    const char *uri = NULL;
-    const char *previous_result_id = NULL;
-    if (params) {
-        yyjson_val *td = yyjson_obj_get(params, "textDocument");
-        if (td) uri = json_str(td, "uri");
-        previous_result_id = json_str(params, "previousResultId");
-    }
-    if (!uri) return make_response(doc, id, yyjson_mut_null(doc));
+                                                          yyjson_val *params,
+                                                          const WorkspaceSnapshot *snap) {
+    const char *previous_result_id = params ? json_str(params, "previousResultId") : NULL;
+    const DocSnapshot *primary = snapshot_primary(snap);
+    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
-    Document *d = doc_find(uri);
-    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
-
-    pthread_mutex_lock(&d->cache_lock);
     uint32_t *new_buf = NULL;
     size_t    new_count = 0;
-    compute_semantic_tokens_data(d->parse->tok_spans,
-                                  d->parse->num_tok_spans,
-                                  d->parse->num_sem_entries,
+    compute_semantic_tokens_data(primary->parse->tok_spans,
+                                  primary->parse->num_tok_spans,
+                                  primary->parse->num_sem_entries,
                                   &new_buf, &new_count);
+
+    pthread_mutex_lock(&docs_mutex);
+    Document *d = doc_find(primary->uri);
+    if (!d) {
+        pthread_mutex_unlock(&docs_mutex);
+        char *result_id = strdup("0");
+        yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, new_buf, new_count, result_id);
+        free(new_buf);
+        free(result_id);
+        return make_response(doc, id, result);
+    }
+
     char *result_id = mint_sem_tokens_result_id(d);
 
     yyjson_mut_val *result;
@@ -1618,7 +1722,7 @@ static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yy
     }
 
     doc_set_sem_tokens(d, new_buf, new_count, result_id);
-    pthread_mutex_unlock(&d->cache_lock);
+    pthread_mutex_unlock(&docs_mutex);
     return make_response(doc, id, result);
 }
 
@@ -1635,24 +1739,20 @@ static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yy
  * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params) {
+                                          yyjson_val *params,
+                                          const WorkspaceSnapshot *snap) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
-    const char *uri = NULL;
-    yyjson_val *td = yyjson_obj_get(params, "textDocument");
-    if (td) uri = json_str(td, "uri");
-
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
+    if (!pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
 
-    if (!uri || !pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
-
-    Document *d = doc_find(uri);
-    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
+    const DocSnapshot *primary = snapshot_primary(snap);
+    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_references_json(doc,
-                                                    uri,
-                                                    d->parse->tok_spans,
-                                                    d->parse->num_tok_spans,
+                                                    primary->uri,
+                                                    primary->parse->tok_spans,
+                                                    primary->parse->num_tok_spans,
                                                     pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1672,25 +1772,21 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
  */
 static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
                                                   yyjson_val *id,
-                                                  yyjson_val *params) {
+                                                  yyjson_val *params,
+                                                  const WorkspaceSnapshot *snap) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
-    const char *uri = NULL;
-    yyjson_val *td = yyjson_obj_get(params, "textDocument");
-    if (td) uri = json_str(td, "uri");
-
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
+    if (!pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
 
-    if (!uri || !pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
-
-    Document *d = doc_find(uri);
-    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
+    const DocSnapshot *primary = snapshot_primary(snap);
+    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_document_highlight_json(doc,
-                                                            d->parse->doc_symbols,
-                                                            d->parse->num_doc_symbols,
-                                                            d->parse->tok_spans,
-                                                            d->parse->num_tok_spans,
+                                                            primary->parse->doc_symbols,
+                                                            primary->parse->num_doc_symbols,
+                                                            primary->parse->tok_spans,
+                                                            primary->parse->num_tok_spans,
                                                             pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1710,24 +1806,20 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
  * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params) {
+                                          yyjson_val *params,
+                                          const WorkspaceSnapshot *snap) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
-    const char *uri = NULL;
-    yyjson_val *td = yyjson_obj_get(params, "textDocument");
-    if (td) uri = json_str(td, "uri");
-
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
+    if (!pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
 
-    if (!uri || !pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
-
-    Document *d = doc_find(uri);
-    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
+    const DocSnapshot *primary = snapshot_primary(snap);
+    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos         = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_definition_json(doc,
-                                                    d->parse->tok_spans,
-                                                    d->parse->num_tok_spans,
-                                                    pos, uri);
+                                                    primary->parse->tok_spans,
+                                                    primary->parse->num_tok_spans,
+                                                    pos, primary->uri);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
 }
@@ -1746,26 +1838,18 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
  * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params) {
+                                          yyjson_val *params,
+                                          const WorkspaceSnapshot *snap) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
-    const char *uri = NULL;
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
     if (!tdp) tdp = params;
 
-    yyjson_val *td = yyjson_obj_get(tdp, "textDocument");
-    if (td) uri = json_str(td, "uri");
-    if (!uri) {
-        td = yyjson_obj_get(params, "textDocument");
-        if (td) uri = json_str(td, "uri");
-    }
-
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
+    if (!pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
 
-    if (!uri || !pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
-
-    Document *d = doc_find(uri);
-    if (!d) return make_response(doc, id, yyjson_mut_null(doc));
+    const DocSnapshot *primary = snapshot_primary(snap);
+    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     /* Gather symbol pools from other editor-managed documents.  disk_only
      * documents (workspace scan + include follows) are excluded: the
@@ -1774,25 +1858,27 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     DocSymbol *const *extra_pools[MAX_DOCS];
     int               extra_counts[MAX_DOCS];
     int               num_extra = 0;
-    for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use || &docs[i] == d) continue;
-        if (docs[i].disk_only) continue;
-        extra_pools[num_extra]  = docs[i].parse->doc_symbols;
-        extra_counts[num_extra] = docs[i].parse->num_doc_symbols;
+    for (size_t i = 0; i < snap->count && num_extra < MAX_DOCS; i++) {
+        const DocSnapshot *s = &snap->docs[i];
+        if (s == primary) continue;
+        if (s->disk_only) continue;
+        if (!s->parse) continue;
+        extra_pools[num_extra]  = s->parse->doc_symbols;
+        extra_counts[num_extra] = s->parse->num_doc_symbols;
         num_extra++;
     }
 
     LspPos pos             = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_completions_json(doc,
-                                                     d->parse->tok_spans,
-                                                     d->parse->num_tok_spans,
+                                                     primary->parse->tok_spans,
+                                                     primary->parse->num_tok_spans,
                                                      pos,
-                                                     d->parse->doc_symbols,
-                                                     d->parse->num_doc_symbols,
+                                                     primary->parse->doc_symbols,
+                                                     primary->parse->num_doc_symbols,
                                                      extra_pools,
                                                      extra_counts,
                                                      num_extra,
-                                                     d->text);
+                                                     primary->text);
     return make_response(doc, id, result);
 }
 
@@ -1808,17 +1894,21 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
  * @return The JSON-RPC response.
  */
 static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                                yyjson_val *params) {
+                                                yyjson_val *params,
+                                                const WorkspaceSnapshot *snap) {
     const char *query = params ? json_str(params, "query") : NULL;
     if (!query) query = "";
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use) continue;
-        collect_workspace_symbols(doc, query,
-                                  docs[i].parse->doc_symbols,
-                                  docs[i].parse->num_doc_symbols,
-                                  docs[i].uri, arr);
+    if (snap) {
+        for (size_t i = 0; i < snap->count; i++) {
+            const DocSnapshot *s = &snap->docs[i];
+            if (!s->parse) continue;
+            collect_workspace_symbols(doc, query,
+                                      s->parse->doc_symbols,
+                                      s->parse->num_doc_symbols,
+                                      s->uri, arr);
+        }
     }
     return make_response(doc, id, arr);
 }
@@ -1843,10 +1933,8 @@ static int is_mutation_method(const char *method) {
         || strcmp(method, "workspace/didRenameFiles") == 0;
 }
 
-/* Serialize a response yyjson tree to stdout while still holding the
- * doc-store lock — the response strings may reference data owned by
- * ParseResults that a mutation could otherwise free the instant we
- * unlock.  After serialization the resulting text is independent. */
+/* Serialize a response yyjson tree to stdout.  After serialization the
+ * resulting text is independent of every yyjson value that built it. */
 static void send_response(yyjson_mut_doc *out_doc, yyjson_mut_val *resp) {
     yyjson_mut_doc_set_root(out_doc, resp);
     char *text = yyjson_mut_write(out_doc, 0, NULL);
@@ -1856,8 +1944,8 @@ static void send_response(yyjson_mut_doc *out_doc, yyjson_mut_val *resp) {
     }
 }
 
-void server_dispatch_mutation(yyjson_doc *in_doc) {
-    yyjson_val *root    = yyjson_doc_get_root(in_doc);
+void server_dispatch_mutation(Job *job) {
+    yyjson_val *root    = yyjson_doc_get_root(job->request_doc);
     yyjson_val *id_item = yyjson_obj_get(root, "id");
     yyjson_val *method  = yyjson_obj_get(root, "method");
     yyjson_val *params  = yyjson_obj_get(root, "params");
@@ -1865,6 +1953,12 @@ void server_dispatch_mutation(yyjson_doc *in_doc) {
 
     yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *resp = NULL;
+
+    /* Hold docs_mutex for the entire mutation handler.  Since exactly
+     * one mutation worker exists, no other writer can interleave.
+     * Query workers only contend during their brief snapshot capture
+     * windows, so even long mutations don't permanently block them. */
+    pthread_mutex_lock(&docs_mutex);
 
     if (strcmp(m, "initialize") == 0) {
         resp = handle_initialize(out_doc, id_item, params);
@@ -1887,12 +1981,14 @@ void server_dispatch_mutation(yyjson_doc *in_doc) {
         resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
     }
 
+    pthread_mutex_unlock(&docs_mutex);
+
     if (resp) send_response(out_doc, resp);
     yyjson_mut_doc_free(out_doc);
 }
 
-void server_dispatch_cancelled(yyjson_doc *in_doc) {
-    yyjson_val *root    = yyjson_doc_get_root(in_doc);
+void server_dispatch_cancelled(Job *job) {
+    yyjson_val *root    = yyjson_doc_get_root(job->request_doc);
     yyjson_val *id_item = yyjson_obj_get(root, "id");
     if (!id_item) return;
 
@@ -1903,8 +1999,8 @@ void server_dispatch_cancelled(yyjson_doc *in_doc) {
     yyjson_mut_doc_free(out_doc);
 }
 
-void server_dispatch_query(yyjson_doc *in_doc) {
-    yyjson_val *root    = yyjson_doc_get_root(in_doc);
+void server_dispatch_query(Job *job) {
+    yyjson_val *root    = yyjson_doc_get_root(job->request_doc);
     yyjson_val *id_item = yyjson_obj_get(root, "id");
     yyjson_val *method  = yyjson_obj_get(root, "method");
     yyjson_val *params  = yyjson_obj_get(root, "params");
@@ -1913,30 +2009,34 @@ void server_dispatch_query(yyjson_doc *in_doc) {
     yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *resp = NULL;
 
+    /* The snapshot was captured by the coordinator before this Job
+     * landed in the query pool — it reflects state in arrival order,
+     * so the result is automatically correct relative to LSP message
+     * ordering even when later mutations race ahead during compute. */
     if (strcmp(m, "textDocument/documentSymbol") == 0) {
-        resp = handle_document_symbol(out_doc, id_item, params);
+        resp = handle_document_symbol(out_doc, id_item, params, &job->snapshot);
     } else if (strcmp(m, "textDocument/foldingRange") == 0) {
-        resp = handle_folding_range(out_doc, id_item, params);
+        resp = handle_folding_range(out_doc, id_item, params, &job->snapshot);
     } else if (strcmp(m, "textDocument/codeLens") == 0) {
-        resp = handle_code_lens(out_doc, id_item, params);
+        resp = handle_code_lens(out_doc, id_item, params, &job->snapshot);
     } else if (strcmp(m, "textDocument/hover") == 0) {
-        resp = handle_hover(out_doc, id_item, params);
+        resp = handle_hover(out_doc, id_item, params, &job->snapshot);
     } else if (strcmp(m, "textDocument/signatureHelp") == 0) {
-        resp = handle_signature_help(out_doc, id_item, params);
+        resp = handle_signature_help(out_doc, id_item, params, &job->snapshot);
     } else if (strcmp(m, "textDocument/references") == 0) {
-        resp = handle_references(out_doc, id_item, params);
+        resp = handle_references(out_doc, id_item, params, &job->snapshot);
     } else if (strcmp(m, "textDocument/documentHighlight") == 0) {
-        resp = handle_document_highlight(out_doc, id_item, params);
+        resp = handle_document_highlight(out_doc, id_item, params, &job->snapshot);
     } else if (strcmp(m, "textDocument/definition") == 0) {
-        resp = handle_definition(out_doc, id_item, params);
+        resp = handle_definition(out_doc, id_item, params, &job->snapshot);
     } else if (strcmp(m, "textDocument/completion") == 0) {
-        resp = handle_completion(out_doc, id_item, params);
+        resp = handle_completion(out_doc, id_item, params, &job->snapshot);
     } else if (strcmp(m, "workspace/symbol") == 0) {
-        resp = handle_workspace_symbol(out_doc, id_item, params);
+        resp = handle_workspace_symbol(out_doc, id_item, params, &job->snapshot);
     } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
-        resp = handle_semantic_tokens_full(out_doc, id_item, params);
+        resp = handle_semantic_tokens_full(out_doc, id_item, params, &job->snapshot);
     } else if (strcmp(m, "textDocument/semanticTokens/full/delta") == 0) {
-        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params);
+        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params, &job->snapshot);
     } else if (id_item) {
         /* Unknown request — null result */
         resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
@@ -1960,14 +2060,11 @@ void server_process(const char *json_text) {
         exit(0);
     }
 
-    /* Cancellation is handled inline in the reader thread — not via the
-     * work_queue — so it races ahead of any queued worker.
+    /* Cancellation is handled inline in the reader thread.
      * threadpool_cancel_by_id walks both queues and marks any matching
-     * Job; the worker checks is_cancelled before dispatching the handler.
-     * A cancel that arrives after the worker has already popped the Job
-     * (a few-microsecond race window) is silently no-op; LSP clients only
-     * ever cancel in-flight requests they sent milliseconds earlier, so
-     * that window is never realistically hit. */
+     * Job; the worker checks is_cancelled before dispatching the
+     * handler.  A cancel that arrives after the worker has popped is
+     * a sub-microsecond no-op window. */
     if (strcmp(m, "$/cancelRequest") == 0) {
         yyjson_val *p      = yyjson_obj_get(root, "params");
         yyjson_val *id_val = p ? yyjson_obj_get(p, "id") : NULL;

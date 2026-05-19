@@ -22,91 +22,65 @@
 #include "server.h"
 
 #include <pthread.h>
-#include <stdatomic.h>
 
-/* One query worker.  Per-document cache mutexes (Document.cache_lock
- * in server.c) and the per-document sem-tokens result counter are in
- * place for cache-safety once this scales up, but scaling to multiple
- * workers also requires per-document query *ordering* — pthread_mutex_t
- * is not FIFO, so two workers racing for a same-document handler can
- * produce non-deterministic resultIds even when the cache writes are
- * serialized.  Adding a per-document ticketed queue is the next step. */
+/* One query worker for now.  The snapshot + immutable-ParseResult
+ * machinery is already in place to scale this up, but
+ * pthread_mutex_t is not FIFO — multiple workers racing for the
+ * docs_mutex during a sem_tokens cache write produce non-deterministic
+ * resultIds.  The fix is a per-document ticket / queue (called out in
+ * the TODO at the top of parser.c, alongside the doc-symbol-tree
+ * follow-ups).  Until that lands, keep parallelism at 1. */
 #define NUM_QUERY_WORKERS 1
 
-/* Single ordered FIFO populated by the reader thread.  Preserving arrival
- * order through one queue is what guarantees LSP semantics: a query
- * enqueued after a mutation always observes that mutation's state, and
- * mutations enqueued after queries always wait for those queries to finish. */
+/* Single arrival-ordered FIFO populated by the reader.  The
+ * coordinator pops from it in order, which is what enforces the LSP
+ * "messages processed in arrival order" rule across queries and
+ * mutations alike. */
 static JobQueue *work_queue;
 
-/* Internal handoff queue: the coordinator pushes read-only query jobs onto
- * this for the query worker pool to consume.  Mutations never go here —
- * the coordinator dispatches them synchronously. */
+/* Internal handoff queue: the coordinator pushes read-only query jobs
+ * (with their snapshot already attached) onto this for the query
+ * worker pool to consume.  Mutations never go here — the coordinator
+ * dispatches them inline. */
 static JobQueue *query_pool_queue;
 
 static pthread_t coordinator_thread;
 static pthread_t query_threads[NUM_QUERY_WORKERS];
 static int       pool_started = 0;
 
-/* Number of query jobs currently in flight (handed off to a query worker
- * but not yet completed).  The coordinator waits for this to fall to zero
- * before dispatching a mutation, so mutations are mutually exclusive with
- * any in-flight queries even though no rwlock protects the doc store. */
-static _Atomic int in_flight_queries = 0;
-static pthread_mutex_t in_flight_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  in_flight_cond  = PTHREAD_COND_INITIALIZER;
-
-static void in_flight_inc(void) {
-    atomic_fetch_add(&in_flight_queries, 1);
-}
-
-static void in_flight_dec(void) {
-    pthread_mutex_lock(&in_flight_mutex);
-    if (atomic_fetch_sub(&in_flight_queries, 1) == 1)
-        pthread_cond_broadcast(&in_flight_cond);
-    pthread_mutex_unlock(&in_flight_mutex);
-}
-
-static void wait_for_in_flight_drain(void) {
-    if (atomic_load(&in_flight_queries) == 0) return;
-    pthread_mutex_lock(&in_flight_mutex);
-    while (atomic_load(&in_flight_queries) > 0)
-        pthread_cond_wait(&in_flight_cond, &in_flight_mutex);
-    pthread_mutex_unlock(&in_flight_mutex);
-}
-
 /* Coordinator thread.  Pops jobs from work_queue in arrival order.
- * Mutations dispatch synchronously after waiting for any in-flight queries
- * to drain.  Queries are pushed onto query_pool_queue and run on the
- * worker pool in parallel. */
+ *
+ * Mutation jobs: dispatched inline.  server_dispatch_mutation takes
+ * docs_mutex, applies the mutation, releases.  By running inline (not
+ * on a worker), the coordinator blocks while the mutation completes,
+ * so any subsequent query the reader pushes will observe the mutation.
+ *
+ * Query jobs: the coordinator takes a workspace snapshot HERE (before
+ * handing off), so the snapshot reflects the state at the moment this
+ * job's turn in arrival order would have come up.  This is what
+ * guarantees correctness when later mutations race ahead while query
+ * workers are still computing — the workers run on their own pinned
+ * snapshot, not on live docs[]. */
 static void *coordinator(void *arg) {
     (void)arg;
     while (1) {
         Job *job = job_queue_pop(work_queue);
         if (!job) break;
         if (job->is_mutation) {
-            wait_for_in_flight_drain();
-            server_dispatch_mutation(job->request_doc);
+            server_dispatch_mutation(job);
             job_free(job);
         } else {
-            in_flight_inc();
+            server_capture_snapshot_for(job);
             job_queue_push(query_pool_queue, job);
         }
     }
-    /* Reader is done.  Wait for any in-flight queries before tearing down
-     * the worker pool, then close the pool queue so workers can exit. */
-    wait_for_in_flight_drain();
     job_queue_close(query_pool_queue);
     return NULL;
 }
 
-/* Query handlers in server_dispatch_query read Document.parse without
- * calling parse_result_acquire().  That is safe today because the
- * coordinator blocks every mutation on wait_for_in_flight_drain(), so
- * no mutation can release or swap a ParseResult while a worker holds
- * a pointer to it.  If a future change drops the barrier (e.g. to
- * unblock mutations during long-running queries), handlers must start
- * acquiring/releasing around their access to Document.parse. */
+/* Query worker.  Pops a Job (with snapshot already attached), runs the
+ * handler against the snapshot, and emits the response.  No coordination
+ * with mutations is needed at this point — the snapshot is independent. */
 static void *query_worker(void *arg) {
     (void)arg;
     while (1) {
@@ -116,12 +90,11 @@ static void *query_worker(void *arg) {
          * $/cancelRequest and marked this Job before it was popped.
          * Skip the handler and send the RequestCancelled error. */
         if (job->is_cancelled) {
-            server_dispatch_cancelled(job->request_doc);
+            server_dispatch_cancelled(job);
         } else {
-            server_dispatch_query(job->request_doc);
+            server_dispatch_query(job);
         }
         job_free(job);
-        in_flight_dec();
     }
     return NULL;
 }
@@ -140,7 +113,7 @@ void threadpool_stop(void) {
     if (!pool_started) return;
     job_queue_close(work_queue);
     pthread_join(coordinator_thread, NULL);
-    /* coordinator() closed query_pool_queue once in-flight drained */
+    /* coordinator() closes query_pool_queue once work_queue drains. */
     for (int i = 0; i < NUM_QUERY_WORKERS; i++)
         pthread_join(query_threads[i], NULL);
     job_queue_destroy(work_queue);
