@@ -114,3 +114,14 @@ void job_queue_mark_stale_for_uri(JobQueue *q, const char *uri) {
     }
     pthread_mutex_unlock(&q->mutex);
 }
+
+void job_queue_mark_cancelled_by_id(JobQueue *q, int64_t id) {
+    if (!q) return;
+    pthread_mutex_lock(&q->mutex);
+    for (Job *j = q->head; j != NULL; j = j->next) {
+        if (j->has_id && j->id == id) {
+            j->is_cancelled = 1;
+        }
+    }
+    pthread_mutex_unlock(&q->mutex);
+}

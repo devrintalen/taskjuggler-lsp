@@ -114,6 +114,18 @@ static void *query_worker(void *arg) {
     while (1) {
         Job *job = job_queue_pop(query_pool_queue);
         if (!job) break;
+        /* Cancellation short-circuit (highest priority): the reader
+         * walked the queues for $/cancelRequest and marked this Job
+         * before it was popped.  Skip the handler and send the
+         * RequestCancelled error.  Checked before staleness because
+         * both skip the handler but the client explicitly asked for
+         * cancel — they should see -32800, not -32801. */
+        if (job->is_cancelled) {
+            server_dispatch_cancelled(job->request_doc);
+            job_free(job);
+            in_flight_dec();
+            continue;
+        }
         /* Stale-query short-circuit: if a same-URI mutation has been
          * enqueued since this query was, the client has typed past the
          * state this query was asked against.  Skip the handler and
@@ -200,4 +212,14 @@ void threadpool_enqueue_didchange(Job *job, const char *uri) {
 void threadpool_enqueue_query(Job *job) {
     job->is_mutation = 0;
     job_queue_push(work_queue, job);
+}
+
+void threadpool_cancel_by_id(int64_t id) {
+    /* Lock order: work_queue then query_pool_queue.  Matches the
+     * coordinator's pop-then-push direction, so no deadlock — the
+     * coordinator can hold work_queue.mutex and then call into
+     * query_pool_queue.mutex via push, and we acquire the same pair
+     * in the same order here. */
+    job_queue_mark_cancelled_by_id(work_queue, id);
+    job_queue_mark_cancelled_by_id(query_pool_queue, id);
 }

@@ -1914,6 +1914,25 @@ void server_dispatch_stale(yyjson_doc *in_doc) {
     yyjson_mut_doc_free(out_doc);
 }
 
+void server_dispatch_cancelled(yyjson_doc *in_doc) {
+    yyjson_val *root    = yyjson_doc_get_root(in_doc);
+    yyjson_val *id_item = yyjson_obj_get(root, "id");
+    if (!id_item) return;
+
+    /* Evict the matching set entry so the fallback signal doesn't linger
+     * for a request we've already responded to.  Same hygiene as the
+     * end-of-dispatch clear in server_dispatch_query and the stale path. */
+    if (yyjson_is_int(id_item)) {
+        cancellation_clear(yyjson_get_sint(id_item));
+    }
+
+    yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *resp = make_error_response(out_doc, id_item, -32800,
+                                                "Request cancelled");
+    send_response(out_doc, resp);
+    yyjson_mut_doc_free(out_doc);
+}
+
 void server_dispatch_query(yyjson_doc *in_doc) {
     yyjson_val *root    = yyjson_doc_get_root(in_doc);
     yyjson_val *id_item = yyjson_obj_get(root, "id");
@@ -1991,14 +2010,20 @@ void server_process(const char *json_text) {
     }
 
     /* Cancellation is handled inline in the reader thread — not via the
-     * work_queue — so it races ahead of the queued request being picked up
-     * by a worker.  The query worker then sees the cancellation flag at the
-     * top of dispatch and short-circuits without running the handler. */
+     * work_queue — so it races ahead of the queued request being picked
+     * up by a worker.  Two complementary signals:
+     *   - threadpool_cancel_by_id walks both queues and marks any matching
+     *     Job, making cancellation deterministic for queue-resident jobs.
+     *   - cancellation_mark adds the id to a set that the worker checks
+     *     at the top of dispatch, covering the race window where the Job
+     *     has been popped but dispatch hasn't started yet. */
     if (strcmp(m, "$/cancelRequest") == 0) {
         yyjson_val *p      = yyjson_obj_get(root, "params");
         yyjson_val *id_val = p ? yyjson_obj_get(p, "id") : NULL;
         if (id_val && yyjson_is_int(id_val)) {
-            cancellation_mark(yyjson_get_sint(id_val));
+            int64_t id = yyjson_get_sint(id_val);
+            threadpool_cancel_by_id(id);
+            cancellation_mark(id);
         }
         yyjson_doc_free(in_doc);
         return;
@@ -2007,6 +2032,16 @@ void server_process(const char *json_text) {
     Job *job = calloc(1, sizeof(Job));
     if (!job) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     job->request_doc = in_doc; /* ownership transferred */
+
+    /* Capture the JSON-RPC id as a first-class Job field so the Job is
+     * addressable by id (currently used by threadpool_cancel_by_id).
+     * Same int-only policy as elsewhere — string/null ids leave has_id=0
+     * and are therefore not cancellable by id. */
+    yyjson_val *id_item = yyjson_obj_get(root, "id");
+    if (id_item && yyjson_is_int(id_item)) {
+        job->has_id = 1;
+        job->id     = yyjson_get_sint(id_item);
+    }
 
     /* Extract textDocument.uri if the message targets a single document.
      * Used for two distinct purposes downstream: didChange coalescing

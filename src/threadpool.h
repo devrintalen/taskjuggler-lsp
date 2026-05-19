@@ -60,3 +60,13 @@ void threadpool_enqueue_didchange(Job *job, const char *uri);
  * Ownership of @p job transfers to the queue.
  */
 void threadpool_enqueue_query(Job *job);
+
+/**
+ * Walk both the reader-facing work queue and the worker-facing pool queue
+ * and set is_cancelled=1 on any Job whose id matches @p id.  Called by
+ * the reader when a $/cancelRequest arrives.  Deterministic for any Job
+ * still resident in either queue at the time of the call; Jobs that have
+ * already been popped by a worker are covered by the cancellation set
+ * (src/cancellation.h) fallback.
+ */
+void threadpool_cancel_by_id(int64_t id);
