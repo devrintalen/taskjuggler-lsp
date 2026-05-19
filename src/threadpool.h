@@ -66,7 +66,8 @@ void threadpool_enqueue_query(Job *job);
  * and set is_cancelled=1 on any Job whose id matches @p id.  Called by
  * the reader when a $/cancelRequest arrives.  Deterministic for any Job
  * still resident in either queue at the time of the call; Jobs that have
- * already been popped by a worker are covered by the cancellation set
- * (src/cancellation.h) fallback.
+ * already been popped by a worker proceed uncancelled (LSP clients only
+ * cancel in-flight requests sent milliseconds earlier, so the post-pop
+ * race window is never realistically hit).
  */
 void threadpool_cancel_by_id(int64_t id);
