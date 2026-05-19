@@ -24,7 +24,6 @@
 #include "server.h"
 #include "parser.h"
 #include "threadpool.h"
-#include "mutation_versions.h"
 #include "diagnostics.h"
 #include "definition.h"
 #include "references.h"
@@ -1892,18 +1891,6 @@ void server_dispatch_mutation(yyjson_doc *in_doc) {
     yyjson_mut_doc_free(out_doc);
 }
 
-void server_dispatch_stale(yyjson_doc *in_doc) {
-    yyjson_val *root    = yyjson_doc_get_root(in_doc);
-    yyjson_val *id_item = yyjson_obj_get(root, "id");
-    if (!id_item) return;
-
-    yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *resp = make_error_response(out_doc, id_item, -32801,
-                                                "Content modified");
-    send_response(out_doc, resp);
-    yyjson_mut_doc_free(out_doc);
-}
-
 void server_dispatch_cancelled(yyjson_doc *in_doc) {
     yyjson_val *root    = yyjson_doc_get_root(in_doc);
     yyjson_val *id_item = yyjson_obj_get(root, "id");
@@ -2005,47 +1992,7 @@ void server_process(const char *json_text) {
         job->id     = yyjson_get_sint(id_item);
     }
 
-    /* Extract textDocument.uri if the message targets a single document.
-     * Used for two distinct purposes downstream: didChange coalescing
-     * (same-URI tail merge) and query staleness (snapshot/compare against
-     * mutation_versions).  Both happen at reader time so the snapshot
-     * captures the version visible to a same-thread bump from earlier
-     * messages, and so the coalesce tail-match has the URI to compare. */
-    const char *uri = NULL;
-    yyjson_val *params = yyjson_obj_get(root, "params");
-    if (params) {
-        yyjson_val *td      = yyjson_obj_get(params, "textDocument");
-        yyjson_val *uri_val = td ? yyjson_obj_get(td, "uri") : NULL;
-        if (uri_val && yyjson_is_str(uri_val))
-            uri = yyjson_get_str(uri_val);
-    }
-    if (uri) job->uri = strdup(uri);
-
-    int mutation = is_mutation_method(m);
-
-    if (mutation && uri) {
-        /* Bump must happen before any same-URI query enqueued later in
-         * this reader thread snapshots the version. */
-        mutation_versions_bump(uri);
-    } else if (!mutation && uri) {
-        job->snapshot_version = mutation_versions_snapshot(uri);
-        /* Most queries are safe to drop when a later same-URI mutation
-         * has overtaken them.  The exception is the semanticTokens family:
-         * full establishes the per-document baseline that delta diffs
-         * against, so silently dropping a baseline would corrupt the
-         * delta chain across the next handful of requests. */
-        if (strcmp(m, "textDocument/semanticTokens/full") != 0
-            && strcmp(m, "textDocument/semanticTokens/full/delta") != 0) {
-            job->is_stale_droppable = 1;
-        }
-    }
-
-    if (strcmp(m, "textDocument/didChange") == 0 && uri) {
-        threadpool_enqueue_didchange(job, uri);
-        return;
-    }
-
-    if (mutation)
+    if (is_mutation_method(m))
         threadpool_enqueue_mutation(job);
     else
         threadpool_enqueue_query(job);
@@ -2054,5 +2001,4 @@ void server_process(const char *json_text) {
 void server_init() {
     for (int i = 0; i < MAX_DOCS; i++)
         docs[i].in_use = 0;
-    mutation_versions_init();
 }

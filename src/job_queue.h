@@ -35,38 +35,6 @@
  * synchronous dispatch (mutations) and handing the job off to a query
  * worker (read-only queries).
  *
- * `uri` is a heap-owned copy of the document URI this job targets, set
- * for any per-document mutation (didOpen/didChange/didClose) and for any
- * query whose params carry a textDocument.uri.  NULL for workspace-wide
- * operations (workspace/symbol, shutdown, etc.).  Used both for
- * didChange coalescing and for staleness detection against the
- * mutation_versions counter.
- *
- * `is_coalesceable` is set on textDocument/didChange jobs.
- * job_queue_push collapses two adjacent same-URI didChange jobs into
- * one: the queued job's request_doc is replaced with the newer one and
- * the older parse is skipped.  Coalescing only happens with the queue's
- * tail, so a query or different-URI mutation between two didChanges
- * defeats it — which preserves observable LSP ordering.
- *
- * `snapshot_version` is the mutation_versions value for `uri` captured
- * at enqueue time, used by the query worker to detect queries that have
- * been overtaken by a later same-URI mutation.  Only meaningful for
- * queries flagged is_stale_droppable.
- *
- * `is_stale_droppable` is set on read-only queries whose result can be
- * safely discarded if a later same-URI mutation has overtaken them.
- * Most queries are droppable; semanticTokens/full and its delta variant
- * are NOT, because they maintain per-document baseline state on the
- * server (sem_tokens_data + result_id) that a subsequent delta diffs
- * against — silently dropping the baseline would corrupt the delta chain.
- *
- * `is_marked_stale` is set in-place when a same-URI mutation is pushed
- * to the same queue this job is in.  Read by the worker as a deterministic
- * staleness signal that doesn't depend on whether the version bump has
- * raced ahead of the worker's mutation_versions read.  Set under the
- * queue mutex so the marking is atomic relative to concurrent pops.
- *
  * `id` / `has_id` carry the JSON-RPC request id as a first-class field on
  * the Job, making it the primary key for any per-job operation.  The first
  * such operation is $/cancelRequest: the reader walks both queues looking
@@ -77,21 +45,15 @@
  * in server.c).
  *
  * `is_cancelled` is set in-place by job_queue_mark_cancelled_by_id when a
- * matching $/cancelRequest is processed.  The worker checks it before any
- * other dispatch path, so cancel takes priority over staleness — both skip
- * the handler, but the client explicitly asked for cancellation.
+ * matching $/cancelRequest is processed.  The worker checks it before
+ * dispatching the handler and returns RequestCancelled instead.
  */
 typedef struct Job {
     yyjson_doc *request_doc;
     int         is_mutation;
-    char       *uri;
-    int         is_coalesceable;
-    int         is_stale_droppable;
-    int         is_marked_stale;
     int         is_cancelled;
     int         has_id;
     int64_t     id;
-    int64_t     snapshot_version;
     struct Job *next;
 } Job;
 
@@ -134,21 +96,9 @@ void      job_queue_close(JobQueue *q);
 /**
  * Free a Job and any heap fields it owns.  NULL-safe per field, so
  * callers may transfer ownership of an owned field elsewhere by
- * NULL-ing it before calling.  Used by workers after dispatch and by
- * the coalesce branch of job_queue_push when collapsing a redundant
- * job.
+ * NULL-ing it before calling.  Used by workers after dispatch.
  */
 void      job_free(Job *job);
-
-/**
- * Walk @p q under its mutex, setting is_marked_stale=1 on every
- * is_stale_droppable job whose URI equals @p uri.  Called by the
- * reader when enqueuing a mutation, so that any same-URI droppable
- * queries already in the queue are deterministically flagged before
- * the worker pops them — eliminating the race between the reader's
- * mutation_versions bump and the worker's snapshot read.
- */
-void      job_queue_mark_stale_for_uri(JobQueue *q, const char *uri);
 
 /**
  * Walk @p q under its mutex, setting is_cancelled=1 on every job whose

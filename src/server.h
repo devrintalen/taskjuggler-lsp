@@ -62,14 +62,6 @@ void server_dispatch_mutation(yyjson_doc *request_doc);
 void server_dispatch_query(yyjson_doc *request_doc);
 
 /**
- * Respond to @p request_doc with a JSON-RPC `ContentModified` (-32801)
- * error without running the handler.  Called by the query worker when
- * a later same-URI mutation has overtaken this query, making its result
- * irrelevant to the client.  No-op for notifications (no id to reply to).
- */
-void server_dispatch_stale(yyjson_doc *request_doc);
-
-/**
  * Respond to @p request_doc with a JSON-RPC `RequestCancelled` (-32800)
  * error without running the handler.  Called by the query worker when
  * the Job was marked is_cancelled by a $/cancelRequest that arrived

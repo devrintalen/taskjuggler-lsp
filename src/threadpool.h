@@ -43,19 +43,6 @@ void threadpool_stop(void);
 void threadpool_enqueue_mutation(Job *job);
 
 /**
- * Push a parsed textDocument/didChange message onto the work queue,
- * coalescing with a same-URI didChange at the tail when possible.
- * If coalescing happens, @p job is consumed (freed) and the previously
- * queued job's `request_doc` is replaced with this job's; otherwise
- * @p job is enqueued normally.  Ownership of @p job transfers to the
- * queue (or is consumed) in both cases.
- *
- * @param job  Job whose `request_doc` carries the didChange envelope.
- * @param uri  Document URI being edited; copied internally.
- */
-void threadpool_enqueue_didchange(Job *job, const char *uri);
-
-/**
  * Push a parsed read-only query message onto the work queue.
  * Ownership of @p job transfers to the queue.
  */
