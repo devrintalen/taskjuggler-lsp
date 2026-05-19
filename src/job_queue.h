@@ -101,13 +101,12 @@ void      job_queue_close(JobQueue *q);
 void      job_free(Job *job);
 
 /**
- * Walk @p q under its mutex, setting is_cancelled=1 on every job whose
- * has_id is set and whose id equals @p id.  Called by the reader when a
- * $/cancelRequest arrives, making cancellation deterministic for any Job
- * still resident in a queue at that moment.  The worker checks
- * is_cancelled before any other dispatch path so the handler is skipped
- * and a RequestCancelled error is sent in its place.  No droppability
- * check — cancellation is honored regardless of which queue the Job sits
- * in or what kind of request it carries.
+ * Walk @p q under its mutex, setting is_cancelled=1 on every read-only
+ * Job whose has_id is set and whose id equals @p id.  Mutation jobs are
+ * skipped — the coordinator dispatches them inline and never consults
+ * is_cancelled, and lifecycle methods aren't cancelled in practice.
+ * Called by the reader when a $/cancelRequest arrives.  The worker
+ * checks is_cancelled before dispatching the handler and returns
+ * RequestCancelled in its place.
  */
 void      job_queue_mark_cancelled_by_id(JobQueue *q, int64_t id);
