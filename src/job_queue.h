@@ -66,6 +66,20 @@
  * staleness signal that doesn't depend on whether the version bump has
  * raced ahead of the worker's mutation_versions read.  Set under the
  * queue mutex so the marking is atomic relative to concurrent pops.
+ *
+ * `id` / `has_id` carry the JSON-RPC request id as a first-class field on
+ * the Job, making it the primary key for any per-job operation.  The first
+ * such operation is $/cancelRequest: the reader walks both queues looking
+ * for a matching id and sets `is_cancelled`, so cancellation is
+ * deterministic for any Job still resident in a queue when the cancel
+ * arrives.  Notifications and string/null ids leave `has_id = 0` and are
+ * therefore not cancellable by id (matching the existing int-only policy
+ * in server.c).
+ *
+ * `is_cancelled` is set in-place by job_queue_mark_cancelled_by_id when a
+ * matching $/cancelRequest is processed.  The worker checks it before any
+ * other dispatch path, so cancel takes priority over staleness — both skip
+ * the handler, but the client explicitly asked for cancellation.
  */
 typedef struct Job {
     yyjson_doc *request_doc;
@@ -74,6 +88,9 @@ typedef struct Job {
     int         is_coalesceable;
     int         is_stale_droppable;
     int         is_marked_stale;
+    int         is_cancelled;
+    int         has_id;
+    int64_t     id;
     int64_t     snapshot_version;
     struct Job *next;
 } Job;
@@ -132,3 +149,15 @@ void      job_free(Job *job);
  * mutation_versions bump and the worker's snapshot read.
  */
 void      job_queue_mark_stale_for_uri(JobQueue *q, const char *uri);
+
+/**
+ * Walk @p q under its mutex, setting is_cancelled=1 on every job whose
+ * has_id is set and whose id equals @p id.  Called by the reader when a
+ * $/cancelRequest arrives, making cancellation deterministic for any Job
+ * still resident in a queue at that moment.  The worker checks
+ * is_cancelled before any other dispatch path so the handler is skipped
+ * and a RequestCancelled error is sent in its place.  No droppability
+ * check — cancellation is honored regardless of which queue the Job sits
+ * in or what kind of request it carries.
+ */
+void      job_queue_mark_cancelled_by_id(JobQueue *q, int64_t id);

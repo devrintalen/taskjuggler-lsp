@@ -70,6 +70,16 @@ void server_dispatch_query(yyjson_doc *request_doc);
 void server_dispatch_stale(yyjson_doc *request_doc);
 
 /**
+ * Respond to @p request_doc with a JSON-RPC `RequestCancelled` (-32800)
+ * error without running the handler.  Called by the query worker when
+ * the Job was marked is_cancelled by a $/cancelRequest that arrived
+ * before the worker started dispatching.  Also evicts the id from the
+ * cancellation set so the fallback signal stays clean.  No-op for
+ * notifications (no id to reply to).
+ */
+void server_dispatch_cancelled(yyjson_doc *request_doc);
+
+/**
  * Write one LSP-framed message to stdout, prepending the required
  * `Content-Length` header.  Safe to call from any thread; serialized
  * internally by a mutex.
