@@ -124,13 +124,7 @@ void threadpool_stop(void) {
     pool_started     = 0;
 }
 
-void threadpool_enqueue_notification(Job *job) {
-    job->is_notification = 1;
-    job_queue_push(work_queue, job);
-}
-
-void threadpool_enqueue_query(Job *job) {
-    job->is_notification = 0;
+void threadpool_enqueue_job(Job *job) {
     job_queue_push(work_queue, job);
 }
 

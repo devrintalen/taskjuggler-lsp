@@ -2082,10 +2082,8 @@ void server_process(const char *json_text) {
         job->id     = yyjson_get_sint(id_item);
     }
 
-    if (is_notification_method(m))
-        threadpool_enqueue_notification(job);
-    else
-        threadpool_enqueue_query(job);
+    job->is_notification = is_notification_method(m);
+    threadpool_enqueue_job(job);
 }
 
 void server_init() {

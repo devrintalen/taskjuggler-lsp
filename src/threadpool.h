@@ -38,20 +38,9 @@ void threadpool_start(void);
 void threadpool_stop(void);
 
 /**
- * Push a parsed LSP notification (no `id`) onto the work queue.
- * Ownership of @p job transfers to the queue.  Notifications run
- * inline on the coordinator so arrival order is preserved and any
- * state mutation is visible to subsequent queries.
+ * TODO update this comment
  */
-void threadpool_enqueue_notification(Job *job);
-
-/**
- * Push a parsed read-only query message onto the query queue.  Multiple
- * query workers consume the queue concurrently; per-document
- * cache_lock and the immutable-after-publication ParseResult contract
- * keep that safe.  Ownership of @p job transfers to the queue.
- */
-void threadpool_enqueue_query(Job *job);
+void threadpool_enqueue_job(Job *job);
 
 /**
  * Walk both queues under their mutexes and mark any matching Job as
