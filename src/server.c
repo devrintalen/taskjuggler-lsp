@@ -66,16 +66,33 @@
 
 #define MAX_DOCS 64
 
-/** Document store slot.  After the tj_node refactor each slot owns the
- *  ParseOutput-derived state directly (no nested ParseResult struct). */
-typedef struct {
+/** Document store slot.  Each slot owns the parse-derived state directly
+ *  (per-kind synthetic roots, tokens, include filenames); parse() returns
+ *  a transient ParseOutput whose fields get moved here by doc_install_parse(). */
+typedef struct Document {
     char        *uri;
     char        *text;
-    ParseOutput *parse;             /**< owned; NULL when slot has no parse yet */
     SemanticTokenResult sem_tokens; /**< cached semantic-tokens response */
     _Atomic uint64_t doc_version;   /**< bumped on every text/parse swap */
     int          in_use;
     int          disk_only;
+
+    /* Parse-derived state.  All four synthetic roots are non-NULL after a
+     * successful parse and NULL before one has happened (use `tasks` as
+     * the "has-parse" sentinel).  Freed and replaced wholesale by
+     * doc_install_parse(); freed by doc_free() on slot release. */
+    tj_node     *tasks;
+    tj_node     *accounts;
+    tj_node     *reports;
+    tj_node     *resources;
+    tj_node     *project;           /**< project block; NULL for .tji or .tjp without one */
+    TokenSpan   *tok_spans;
+    int          num_tok_spans;
+    int          tok_span_cap;
+    int          num_sem_entries;
+    char       **included_files;    /**< unquoted filenames from `include` directives */
+    int          num_included_files;
+    int          included_files_cap;
 
     /* Prefixes applied to this Document by the includer's `include` block,
      * one per kind.  Populated by the include pass when the canonical
@@ -111,7 +128,7 @@ static int   g_num_workspace_roots = 0;
 /* Forward declarations. */
 static char *normalize_uri(const char *raw_uri);
 static void  load_file_from_disk(const char *path);
-static void  follow_includes(const char *file_path, const ParseOutput *parse);
+static void  follow_includes(const char *file_path, const Document *d);
 static void  load_tj_files_recursive(const char *dir_path);
 static void  rebuild_global_trees(void);
 
@@ -160,8 +177,6 @@ static Document *doc_alloc(const char *uri) {
         if (!docs[i].in_use) {
             docs[i].in_use = 1;
             docs[i].uri    = canon;
-            docs[i].text   = NULL;
-            docs[i].parse  = NULL;
             docs[i].sem_tokens.next_result_id = 1;
             atomic_store(&docs[i].doc_version, 1);
             return &docs[i];
@@ -171,9 +186,54 @@ static Document *doc_alloc(const char *uri) {
     return NULL;
 }
 
-static void doc_install_new_parse(Document *d, ParseOutput *new_parse) {
-    parse_output_free(d->parse);
-    d->parse = new_parse;
+/** Release the parse-derived fields on @p d (per-kind tj_node trees,
+ *  tokens, include filenames), zeroing each so the slot is reusable. */
+static void doc_clear_parse_state(Document *d) {
+    tj_node_free(d->tasks);
+    tj_node_free(d->accounts);
+    tj_node_free(d->reports);
+    tj_node_free(d->resources);
+    tj_node_free(d->project);
+    d->tasks = d->accounts = d->reports = d->resources = d->project = NULL;
+
+    for (int i = 0; i < d->num_tok_spans; i++)
+        free(d->tok_spans[i].text);
+    free(d->tok_spans);
+    d->tok_spans       = NULL;
+    d->num_tok_spans   = 0;
+    d->tok_span_cap    = 0;
+    d->num_sem_entries = 0;
+
+    for (int i = 0; i < d->num_included_files; i++)
+        free(d->included_files[i]);
+    free(d->included_files);
+    d->included_files       = NULL;
+    d->num_included_files   = 0;
+    d->included_files_cap   = 0;
+}
+
+/** Move every parse-derived field from @p po into @p d, releasing whatever
+ *  @p d held previously.  @p po is freed (its fields have been moved out,
+ *  so the shell is empty afterwards). */
+static void doc_install_parse(Document *d, ParseOutput *po) {
+    doc_clear_parse_state(d);
+    if (po) {
+        d->tasks               = po->tasks;
+        d->accounts            = po->accounts;
+        d->reports             = po->reports;
+        d->resources           = po->resources;
+        d->project             = po->project;
+        d->tok_spans           = po->tok_spans;
+        d->num_tok_spans       = po->num_tok_spans;
+        d->tok_span_cap        = po->tok_span_cap;
+        d->num_sem_entries     = po->num_sem_entries;
+        d->included_files      = po->included_files;
+        d->num_included_files  = po->num_included_files;
+        d->included_files_cap  = po->included_files_cap;
+        /* Zero the source so parse_output_free does not double-free. */
+        memset(po, 0, sizeof(*po));
+        free(po);
+    }
     atomic_fetch_add(&d->doc_version, 1);
 }
 
@@ -181,7 +241,7 @@ static void doc_free(Document *d) {
     free(d->uri);
     free(d->text);
     semantic_token_result_release(&d->sem_tokens);
-    parse_output_free(d->parse);
+    doc_clear_parse_state(d);
     free(d->task_prefix);
     free(d->account_prefix);
     free(d->report_prefix);
@@ -343,12 +403,12 @@ static void load_file_from_disk(const char *path) {
 
     document->text      = text;
     document->disk_only = 1;
-    document->parse     = parse(text);
-    follow_includes(path, document->parse);
+    doc_install_parse(document, parse(text));
+    follow_includes(path, document);
 }
 
-static void follow_includes(const char *file_path, const ParseOutput *parse) {
-    if (!parse || !parse->num_included_files) return;
+static void follow_includes(const char *file_path, const Document *d) {
+    if (!d || !d->num_included_files) return;
 
     size_t path_len = strlen(file_path);
     const char *last_slash = NULL;
@@ -357,8 +417,8 @@ static void follow_includes(const char *file_path, const ParseOutput *parse) {
     }
     size_t dir_len = last_slash ? (size_t)(last_slash - file_path) : 0;
 
-    for (int i = 0; i < parse->num_included_files; i++) {
-        const char *filename = parse->included_files[i];
+    for (int i = 0; i < d->num_included_files; i++) {
+        const char *filename = d->included_files[i];
         size_t fname_len = strlen(filename);
 
         char *full_path;
@@ -560,10 +620,10 @@ static void rebuild_global_trees(void) {
         tj_node_clear_included(roots[i]);
 
     for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use || !docs[i].parse) continue;
-        ParseOutput *p = docs[i].parse;
+        if (!docs[i].in_use || !docs[i].tasks) continue;
         tj_node *kind_roots[] = {
-            p->tasks, p->accounts, p->reports, p->resources,
+            docs[i].tasks, docs[i].accounts,
+            docs[i].reports, docs[i].resources,
         };
         for (size_t k = 0; k < sizeof(kind_roots) / sizeof(kind_roots[0]); k++)
             tj_node_clear_included(kind_roots[k]);
@@ -781,8 +841,8 @@ static void handle_did_change_watched_files(yyjson_val *params) {
             free(document->text);
             document->text      = text;
             document->disk_only = 1;
-            doc_install_new_parse(document, parse(text));
-            follow_includes(path, document->parse);
+            doc_install_parse(document, parse(text));
+            follow_includes(path, document);
             free(path);
             changed = 1;
         }
@@ -825,8 +885,8 @@ static void handle_did_rename_files(yyjson_val *params) {
         free(new_doc->text);
         new_doc->text      = text;
         new_doc->disk_only = 1;
-        doc_install_new_parse(new_doc, parse(text));
-        follow_includes(path, new_doc->parse);
+        doc_install_parse(new_doc, parse(text));
+        follow_includes(path, new_doc);
         free(path);
         changed = 1;
     }
@@ -852,19 +912,19 @@ static void handle_didopen(yyjson_val *params) {
             return;
         }
         free(d->text);
-        parse_output_free(d->parse);
-        d->parse = NULL;
+        d->text = NULL;
+        doc_clear_parse_state(d);
     } else {
         d = doc_alloc(uri);
         if (!d) return;
     }
     d->disk_only = 0;
     d->text  = strdup(text);
-    doc_install_new_parse(d, parse(text));
+    doc_install_parse(d, parse(text));
 
     char *path = uri_to_path(uri);
     if (path) {
-        follow_includes(path, d->parse);
+        follow_includes(path, d);
         free(path);
     }
 
@@ -912,11 +972,11 @@ static void handle_didchange(yyjson_val *params) {
 
     free(d->text);
     d->text = current;
-    doc_install_new_parse(d, parse(d->text));
+    doc_install_parse(d, parse(d->text));
 
     char *path = uri_to_path(uri);
     if (path) {
-        follow_includes(path, d->parse);
+        follow_includes(path, d);
         free(path);
     }
 
@@ -941,8 +1001,8 @@ static void handle_didclose(yyjson_val *params) {
         free(d->text);
         d->text      = text;
         d->disk_only = 1;
-        doc_install_new_parse(d, parse(text));
-        follow_includes(path, d->parse);
+        doc_install_parse(d, parse(text));
+        follow_includes(path, d);
     } else {
         publish_diagnostics(uri);
         doc_free(d);
@@ -963,29 +1023,29 @@ static void handle_didclose(yyjson_val *params) {
 static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
                                                yyjson_val *params, Document *d) {
     (void)params;
-    if (!d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     /* For now, render the four per-kind trees concatenated at the top
      * level (project node first when present).  TODO(document-symbol):
      * once the project block reliably contains its children in the
      * hierarchical sense, fold the per-kind entries inside it. */
     int top_n = 0;
-    if (d->parse->project) top_n++;
-    top_n += d->parse->tasks->num_children;
-    top_n += d->parse->accounts->num_children;
-    top_n += d->parse->reports->num_children;
-    top_n += d->parse->resources->num_children;
+    if (d->project) top_n++;
+    top_n += d->tasks->num_children;
+    top_n += d->accounts->num_children;
+    top_n += d->reports->num_children;
+    top_n += d->resources->num_children;
 
     tj_node **top = top_n
         ? malloc((size_t)top_n * sizeof(tj_node *))
         : NULL;
     int w = 0;
-    if (d->parse->project)
-        top[w++] = d->parse->project;
-    for (int i = 0; i < d->parse->tasks->num_children;     i++) top[w++] = d->parse->tasks->children[i];
-    for (int i = 0; i < d->parse->accounts->num_children;  i++) top[w++] = d->parse->accounts->children[i];
-    for (int i = 0; i < d->parse->reports->num_children;   i++) top[w++] = d->parse->reports->children[i];
-    for (int i = 0; i < d->parse->resources->num_children; i++) top[w++] = d->parse->resources->children[i];
+    if (d->project)
+        top[w++] = d->project;
+    for (int i = 0; i < d->tasks->num_children;     i++) top[w++] = d->tasks->children[i];
+    for (int i = 0; i < d->accounts->num_children;  i++) top[w++] = d->accounts->children[i];
+    for (int i = 0; i < d->reports->num_children;   i++) top[w++] = d->reports->children[i];
+    for (int i = 0; i < d->resources->num_children; i++) top[w++] = d->resources->children[i];
 
     size_t  json_len = 0;
     char   *json     = build_document_symbols_json(top, w, &json_len);
@@ -1000,20 +1060,20 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
  * a flat array, for handlers that take a tj_node *const * symbols pool. */
 static tj_node **flatten_top_nodes(Document *d, int *out_n) {
     *out_n = 0;
-    if (!d || !d->parse) return NULL;
-    int n = (d->parse->project ? 1 : 0)
-          + d->parse->tasks->num_children
-          + d->parse->accounts->num_children
-          + d->parse->reports->num_children
-          + d->parse->resources->num_children;
+    if (!d || !d->tasks) return NULL;
+    int n = (d->project ? 1 : 0)
+          + d->tasks->num_children
+          + d->accounts->num_children
+          + d->reports->num_children
+          + d->resources->num_children;
     if (!n) return NULL;
     tj_node **arr = malloc((size_t)n * sizeof(tj_node *));
     int w = 0;
-    if (d->parse->project) arr[w++] = d->parse->project;
-    for (int i = 0; i < d->parse->tasks->num_children;     i++) arr[w++] = d->parse->tasks->children[i];
-    for (int i = 0; i < d->parse->accounts->num_children;  i++) arr[w++] = d->parse->accounts->children[i];
-    for (int i = 0; i < d->parse->reports->num_children;   i++) arr[w++] = d->parse->reports->children[i];
-    for (int i = 0; i < d->parse->resources->num_children; i++) arr[w++] = d->parse->resources->children[i];
+    if (d->project) arr[w++] = d->project;
+    for (int i = 0; i < d->tasks->num_children;     i++) arr[w++] = d->tasks->children[i];
+    for (int i = 0; i < d->accounts->num_children;  i++) arr[w++] = d->accounts->children[i];
+    for (int i = 0; i < d->reports->num_children;   i++) arr[w++] = d->reports->children[i];
+    for (int i = 0; i < d->resources->num_children; i++) arr[w++] = d->resources->children[i];
     *out_n = w;
     return arr;
 }
@@ -1021,13 +1081,13 @@ static tj_node **flatten_top_nodes(Document *d, int *out_n) {
 static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
                                              yyjson_val *params, Document *d) {
     (void)params;
-    if (!d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     int n = 0;
     tj_node **top = flatten_top_nodes(d, &n);
     yyjson_mut_val *arr = build_folding_ranges_json(doc,
-                                                     d->parse->tok_spans,
-                                                     d->parse->num_tok_spans,
+                                                     d->tok_spans,
+                                                     d->num_tok_spans,
                                                      top, n);
     free(top);
     return make_response(doc, id, arr);
@@ -1036,13 +1096,13 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
 static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
                                          yyjson_val *params, Document *d) {
     (void)params;
-    if (!d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     int n = 0;
     tj_node **top = flatten_top_nodes(d, &n);
     yyjson_mut_val *arr = build_code_lens_json(doc,
-                                                d->parse->tok_spans,
-                                                d->parse->num_tok_spans,
+                                                d->tok_spans,
+                                                d->num_tok_spans,
                                                 top, n);
     free(top);
     return make_response(doc, id, arr);
@@ -1057,15 +1117,15 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
 
     /* TODO(hover): the previous design checked dep-link hover targets
      * first.  With link resolution offline, fall through directly to
      * keyword documentation. */
-    ActiveKeyword ak = active_keyword_at(d->parse->tok_spans,
-                                          d->parse->num_tok_spans, pos);
+    ActiveKeyword ak = active_keyword_at(d->tok_spans,
+                                          d->num_tok_spans, pos);
     if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     const char *doc_text = keyword_docs(ak.keyword);
@@ -1092,11 +1152,11 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
 
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-    ActiveContext ac = active_context(d->parse->tok_spans,
-                                       d->parse->num_tok_spans, pos);
+    ActiveContext ac = active_context(d->tok_spans,
+                                       d->num_tok_spans, pos);
     if (!ac.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_mut_val *sig = build_signature_help_json(doc, ac.keyword, ac.arg_count);
@@ -1116,13 +1176,13 @@ static char *mint_sem_tokens_result_id(Document *d) {
 static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
                                                     yyjson_val *params, Document *d) {
     (void)params;
-    if (!d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     uint32_t *buf = NULL;
     size_t    count = 0;
-    compute_semantic_tokens_data(d->parse->tok_spans,
-                                  d->parse->num_tok_spans,
-                                  d->parse->num_sem_entries,
+    compute_semantic_tokens_data(d->tok_spans,
+                                  d->num_tok_spans,
+                                  d->num_sem_entries,
                                   &buf, &count);
 
     char *result_id = mint_sem_tokens_result_id(d);
@@ -1134,13 +1194,13 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
 static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yyjson_val *id,
                                                           yyjson_val *params, Document *d) {
     const char *previous_result_id = params ? json_str(params, "previousResultId") : NULL;
-    if (!d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     uint32_t *new_buf = NULL;
     size_t    new_count = 0;
-    compute_semantic_tokens_data(d->parse->tok_spans,
-                                  d->parse->num_tok_spans,
-                                  d->parse->num_sem_entries,
+    compute_semantic_tokens_data(d->tok_spans,
+                                  d->num_tok_spans,
+                                  d->num_sem_entries,
                                   &new_buf, &new_count);
 
     char *result_id = mint_sem_tokens_result_id(d);
@@ -1163,13 +1223,13 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_references_json(doc,
                                                     d->uri,
-                                                    d->parse->tok_spans,
-                                                    d->parse->num_tok_spans,
+                                                    d->tok_spans,
+                                                    d->num_tok_spans,
                                                     pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1180,7 +1240,7 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
                                                   yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     int n = 0;
     tj_node **top = flatten_top_nodes(d, &n);
@@ -1188,8 +1248,8 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_document_highlight_json(doc,
                                                             top, n,
-                                                            d->parse->tok_spans,
-                                                            d->parse->num_tok_spans,
+                                                            d->tok_spans,
+                                                            d->num_tok_spans,
                                                             pos);
     free(top);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
@@ -1200,12 +1260,12 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_definition_json(doc,
-                                                    d->parse->tok_spans,
-                                                    d->parse->num_tok_spans,
+                                                    d->tok_spans,
+                                                    d->num_tok_spans,
                                                     pos, d->uri);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1219,7 +1279,7 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
 
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     /* Gather top-level nodes of other editor-managed Documents as extra
      * pools.  TODO(completion): once the global tj_node tree is built we
@@ -1246,8 +1306,8 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
 
     LspPos pos             = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_completions_json(doc,
-                                                     d->parse->tok_spans,
-                                                     d->parse->num_tok_spans,
+                                                     d->tok_spans,
+                                                     d->num_tok_spans,
                                                      pos,
                                                      self_top, self_n,
                                                      extra_pools,
@@ -1266,7 +1326,7 @@ static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use || !docs[i].parse) continue;
+        if (!docs[i].in_use || !docs[i].tasks) continue;
         int n = 0;
         tj_node **top = flatten_top_nodes(&docs[i], &n);
         if (!top) continue;
