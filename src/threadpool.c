@@ -42,7 +42,7 @@ static JobQueue *work_queue;
  * their snapshot already attached) onto this for the query worker
  * pool to consume.  Notifications never go here — the coordinator
  * dispatches them inline. */
-static JobQueue *query_pool_queue;
+static JobQueue *request_queue;
 
 static pthread_t coordinator_thread;
 static pthread_t query_threads[NUM_QUERY_WORKERS];
@@ -72,10 +72,10 @@ static void *coordinator(void *arg) {
             job_free(job);
         } else {
             server_capture_snapshot_for(job);
-            job_queue_push(query_pool_queue, job);
+            job_queue_push(request_queue, job);
         }
     }
-    job_queue_close(query_pool_queue);
+    job_queue_close(request_queue);
     return NULL;
 }
 
@@ -85,7 +85,7 @@ static void *coordinator(void *arg) {
 static void *query_worker(void *arg) {
     (void)arg;
     while (1) {
-        Job *job = job_queue_pop(query_pool_queue);
+        Job *job = job_queue_pop(request_queue);
         if (!job) break;
         /* Cancellation short-circuit: the reader walked the queues for
          * $/cancelRequest and marked this Job before it was popped.
@@ -103,7 +103,7 @@ static void *query_worker(void *arg) {
 void threadpool_start(void) {
     if (pool_started) return;
     work_queue       = job_queue_create();
-    query_pool_queue = job_queue_create();
+    request_queue = job_queue_create();
     pthread_create(&coordinator_thread, NULL, coordinator, NULL);
     for (int i = 0; i < NUM_QUERY_WORKERS; i++)
         pthread_create(&query_threads[i], NULL, query_worker, NULL);
@@ -114,13 +114,13 @@ void threadpool_stop(void) {
     if (!pool_started) return;
     job_queue_close(work_queue);
     pthread_join(coordinator_thread, NULL);
-    /* coordinator() closes query_pool_queue once work_queue drains. */
+    /* coordinator() closes request_queue once work_queue drains. */
     for (int i = 0; i < NUM_QUERY_WORKERS; i++)
         pthread_join(query_threads[i], NULL);
     job_queue_destroy(work_queue);
-    job_queue_destroy(query_pool_queue);
+    job_queue_destroy(request_queue);
     work_queue       = NULL;
-    query_pool_queue = NULL;
+    request_queue = NULL;
     pool_started     = 0;
 }
 
@@ -135,11 +135,11 @@ void threadpool_enqueue_query(Job *job) {
 }
 
 void threadpool_cancel_by_id(int64_t id) {
-    /* Lock order: work_queue then query_pool_queue.  Matches the
+    /* Lock order: work_queue then request_queue.  Matches the
      * coordinator's pop-then-push direction, so no deadlock — the
      * coordinator can hold work_queue.mutex and then call into
-     * query_pool_queue.mutex via push, and we acquire the same pair
+     * request_queue.mutex via push, and we acquire the same pair
      * in the same order here. */
     job_queue_mark_cancelled_by_id(work_queue, id);
-    job_queue_mark_cancelled_by_id(query_pool_queue, id);
+    job_queue_mark_cancelled_by_id(request_queue, id);
 }
