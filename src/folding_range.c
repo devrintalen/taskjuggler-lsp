@@ -19,6 +19,7 @@
 /** @file */
 
 #include "folding_range.h"
+#include "document_symbol.h"
 #include "grammar.tab.h"
 
 /** Maximum nesting depth for bracket matching. */

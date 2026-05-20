@@ -19,6 +19,7 @@
 /** @file */
 
 #include "hover.h"
+#include "document_symbol.h"
 
 #include <stdlib.h>
 #include <string.h>

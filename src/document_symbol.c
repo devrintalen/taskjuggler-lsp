@@ -47,6 +47,78 @@ int symbol_kind_for(int keyword) {
     }
 }
 
+/* ── DocSymbol helpers ───────────────────────────────────────────────────── */
+
+void doc_symbol_free(DocSymbol *s) {
+    free(s->name);
+    free(s->id);
+    for (int i = 0; i < s->num_children; i++) {
+        doc_symbol_free(s->children[i]);
+        free(s->children[i]);
+    }
+    free(s->children);
+    for (int i = 0; i < s->num_def_links; i++)
+        free(s->def_links[i].target_uri);
+    free(s->def_links);
+    for (int i = 0; i < s->num_ref_links; i++)
+        free(s->ref_links[i].source_uri);
+    free(s->ref_links);
+}
+
+/* ── DocSymbol tree navigation ───────────────────────────────────────────── */
+
+/* Navigate the symbol tree following the path segments path[0..plen-1] and
+ * return the children array at that node.  Transparently descends into
+ * KW_PROJECT nodes when matching path segments against tasks.
+ *
+ * syms  — root-level symbols to start from
+ * n     — number of entries in syms
+ * path  — array of identifier strings to follow (task IDs)
+ * plen  — number of segments in path; 0 returns (syms, n) immediately
+ * out_n — set to the number of children at the matched node on success, 0 on failure
+ *
+ * Returns the children array at the matched node, or NULL if not found.
+ */
+DocSymbol *const *doc_symbol_find_path(DocSymbol *const *syms, int n,
+                                       const char **path, int plen,
+                                       int *out_n) {
+    if (plen == 0) { *out_n = n; return syms; }
+    for (int i = 0; i < n; i++) {
+        if (syms[i]->keyword == KW_TASK && syms[i]->id &&
+                strcmp(syms[i]->id, path[0]) == 0)
+            return doc_symbol_find_path(syms[i]->children, syms[i]->num_children,
+                                        path + 1, plen - 1, out_n);
+        /* Transparently traverse project containers so that task scope paths
+         * rooted inside a project body resolve correctly. */
+        if (syms[i]->keyword == KW_PROJECT) {
+            DocSymbol *const *found = doc_symbol_find_path(
+                syms[i]->children, syms[i]->num_children, path, plen, out_n);
+            if (found) return found;
+        }
+    }
+    *out_n = 0;
+    return NULL;
+}
+
+DocSymbol *symbol_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
+    int lo = 0, hi = num_tokens - 1, found = -1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (tokens[mid].token_kind == TK_EOF) { hi = mid - 1; continue; }
+        if (pos_cmp(tokens[mid].start, pos) <= 0) {
+            found = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if (found < 0) return NULL;
+    DocSymbol *s = tokens[found].owner;
+    while (s && pos_cmp(pos, s->range.end) >= 0)
+        s = s->parent;
+    return s;
+}
+
 /** Convenience macro: push a string literal without calling strlen at runtime. */
 #define PUSH_LIT(b, s) buf_push((b), (s), sizeof(s) - 1)
 
