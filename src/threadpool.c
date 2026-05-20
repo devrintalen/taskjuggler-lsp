@@ -35,12 +35,12 @@
 /* Single arrival-ordered FIFO populated by the reader.  The
  * coordinator pops from it in order, which is what enforces the LSP
  * "messages processed in arrival order" rule across queries and
- * mutations alike. */
+ * notifications alike. */
 static JobQueue *work_queue;
 
-/* Internal handoff queue: the coordinator pushes read-only query jobs
- * (with their snapshot already attached) onto this for the query
- * worker pool to consume.  Mutations never go here — the coordinator
+/* Internal handoff queue: the coordinator pushes query jobs (with
+ * their snapshot already attached) onto this for the query worker
+ * pool to consume.  Notifications never go here — the coordinator
  * dispatches them inline. */
 static JobQueue *query_pool_queue;
 
@@ -50,24 +50,25 @@ static int       pool_started = 0;
 
 /* Coordinator thread.  Pops jobs from work_queue in arrival order.
  *
- * Mutation jobs: dispatched inline.  server_dispatch_mutation takes
- * docs_mutex, applies the mutation, releases.  By running inline (not
- * on a worker), the coordinator blocks while the mutation completes,
- * so any subsequent query the reader pushes will observe the mutation.
+ * Notification jobs: dispatched inline.  server_dispatch_notification
+ * takes docs_mutex, applies any state change, releases.  By running
+ * inline (not on a worker), the coordinator blocks while the
+ * notification completes, so any subsequent query the reader pushes
+ * will observe the new state.
  *
  * Query jobs: the coordinator takes a workspace snapshot HERE (before
  * handing off), so the snapshot reflects the state at the moment this
  * job's turn in arrival order would have come up.  This is what
- * guarantees correctness when later mutations race ahead while query
- * workers are still computing — the workers run on their own pinned
- * snapshot, not on live docs[]. */
+ * guarantees correctness when later notifications race ahead while
+ * query workers are still computing — the workers run on their own
+ * pinned snapshot, not on live docs[]. */
 static void *coordinator(void *arg) {
     (void)arg;
     while (1) {
         Job *job = job_queue_pop(work_queue);
         if (!job) break;
-        if (job->is_mutation) {
-            server_dispatch_mutation(job);
+        if (job->is_notification) {
+            server_dispatch_notification(job);
             job_free(job);
         } else {
             server_capture_snapshot_for(job);
@@ -80,7 +81,7 @@ static void *coordinator(void *arg) {
 
 /* Query worker.  Pops a Job (with snapshot already attached), runs the
  * handler against the snapshot, and emits the response.  No coordination
- * with mutations is needed at this point — the snapshot is independent. */
+ * with notifications is needed at this point — the snapshot is independent. */
 static void *query_worker(void *arg) {
     (void)arg;
     while (1) {
@@ -123,13 +124,13 @@ void threadpool_stop(void) {
     pool_started     = 0;
 }
 
-void threadpool_enqueue_mutation(Job *job) {
-    job->is_mutation = 1;
+void threadpool_enqueue_notification(Job *job) {
+    job->is_notification = 1;
     job_queue_push(work_queue, job);
 }
 
 void threadpool_enqueue_query(Job *job) {
-    job->is_mutation = 0;
+    job->is_notification = 0;
     job_queue_push(work_queue, job);
 }
 

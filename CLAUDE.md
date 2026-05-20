@@ -113,7 +113,7 @@ cross-file edge.
 
 ### Cross-file revalidation
 
-After any document mutation, `server.c` runs
+After any document-changing notification, `server.c` runs
 `revalidate_all_docs()`. For each document it gathers the
 `doc_symbols[]` of every other open / background document as extra
 symbol pools, calls `clear_cross_file_state()` to drop stale

@@ -56,7 +56,7 @@
  * Three related follow-ups worth doing alongside / after that:
  *
  *   - parse_result_clone_for_revalidate() reclones every document on
- *     every mutation.  Many revalidations don't actually need that;
+ *     every notification.  Many revalidations don't actually need that;
  *     a doc whose cross_file_deps[] do not reference the changed file
  *     is unaffected.  Add an affected-set computation in the
  *     revalidation pipeline so only docs that need new cross-file

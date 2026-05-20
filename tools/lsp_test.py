@@ -87,8 +87,35 @@ def collect_server_output(stdout, output_list):
         output_list.append(message)
 
 
+def _wait_for_response_id(collected, expected_id, deadline_seconds=5.0):
+    """Block until a response with @p expected_id appears in @p collected.
+
+    The reader thread appends to the list as messages arrive.  Returns
+    True on success, False on timeout.
+    """
+    import time
+    deadline = time.monotonic() + deadline_seconds
+    seen = 0
+    while time.monotonic() < deadline:
+        while seen < len(collected):
+            message = collected[seen]
+            seen += 1
+            if _is_response(message) and message.get('id') == expected_id:
+                return True
+        time.sleep(0.01)
+    return False
+
+
 def run_server(server_binary, input_messages):
-    """Start the server, send all messages, and return the collected output."""
+    """Start the server, send all messages, and return the collected output.
+
+    Honors LSP spec ordering for `initialize`: per the spec, the client
+    must wait for the response to `initialize` before sending any other
+    message.  After sending an `initialize` message with an id, the
+    harness blocks until that response arrives before sending the next
+    message.  Other requests are sent without waiting; the server may
+    answer them in any order, and diff_output matches responses by id.
+    """
     process = subprocess.Popen(
         [server_binary],
         stdin=subprocess.PIPE,
@@ -106,6 +133,10 @@ def run_server(server_binary, input_messages):
     for message in input_messages:
         process.stdin.write(frame_message(message))
         process.stdin.flush()
+        if isinstance(message, dict) \
+                and message.get('method') == 'initialize' \
+                and 'id' in message:
+            _wait_for_response_id(collected, message['id'])
 
     process.stdin.close()
     reader.join(timeout=10.0)

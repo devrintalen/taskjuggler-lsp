@@ -30,7 +30,7 @@
  * A pinned read-only view of a single document captured at a point in
  * time.  Each entry holds owned copies of the URI and text plus a
  * refcount on the ParseResult, so the snapshot is valid for the entire
- * lifetime of the owning Job — independent of subsequent mutations.
+ * lifetime of the owning Job — independent of subsequent notifications.
  *
  * `version` records the Document.doc_version at capture time.  Query
  * workers compare it against the current version before sending their
@@ -74,9 +74,12 @@ void workspace_snapshot_release(WorkspaceSnapshot *snap);
  * `request_doc` owns the parsed JSON-RPC envelope.  The worker is
  * responsible for freeing it after dispatch.
  *
- * `is_mutation` is set by the reader when classifying the message; it
- * determines which queue the Job lands on (mutation_queue runs on a
- * single worker; query_queue feeds a pool).
+ * `is_notification` is set by the reader when classifying the message;
+ * it determines which queue the Job lands on (the notification path runs
+ * on a single worker; the query path feeds a pool).  Only true LSP
+ * notifications (no `id`) ride the notification path; LSP requests —
+ * including state-mutating lifecycle ones like initialize/shutdown —
+ * are queries.
  *
  * `snapshot` is filled by the worker just before running the handler.
  * The reader leaves it zeroed — taking the snapshot at the moment of
@@ -94,7 +97,7 @@ void workspace_snapshot_release(WorkspaceSnapshot *snap);
 typedef struct Job {
     yyjson_doc        *request_doc;
     WorkspaceSnapshot  snapshot;
-    int                is_mutation;
+    int                is_notification;
     int                is_cancelled;
     int                has_id;
     int64_t            id;
@@ -145,12 +148,11 @@ void      job_queue_close(JobQueue *q);
 void      job_free(Job *job);
 
 /**
- * Walk @p q under its mutex, setting is_cancelled=1 on every read-only
- * Job whose has_id is set and whose id equals @p id.  Mutation jobs are
- * skipped — they aren't cancellable in practice (clients only cancel
- * read-only requests like hover/completion/etc.).  Called by the reader
- * when a $/cancelRequest arrives.  The worker checks is_cancelled
- * before dispatching the handler and returns RequestCancelled in its
- * place.
+ * Walk @p q under its mutex, setting is_cancelled=1 on every Job whose
+ * has_id is set and whose id equals @p id.  Notification jobs have no
+ * id (LSP notifications never carry one) so are skipped implicitly by
+ * the has_id check.  Called by the reader when a $/cancelRequest
+ * arrives.  The worker checks is_cancelled before dispatching the
+ * handler and returns RequestCancelled in its place.
  */
 void      job_queue_mark_cancelled_by_id(JobQueue *q, int64_t id);

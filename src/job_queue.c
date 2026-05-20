@@ -102,10 +102,10 @@ void job_queue_mark_cancelled_by_id(JobQueue *q, int64_t id) {
     if (!q) return;
     pthread_mutex_lock(&q->mutex);
     for (Job *j = q->head; j != NULL; j = j->next) {
-        /* Mutations bypass the worker's is_cancelled check (no client
-         * realistically cancels didOpen/didChange/etc.) so marking them
-         * would be a no-op that misleads readers. */
-        if (!j->is_mutation && j->has_id && j->id == id) {
+        /* Notifications carry no id (the LSP spec forbids it), so the
+         * has_id guard already excludes them; the explicit check is
+         * kept as a self-documenting belt-and-suspenders. */
+        if (!j->is_notification && j->has_id && j->id == id) {
             j->is_cancelled = 1;
         }
     }

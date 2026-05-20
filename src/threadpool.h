@@ -23,9 +23,10 @@
 #include "job_queue.h"
 
 /**
- * Spawn the mutation worker and the query worker pool, and create the
- * queues that feed them.  Must be called exactly once after
- * server_init() and before the reader thread starts enqueuing jobs.
+ * Spawn the coordinator (which dispatches notifications inline) and the
+ * query worker pool, and create the queues that feed them.  Must be
+ * called exactly once after server_init() and before the reader thread
+ * starts enqueuing jobs.
  */
 void threadpool_start(void);
 
@@ -37,11 +38,12 @@ void threadpool_start(void);
 void threadpool_stop(void);
 
 /**
- * Push a parsed mutation/lifecycle message onto the mutation queue.
- * Ownership of @p job transfers to the queue.  Mutations run on a
- * single worker so arrival order is preserved.
+ * Push a parsed LSP notification (no `id`) onto the work queue.
+ * Ownership of @p job transfers to the queue.  Notifications run
+ * inline on the coordinator so arrival order is preserved and any
+ * state mutation is visible to subsequent queries.
  */
-void threadpool_enqueue_mutation(Job *job);
+void threadpool_enqueue_notification(Job *job);
 
 /**
  * Push a parsed read-only query message onto the query queue.  Multiple
@@ -52,9 +54,10 @@ void threadpool_enqueue_mutation(Job *job);
 void threadpool_enqueue_query(Job *job);
 
 /**
- * Walk both queues under their mutexes and mark any matching read-only
- * Job as cancelled.  Mutation jobs are skipped.  Called by the reader
- * when a $/cancelRequest arrives.
+ * Walk both queues under their mutexes and mark any matching Job as
+ * cancelled.  Notification jobs carry no id and are therefore skipped
+ * by the id-equality check.  Called by the reader when a
+ * $/cancelRequest arrives.
  *
  * Best-effort, not exhaustive: a Job already popped by a worker can be
  * missed.  The window is sub-microsecond and real LSP clients cancel

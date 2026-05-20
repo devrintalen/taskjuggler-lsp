@@ -33,10 +33,11 @@ void server_init();
 
 /**
  * Process one JSON-RPC request or notification arriving on the reader
- * thread.  Parses the envelope, classifies the method as a mutation
- * or a read-only query, and enqueues a Job onto the appropriate
- * thread-pool queue.  The `exit` notification is special-cased: the
- * thread pool is drained and the process terminates immediately.
+ * thread.  Parses the envelope, classifies the method as an LSP
+ * notification or a request (LSP request → query path), and enqueues a
+ * Job onto the appropriate thread-pool queue.  The `exit` notification
+ * is special-cased: the thread pool is drained and the process
+ * terminates immediately.
  *
  * @param json_text  The raw JSON message body (without the
  *                   Content-Length framing).  Owned by the caller.
@@ -44,14 +45,16 @@ void server_init();
 void server_process(const char *json_text);
 
 /**
- * Capture a workspace snapshot, parse / clone / resolve as the
- * mutation requires, then commit the result under the docs-store
- * mutex.  Runs on the mutation worker thread.  Builds and emits any
- * response or notification via lsp_send_message().
+ * Apply an LSP notification: parse / clone / resolve as the message
+ * requires, then commit the result under the docs-store mutex.  Runs
+ * inline on the coordinator thread so subsequent queries observe any
+ * state change.  Builds and emits any outgoing notifications via
+ * lsp_send_message().
  *
- * @param job  Pending mutation job.  Worker frees it after return.
+ * @param job  Pending notification job.  Coordinator frees it after
+ *             return.
  */
-void server_dispatch_mutation(Job *job);
+void server_dispatch_notification(Job *job);
 
 /**
  * Capture a workspace snapshot onto @p job and attach it.  Called by
@@ -59,8 +62,8 @@ void server_dispatch_mutation(Job *job);
  * query worker pool — taking the snapshot here (in arrival order, with
  * docs_mutex briefly held) ensures the query observes exactly the
  * state that would have been visible if every job ran sequentially in
- * arrival order, even when later mutations race ahead while the query
- * is still in flight.
+ * arrival order, even when later notifications race ahead while the
+ * query is still in flight.
  *
  * @param job  Query job to snapshot.
  */

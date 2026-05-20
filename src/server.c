@@ -76,10 +76,10 @@ typedef struct {
      * semanticTokens responses.  Scoped to the document so different
      * documents produce independent ID sequences. */
     uint64_t        next_sem_tokens_result_id;
-    /* Monotonic per-document version, incremented under docs_mutex on
-     * every mutation that swaps `parse` or `text`.  Query workers
-     * compare the snapshot's captured version against this on send and
-     * reply with ContentModified (-32801) on mismatch. */
+    /* Monotonic per-document version, incremented under docs_mutex
+     * whenever `parse` or `text` is swapped.  Query workers compare
+     * the snapshot's captured version against this on send and reply
+     * with ContentModified (-32801) on mismatch. */
     _Atomic uint64_t doc_version;
     int         in_use;               /**< 1 if this slot holds a live document */
     int         disk_only;            /**< 1 = loaded from disk/watcher, not opened by editor */
@@ -90,7 +90,7 @@ static Document docs[MAX_DOCS];
 
 /* Serializes every read or write of the docs[] array — the slots
  * themselves, and all per-slot fields (uri, text, parse, doc_version,
- * sem_tokens_*, in_use, disk_only).  Held throughout each mutation
+ * sem_tokens_*, in_use, disk_only).  Held throughout each notification
  * handler and briefly during query snapshot capture / sem_tokens cache
  * writes. */
 static pthread_mutex_t docs_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -707,7 +707,7 @@ static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
  * Capture a pinned read-only view of every in-use document slot.
  * For each slot: strdup the URI and text, parse_result_acquire the
  * parse, record doc_version.  The returned snapshot is independent
- * of subsequent mutations; release it with workspace_snapshot_release().
+ * of subsequent notifications; release it with workspace_snapshot_release().
  *
  * @param primary_uri  URI of the request's target document (or NULL).
  *                     Copied into snap->primary_uri so handlers can
@@ -1632,7 +1632,7 @@ static void doc_set_sem_tokens(Document *d,
  * exactly what was sent.
  *
  * Computes from the snapshot's parse (so the response reflects
- * arrival-order state, not whatever a racing mutation has done since).
+ * arrival-order state, not whatever a racing notification has done since).
  * Takes docs_mutex only for the brief cache read / mint / write.
  */
 static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
@@ -1917,15 +1917,15 @@ static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *
    Main dispatch
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Return 1 when @p method names a state-mutating or lifecycle operation
- * that must run on the single mutation worker; 0 for read-only queries.
- * NULL or unknown methods are treated as queries so that the query
- * worker pool's null-response fallback fires. */
-static int is_mutation_method(const char *method) {
+/* Return 1 when @p method names an LSP notification — a fire-and-forget
+ * message with no `id` — that must run inline on the coordinator so
+ * subsequent queries observe its state change.  0 for LSP requests
+ * (initialize / shutdown / hover / completion / ...).  NULL or unknown
+ * methods are treated as queries so that the query worker pool's
+ * null-response fallback fires. */
+static int is_notification_method(const char *method) {
     if (!method) return 0;
-    return strcmp(method, "initialize") == 0
-        || strcmp(method, "initialized") == 0
-        || strcmp(method, "shutdown") == 0
+    return strcmp(method, "initialized") == 0
         || strcmp(method, "textDocument/didOpen") == 0
         || strcmp(method, "textDocument/didChange") == 0
         || strcmp(method, "textDocument/didClose") == 0
@@ -1944,28 +1944,21 @@ static void send_response(yyjson_mut_doc *out_doc, yyjson_mut_val *resp) {
     }
 }
 
-void server_dispatch_mutation(Job *job) {
+void server_dispatch_notification(Job *job) {
     yyjson_val *root    = yyjson_doc_get_root(job->request_doc);
-    yyjson_val *id_item = yyjson_obj_get(root, "id");
     yyjson_val *method  = yyjson_obj_get(root, "method");
     yyjson_val *params  = yyjson_obj_get(root, "params");
     const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
 
-    yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *resp = NULL;
-
-    /* Hold docs_mutex for the entire mutation handler.  Since exactly
-     * one mutation worker exists, no other writer can interleave.
-     * Query workers only contend during their brief snapshot capture
-     * windows, so even long mutations don't permanently block them. */
+    /* Hold docs_mutex for the entire notification handler.  The
+     * coordinator dispatches notifications inline (one at a time), so
+     * no other writer can interleave.  Query workers only contend
+     * during their brief snapshot capture windows, so even long
+     * notification handlers don't permanently block them. */
     pthread_mutex_lock(&docs_mutex);
 
-    if (strcmp(m, "initialize") == 0) {
-        resp = handle_initialize(out_doc, id_item, params);
-    } else if (strcmp(m, "initialized") == 0) {
+    if (strcmp(m, "initialized") == 0) {
         handle_initialized();
-    } else if (strcmp(m, "shutdown") == 0) {
-        resp = handle_shutdown(out_doc, id_item);
     } else if (strcmp(m, "textDocument/didOpen") == 0) {
         handle_didopen(params);
     } else if (strcmp(m, "textDocument/didChange") == 0) {
@@ -1976,15 +1969,11 @@ void server_dispatch_mutation(Job *job) {
         handle_did_change_watched_files(params);
     } else if (strcmp(m, "workspace/didRenameFiles") == 0) {
         handle_did_rename_files(params);
-    } else if (id_item) {
-        /* Misclassified or unknown request with an id — null result */
-        resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
     }
+    /* Unknown notifications are silently ignored (per LSP spec: a
+     * server MAY ignore notifications it doesn't recognise). */
 
     pthread_mutex_unlock(&docs_mutex);
-
-    if (resp) send_response(out_doc, resp);
-    yyjson_mut_doc_free(out_doc);
 }
 
 void server_dispatch_cancelled(Job *job) {
@@ -2012,8 +2001,12 @@ void server_dispatch_query(Job *job) {
     /* The snapshot was captured by the coordinator before this Job
      * landed in the query pool — it reflects state in arrival order,
      * so the result is automatically correct relative to LSP message
-     * ordering even when later mutations race ahead during compute. */
-    if (strcmp(m, "textDocument/documentSymbol") == 0) {
+     * ordering even when later notifications race ahead during compute. */
+    if (strcmp(m, "initialize") == 0) {
+        resp = handle_initialize(out_doc, id_item, params);
+    } else if (strcmp(m, "shutdown") == 0) {
+        resp = handle_shutdown(out_doc, id_item);
+    } else if (strcmp(m, "textDocument/documentSymbol") == 0) {
         resp = handle_document_symbol(out_doc, id_item, params, &job->snapshot);
     } else if (strcmp(m, "textDocument/foldingRange") == 0) {
         resp = handle_folding_range(out_doc, id_item, params, &job->snapshot);
@@ -2089,8 +2082,8 @@ void server_process(const char *json_text) {
         job->id     = yyjson_get_sint(id_item);
     }
 
-    if (is_mutation_method(m))
-        threadpool_enqueue_mutation(job);
+    if (is_notification_method(m))
+        threadpool_enqueue_notification(job);
     else
         threadpool_enqueue_query(job);
 }
