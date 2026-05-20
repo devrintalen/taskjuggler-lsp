@@ -22,6 +22,45 @@
 
 #include "parser.h"
 
+/* ── Diagnostic severity ─────────────────────────────────────────────────── */
+
+/** LSP DiagnosticSeverity for hard errors. */
+#define DIAG_ERROR   1
+/** LSP DiagnosticSeverity for warnings. */
+#define DIAG_WARNING 2
+
+/**
+ * A single error or warning to be reported to the editor.
+ *
+ * severity uses the LSP DiagnosticSeverity values (DIAG_ERROR=1, DIAG_WARNING=2).
+ *
+ * Two sources of diagnostics are stored together in ParseResult, distinguished
+ * by dep_diag_start:
+ *   [0 .. dep_diag_start-1]  ->  permanent diagnostics emitted during parse()
+ *                                (syntax errors, in-file dep resolution errors)
+ *   [dep_diag_start .. end]  ->  cross-file dep diagnostics, cleared and
+ *                                regenerated on every revalidation cycle
+ *
+ * Example TJP input with an unresolved dependency:
+ *
+ *   task gui "GUI" {
+ *       depends missing_task       <- line 1, characters 16-28
+ *   }
+ *
+ * Produces:
+ *
+ *   Diagnostic {
+ *     .range    = { {1,16}, {1,28} },
+ *     .severity = DIAG_ERROR,
+ *     .message  = "Unknown task: missing_task",
+ *   }
+ */
+struct Diagnostic {
+    LspRange  range;     /**< source range the diagnostic applies to */
+    int       severity;  /**< DIAG_ERROR or DIAG_WARNING */
+    char     *message;   /**< heap-allocated */
+};
+
 /* ── Diagnostic accumulation ─────────────────────────────────────────────── */
 
 /**

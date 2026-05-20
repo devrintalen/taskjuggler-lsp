@@ -46,6 +46,7 @@ typedef struct {
 #include "parser.h"           /* Token, DocSymbol, ParseResult, LspRange, etc. */
 #include "grammar.tab.h"      /* TK_* / KW_* constants, YYSTYPE */
 #include "document_symbol.h"  /* symbol_kind_for() */
+#include "diagnostics.h"      /* DIAG_ERROR, push_diagnostic() */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
