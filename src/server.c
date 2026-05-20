@@ -117,9 +117,7 @@ static Document docs[MAX_DOCS];
  * global trees built from them. */
 static pthread_mutex_t docs_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-#define MAX_WORKSPACE_ROOTS 16
-static char *g_workspace_roots[MAX_WORKSPACE_ROOTS];
-static int   g_num_workspace_roots = 0;
+static char *g_workspace_root = NULL;
 
 /* Forward declarations. */
 static char *normalize_uri(const char *raw_uri);
@@ -829,33 +827,10 @@ static void revalidate_all_docs(void) {
 
 static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
-    if (params) {
+    if (params && !g_workspace_root) {
         yyjson_val *root_uri_val = yyjson_obj_get(params, "rootUri");
-        if (root_uri_val && yyjson_is_str(root_uri_val)
-                && g_num_workspace_roots < MAX_WORKSPACE_ROOTS) {
-            char *path = uri_to_path(yyjson_get_str(root_uri_val));
-            if (path) g_workspace_roots[g_num_workspace_roots++] = path;
-        }
-
-        yyjson_val *folders = yyjson_obj_get(params, "workspaceFolders");
-        if (folders && yyjson_is_arr(folders)) {
-            size_t idx, max;
-            yyjson_val *folder;
-            yyjson_arr_foreach(folders, idx, max, folder) {
-                if (g_num_workspace_roots >= MAX_WORKSPACE_ROOTS) break;
-                const char *uri = json_str(folder, "uri");
-                if (!uri) continue;
-                char *path = uri_to_path(uri);
-                if (!path) continue;
-                int duplicate = 0;
-                for (int k = 0; k < g_num_workspace_roots; k++) {
-                    if (strcmp(g_workspace_roots[k], path) == 0) {
-                        duplicate = 1; break;
-                    }
-                }
-                if (duplicate) { free(path); continue; }
-                g_workspace_roots[g_num_workspace_roots++] = path;
-            }
+        if (root_uri_val && yyjson_is_str(root_uri_val)) {
+            g_workspace_root = uri_to_path(yyjson_get_str(root_uri_val));
         }
     }
 
@@ -924,8 +899,11 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_obj_add_val(doc, did_rename_opts, "filters", rename_filters);
     yyjson_mut_val *file_ops = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, file_ops, "didRename", did_rename_opts);
+    yyjson_mut_val *workspace_folders_caps = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_bool(doc, workspace_folders_caps, "supported", false);
     yyjson_mut_val *workspace_caps = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_val(doc, workspace_caps, "fileOperations", file_ops);
+    yyjson_mut_obj_add_val(doc, workspace_caps, "workspaceFolders", workspace_folders_caps);
+    yyjson_mut_obj_add_val(doc, workspace_caps, "fileOperations",   file_ops);
     yyjson_mut_obj_add_val(doc, caps, "workspace", workspace_caps);
 
     yyjson_mut_val *result = yyjson_mut_obj(doc);
@@ -976,10 +954,10 @@ static void handle_initialized(void) {
     lsp_send_message(text);
     free(text);
 
-    for (int i = 0; i < g_num_workspace_roots; i++)
-        load_tj_files_recursive(g_workspace_roots[i]);
-    if (g_num_workspace_roots > 0)
+    if (g_workspace_root) {
+        load_tj_files_recursive(g_workspace_root);
         revalidate_all_docs();
+    }
 }
 
 static void handle_did_change_watched_files(yyjson_val *params) {
