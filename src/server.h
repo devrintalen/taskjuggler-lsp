@@ -57,22 +57,10 @@ void server_process(const char *json_text);
 void server_dispatch_notification(Job *job);
 
 /**
- * Capture a workspace snapshot onto @p job and attach it.  Called by
- * the threadpool coordinator just before handing the job off to the
- * query worker pool — taking the snapshot here (in arrival order, with
- * docs_mutex briefly held) ensures the query observes exactly the
- * state that would have been visible if every job ran sequentially in
- * arrival order, even when later notifications race ahead while the
- * query is still in flight.
- *
- * @param job  Query job to snapshot.
- */
-void server_capture_snapshot_for(Job *job);
-
-/**
- * Run the query handler against the snapshot already attached to
- * @p job, then send the response.  Runs on any query worker thread.
- * Builds and emits the response via lsp_send_message().
+ * Run the query handler for @p job and send the response.  Runs on a
+ * query worker thread; acquires docs_mutex for the duration of the
+ * handler because the previous snapshot machinery was retired during
+ * the tj_node refactor — see job_queue.h.
  *
  * @param job  Pending query job.  Worker frees it after return.
  */

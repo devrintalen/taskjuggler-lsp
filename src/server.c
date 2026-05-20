@@ -19,7 +19,15 @@
 /** @file */
 
 /* For the data-flow overview, document lifecycle, and query-dispatch
- * table, see doc/modules/server.rst. */
+ * table, see doc/modules/server.rst.
+ *
+ * TODO(workspace-snapshot): query workers used to operate on a refcounted
+ * workspace snapshot so they did not block notifications.  That model
+ * relied on per-Document ParseResult refcounting and was retired during
+ * the tj_node refactor.  Until a replacement lands, server_dispatch_query
+ * acquires docs_mutex for the full handler so the live docs[] array stays
+ * consistent under it.
+ */
 
 #include "server.h"
 #include "parser.h"
@@ -56,60 +64,75 @@
    Document store
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/** Maximum number of documents the server holds open at once. */
 #define MAX_DOCS 64
 
-/** Document store slot — URI plus authoritative text and its parse result. */
+/** Document store slot.  After the tj_node refactor each slot owns the
+ *  ParseOutput-derived state directly (no nested ParseResult struct). */
 typedef struct {
-    char        *uri;                 /**< document URI, heap-allocated */
-    char        *text;                /**< full source text, heap-allocated */
-    ParseResult *parse;               /**< parse output for the current text; NULL when slot has no parse */
-    SemanticTokenResult sem_tokens;   /**< cached semantic-tokens response + id generator */
-    /* Monotonic per-document version, incremented under docs_mutex
-     * whenever `parse` or `text` is swapped.  Query workers compare
-     * the snapshot's captured version against this on send and reply
-     * with ContentModified (-32801) on mismatch. */
-    _Atomic uint64_t doc_version;
-    int         in_use;               /**< 1 if this slot holds a live document */
-    int         disk_only;            /**< 1 = loaded from disk/watcher, not opened by editor */
+    char        *uri;
+    char        *text;
+    ParseOutput *parse;             /**< owned; NULL when slot has no parse yet */
+    SemanticTokenResult sem_tokens; /**< cached semantic-tokens response */
+    _Atomic uint64_t doc_version;   /**< bumped on every text/parse swap */
+    int          in_use;
+    int          disk_only;
+
+    /* Prefixes applied to this Document by the includer's `include` block,
+     * one per kind.  Populated by the include pass when the canonical
+     * project file pulls this .tji in (and zeroed for the canonical .tjp
+     * itself or for orphan .tji files in a .tji-only workspace).
+     *
+     * TODO(include-prefixes): the grammar does not yet capture the
+     * *prefix attributes from inside an include statement's body, so
+     * these stay NULL until that lands. */
+    char        *task_prefix;
+    char        *account_prefix;
+    char        *report_prefix;
+    char        *resource_prefix;
+
+    /* Other Documents this one pulls in via `include`.  Populated by the
+     * include resolver.  Borrowed pointers — the Document store owns
+     * every slot. */
+    struct Document **included_docs;
+    int          num_included_docs;
+    int          included_docs_cap;
 } Document;
 
-/** Fixed-size document store; entries with `in_use == 0` are free. */
 static Document docs[MAX_DOCS];
 
-/* Serializes every read or write of the docs[] array — the slots
- * themselves, and all per-slot fields (uri, text, parse, doc_version,
- * sem_tokens_*, in_use, disk_only).  Held throughout each notification
- * handler and briefly during query snapshot capture / sem_tokens cache
- * writes. */
+/* Serializes every read/write of docs[] — slots, their fields, and the
+ * global trees built from them. */
 static pthread_mutex_t docs_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/** Maximum number of workspace root URIs the server tracks. */
 #define MAX_WORKSPACE_ROOTS 16
-/**
- * Workspace root filesystem paths extracted from the `initialize` params.
- * Populated from `rootUri` and/or `workspaceFolders`.  Heap-allocated
- * entries; never freed (server lifetime).
- */
 static char *g_workspace_roots[MAX_WORKSPACE_ROOTS];
-/** Number of entries currently used in #g_workspace_roots. */
 static int   g_num_workspace_roots = 0;
 
-/** Forward declaration — doc_find / doc_alloc normalize URIs internally so that
- * different spellings of the same file (trailing slashes, "./", symlinks) map
- * to the same document slot. */
+/* Forward declarations. */
 static char *normalize_uri(const char *raw_uri);
+static void  load_file_from_disk(const char *path);
+static void  follow_includes(const char *file_path, const ParseOutput *parse);
+static void  load_tj_files_recursive(const char *dir_path);
+static void  rebuild_global_trees(void);
 
-/**
- * Find the open document with the given URI.
+/* ── Global tj_node trees ───────────────────────────────────────────────── *
  *
- * Fast-path exact match first (clients overwhelmingly send the canonical
- * URI we already stored); falls back to normalising and retrying so that
- * non-canonical URI spellings still hit the stored canonical key.
+ * TODO(global-tree): single canonical project per workspace.  These
+ * statically-allocated synthetic roots hold the merged view of every
+ * Document's per-kind tree, with .tji subtrees hoisted under their
+ * include site via prefix.  Rebuilt from scratch by rebuild_global_trees()
+ * after any document-state-changing notification.
  *
- * @param uri  Document URI to look up.
- * @return The matching Document, or NULL when none is in use.
- */
+ * The roots stay zeroed when there is no project to anchor them.
+ * Today rebuild_global_trees() is a stub that resets their
+ * included_children to empty until the hoist pass lands. */
+static tj_node g_task_tree;
+static tj_node g_account_tree;
+static tj_node g_report_tree;
+static tj_node g_resource_tree;
+
+/* ── Slot lookup / allocation / free ─────────────────────────────────────── */
+
 static Document *doc_find(const char *uri) {
     if (!uri) return NULL;
     for (int i = 0; i < MAX_DOCS; i++)
@@ -130,23 +153,13 @@ static Document *doc_find(const char *uri) {
     return found;
 }
 
-/**
- * Claim a free Document slot for @p uri and return it.
- *
- * The stored URI is always canonical (see normalize_uri) so the document
- * store is deduplicated regardless of how the URI was spelled.  The
- * returned slot has `in_use=1` and `uri` set; all other fields are zeroed.
- *
- * @param uri  Document URI to associate with the new slot.
- * @return The newly allocated Document, or NULL when the store is full.
- */
 static Document *doc_alloc(const char *uri) {
     char *canon = normalize_uri(uri);
     if (!canon) return NULL;
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) {
             docs[i].in_use = 1;
-            docs[i].uri    = canon; /* ownership transferred */
+            docs[i].uri    = canon;
             docs[i].text   = NULL;
             docs[i].parse  = NULL;
             docs[i].sem_tokens.next_result_id = 1;
@@ -155,35 +168,25 @@ static Document *doc_alloc(const char *uri) {
         }
     }
     free(canon);
-    return NULL; /* shouldn't happen in practice */
+    return NULL;
 }
 
-/**
- * Replace @p d's parse with @p new_parse, atomically bumping
- * doc_version.  The old parse's refcount is dropped; any snapshot
- * still referencing it keeps it alive until its workers finish.
- * Caller must hold docs_mutex.
- *
- * @param d          Document to update.
- * @param new_parse  Fresh ParseResult (ownership transferred).
- */
-static void doc_install_new_parse(Document *d, ParseResult *new_parse) {
-    parse_result_release(d->parse);
+static void doc_install_new_parse(Document *d, ParseOutput *new_parse) {
+    parse_output_free(d->parse);
     d->parse = new_parse;
     atomic_fetch_add(&d->doc_version, 1);
 }
 
-/**
- * Release all heap memory owned by @p d and zero its fields, returning the
- * slot to the pool.
- *
- * @param d  Document slot to free.
- */
 static void doc_free(Document *d) {
     free(d->uri);
     free(d->text);
     semantic_token_result_release(&d->sem_tokens);
-    parse_result_release(d->parse);
+    parse_output_free(d->parse);
+    free(d->task_prefix);
+    free(d->account_prefix);
+    free(d->report_prefix);
+    free(d->resource_prefix);
+    free(d->included_docs);
     memset(d, 0, sizeof(*d));
 }
 
@@ -191,9 +194,6 @@ static void doc_free(Document *d) {
    Server-to-client messaging
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Serializes stdout writes from any thread.  Acquired around every
- * Content-Length-framed write so responses and notifications never
- * interleave mid-message. */
 static pthread_mutex_t stdout_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void lsp_send_message(const char *msg) {
@@ -203,17 +203,10 @@ void lsp_send_message(const char *msg) {
     pthread_mutex_unlock(&stdout_mutex);
 }
 
-
 /* ═══════════════════════════════════════════════════════════════════════════
-   File I/O helpers
+   URI / path helpers (unchanged from pre-refactor)
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * Decode a percent-encoded string (e.g. a URI path component).
- *
- * @param src  Percent-encoded source string.
- * @return Heap-allocated, NUL-terminated decoded string.  Caller must free().
- */
 static char *percent_decode(const char *src) {
     size_t len = strlen(src);
     char *dst = malloc(len + 1);
@@ -234,18 +227,8 @@ static char *percent_decode(const char *src) {
     return dst;
 }
 
-/**
- * Percent-encode a filesystem path for use in a `file://` URI.
- *
- * `/` is preserved as-is; all other characters outside the RFC 3986
- * unreserved set (`A-Z a-z 0-9 - _ . ~`) are encoded as `%XX`.
- *
- * @param src  Filesystem path to encode.
- * @return Heap-allocated, NUL-terminated encoded string.  Caller must free().
- */
 static char *percent_encode_path(const char *src) {
     size_t len = strlen(src);
-    /* Worst case: every byte becomes %XX (3 chars) */
     char *dst = malloc(len * 3 + 1);
     if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     size_t wi = 0;
@@ -267,29 +250,14 @@ static char *percent_encode_path(const char *src) {
     return dst;
 }
 
-/**
- * Convert a `file://` URI to a filesystem path.
- *
- * @param uri  Source URI.
- * @return Heap-allocated, percent-decoded copy of the path portion (after
- *         `file://`), or NULL when @p uri does not use the file scheme.
- *         Caller must free().
- */
 static char *uri_to_path(const char *uri) {
     if (!uri || strncmp(uri, "file://", 7) != 0) return NULL;
     return percent_decode(uri + 7);
 }
 
-/**
- * Convert a filesystem path to a `file://` URI.
- *
- * @param path  Filesystem path.
- * @return Heap-allocated URI.  Caller must free().
- */
 static char *path_to_uri(const char *path) {
     char *encoded = percent_encode_path(path);
     size_t enc_len = strlen(encoded);
-    /* "file://" prefix (7) + encoded path + NUL */
     char *uri = malloc(7 + enc_len + 1);
     if (!uri) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     memcpy(uri, "file://", 7);
@@ -298,19 +266,10 @@ static char *path_to_uri(const char *path) {
     return uri;
 }
 
-/**
- * Lexically normalise a filesystem path: collapse repeated slashes, drop
- * `"."` segments, strip trailing slashes.  Does not touch `".."` or
- * resolve symlinks — the caller uses this as a fallback when realpath(3)
- * fails (file doesn't exist yet).
- *
- * @param path  Filesystem path to normalise.
- * @return Heap-allocated normalised path.  Caller must free().
- */
 static char *lexical_normalize_path(const char *path) {
     if (!path) return NULL;
     size_t len = strlen(path);
-    char *out = malloc(len + 2); /* worst case: original + leading '/' + NUL */
+    char *out = malloc(len + 2);
     if (!out) return NULL;
 
     int absolute = (len > 0 && path[0] == '/');
@@ -325,7 +284,7 @@ static char *lexical_normalize_path(const char *path) {
         size_t seg_start = i;
         while (i < len && path[i] != '/') i++;
         size_t seg_len = i - seg_start;
-        if (seg_len == 1 && path[seg_start] == '.') continue; /* drop "." */
+        if (seg_len == 1 && path[seg_start] == '.') continue;
         if (wrote_segment) out[wi++] = '/';
         memcpy(out + wi, path + seg_start, seg_len);
         wi += seg_len;
@@ -335,17 +294,6 @@ static char *lexical_normalize_path(const char *path) {
     return out;
 }
 
-/**
- * Normalise a URI into the canonical key used by the document store.
- *
- * For `file://` URIs, runs realpath(3) to collapse `.`, `..`, `//`, and
- * symlinks when the file exists; falls back to lexical_normalize_path()
- * for URIs whose backing file does not exist yet.  Non-file URIs are
- * passed through unchanged.
- *
- * @param raw_uri  URI to canonicalise.
- * @return Heap-allocated canonical URI.  Caller must free().
- */
 static char *normalize_uri(const char *raw_uri) {
     if (!raw_uri) return NULL;
     if (strncmp(raw_uri, "file://", 7) != 0) return strdup(raw_uri);
@@ -363,13 +311,6 @@ static char *normalize_uri(const char *raw_uri) {
     return uri;
 }
 
-/**
- * Read an entire file into memory.
- *
- * @param path  Filesystem path to the file.
- * @return Heap-allocated, NUL-terminated contents on success, or NULL on
- *         any error.  Caller must free().
- */
 static char *read_file(const char *path) {
     FILE *file = fopen(path, "r");
     if (!file) return NULL;
@@ -385,25 +326,10 @@ static char *read_file(const char *path) {
     return buffer;
 }
 
-/*
- * Load a single file from disk into the document store.
- * If the URI is already present, it is skipped (does not overwrite
- * editor-managed documents with stale disk content).  URI dedup —
- * covering "./"-prefixed, trailing-slash, and symlinked spellings — is
- * handled inside doc_find / doc_alloc via normalize_uri().
- */
-/** Forward declaration — follow_includes() and load_file_from_disk() are
- * mutually recursive: loading a file may trigger following its includes. */
-static void follow_includes(const char *file_path, const ParseResult *parse);
+/* ═══════════════════════════════════════════════════════════════════════════
+   Workspace loading
+   ═══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * Load a `.tjp` / `.tji` file from @p path into the document store as a
- * disk-only entry, parse it, and follow any `include` directives it
- * contains.  Silently skips paths whose URI is already in the store
- * (cycle-safe).
- *
- * @param path  Filesystem path of the file to load.
- */
 static void load_file_from_disk(const char *path) {
     char *uri = path_to_uri(path);
     if (doc_find(uri)) { free(uri); return; }
@@ -421,20 +347,9 @@ static void load_file_from_disk(const char *path) {
     follow_includes(path, document->parse);
 }
 
-/**
- * For each filename listed in @p result->included_files, resolve it
- * relative to the directory containing @p file_path and load it into the
- * document store if not already present.  Cycle-safe: load_file_from_disk()
- * skips URIs that are already in the store.
- *
- * @param file_path  Filesystem path of the file whose includes are being
- *                   followed.
- * @param result     ParseResult of @p file_path.
- */
-static void follow_includes(const char *file_path, const ParseResult *result) {
-    if (!result->num_included_files) return;
+static void follow_includes(const char *file_path, const ParseOutput *parse) {
+    if (!parse || !parse->num_included_files) return;
 
-    /* Compute the directory portion of file_path */
     size_t path_len = strlen(file_path);
     const char *last_slash = NULL;
     for (size_t i = path_len; i-- > 0; ) {
@@ -442,27 +357,22 @@ static void follow_includes(const char *file_path, const ParseResult *result) {
     }
     size_t dir_len = last_slash ? (size_t)(last_slash - file_path) : 0;
 
-    for (int i = 0; i < result->num_included_files; i++) {
-        const char *filename = result->included_files[i];
+    for (int i = 0; i < parse->num_included_files; i++) {
+        const char *filename = parse->included_files[i];
         size_t fname_len = strlen(filename);
 
         char *full_path;
         if (filename[0] == '/') {
-            /* Absolute path — use as-is */
             full_path = malloc(fname_len + 1);
             if (!full_path) continue;
             memcpy(full_path, filename, fname_len + 1);
         } else if (last_slash) {
-            /* Relative path with a parent directory.  dir_len == 0 means the
-             * parent is the filesystem root "/", so we always write one slash
-             * between the prefix and the filename. */
             full_path = malloc(dir_len + 1 + fname_len + 1);
             if (!full_path) continue;
             memcpy(full_path, file_path, dir_len);
             full_path[dir_len] = '/';
             memcpy(full_path + dir_len + 1, filename, fname_len + 1);
         } else {
-            /* file_path had no slash — resolve relative to CWD. */
             full_path = malloc(fname_len + 1);
             if (!full_path) continue;
             memcpy(full_path, filename, fname_len + 1);
@@ -473,27 +383,17 @@ static void follow_includes(const char *file_path, const ParseResult *result) {
     }
 }
 
-/**
- * Recursively walk @p dir_path and call load_file_from_disk() for every
- * regular `.tjp` or `.tji` file found.  Silently skips unreadable
- * directories.  Entries are processed in sorted order so the document
- * store ordering is deterministic across filesystems (readdir order is
- * filesystem-dependent).
- *
- * @param dir_path  Filesystem path to the directory to walk.
- */
 static void load_tj_files_recursive(const char *dir_path) {
     DIR *dir = opendir(dir_path);
     if (!dir) return;
 
-    /* Collect entry names first so we can sort them */
     char  **names     = NULL;
     int     num_names = 0;
     int     cap_names = 0;
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.') continue; /* skip hidden and . / .. */
+        if (entry->d_name[0] == '.') continue;
         if (num_names >= cap_names) {
             int nc = cap_names ? cap_names * 2 : 16;
             char **tmp = realloc(names, (size_t)nc * sizeof(char *));
@@ -506,7 +406,6 @@ static void load_tj_files_recursive(const char *dir_path) {
     }
     closedir(dir);
 
-    /* Sort alphabetically for deterministic load order */
     if (num_names > 1) {
         for (int i = 1; i < num_names; i++) {
             char *key = names[i];
@@ -549,13 +448,6 @@ static void load_tj_files_recursive(const char *dir_path) {
    JSON helpers
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * Extract an LspPos from a JSON object with `"line"` and `"character"` fields.
- *
- * @param obj  JSON object to read.
- * @return The extracted position, or a zeroed LspPos when @p obj is NULL or
- *         the fields are absent.
- */
 static LspPos json_to_pos(yyjson_val *obj) {
     LspPos p = {0};
     if (!obj) return p;
@@ -566,26 +458,13 @@ static LspPos json_to_pos(yyjson_val *obj) {
     return p;
 }
 
-/**
- * Apply a single incremental text edit described by @p range / @p new_text
- * to @p src.  `range.end` is exclusive — `src[start_byte..end_byte)` is
- * replaced by @p new_text.  Character offsets are treated as byte offsets
- * within a line, consistent with how the lexer tracks columns.
- *
- * @param src       Original document text (may be NULL, treated as `""`).
- * @param range     Range to replace.
- * @param new_text  Replacement text.
- * @return Heap-allocated NUL-terminated result string.  Caller must free().
- */
 static char *apply_incremental_change(const char *src,
                                       LspRange range,
-                                      const char *new_text)
-{
+                                      const char *new_text) {
     if (!src) src = "";
-    size_t src_len     = strlen(src);
-    size_t new_len     = strlen(new_text);
+    size_t src_len = strlen(src);
+    size_t new_len = strlen(new_text);
 
-    /* Find byte offset of range.start */
     size_t start_byte = 0;
     uint32_t cur_line = 0, cur_char = 0;
     while (start_byte < src_len) {
@@ -596,7 +475,6 @@ static char *apply_incremental_change(const char *src,
         start_byte++;
     }
 
-    /* Find byte offset of range.end, continuing from start */
     size_t end_byte = start_byte;
     cur_line = range.start.line;
     cur_char = range.start.character;
@@ -611,35 +489,19 @@ static char *apply_incremental_change(const char *src,
     size_t suffix_len = src_len - end_byte;
     char *result = malloc(start_byte + new_len + suffix_len + 1);
     if (!result) return NULL;
-    memcpy(result,                       src,      start_byte);
-    memcpy(result + start_byte,          new_text, new_len);
+    memcpy(result,                        src,      start_byte);
+    memcpy(result + start_byte,           new_text, new_len);
     memcpy(result + start_byte + new_len, src + end_byte, suffix_len);
     result[start_byte + new_len + suffix_len] = '\0';
     return result;
 }
 
-/**
- * Look up a string field on a JSON object.
- *
- * @param obj  JSON object (may be NULL).
- * @param key  Field name.
- * @return The string value at @p key, or NULL when @p obj is NULL or the
- *         field is missing or not a string.
- */
 static const char *json_str(yyjson_val *obj, const char *key) {
     if (!obj) return NULL;
     yyjson_val *item = yyjson_obj_get(obj, key);
     return (item && yyjson_is_str(item)) ? yyjson_get_str(item) : NULL;
 }
 
-/**
- * Copy an immutable JSON id value into @p doc as a mutable value.
- *
- * @param doc  Destination mutable JSON document.
- * @param id   Source id from the incoming JSON-RPC message (may be NULL or
- *             null).
- * @return Mutable copy of @p id; a JSON null when @p id is NULL or null.
- */
 static yyjson_mut_val *copy_id(yyjson_mut_doc *doc, yyjson_val *id) {
     if (!id || yyjson_is_null(id)) return yyjson_mut_null(doc);
     if (yyjson_is_str(id))  return yyjson_mut_strcpy(doc, yyjson_get_str(id));
@@ -649,14 +511,6 @@ static yyjson_mut_val *copy_id(yyjson_mut_doc *doc, yyjson_val *id) {
     return yyjson_mut_null(doc);
 }
 
-/**
- * Build a success JSON-RPC response envelope around @p result.
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param result  Response payload.
- * @return The JSON-RPC response object.
- */
 static yyjson_mut_val *make_response(yyjson_mut_doc *doc, yyjson_val *id,
                                       yyjson_mut_val *result) {
     yyjson_mut_val *resp = yyjson_mut_obj(doc);
@@ -666,15 +520,6 @@ static yyjson_mut_val *make_response(yyjson_mut_doc *doc, yyjson_val *id,
     return resp;
 }
 
-/**
- * Build a JSON-RPC error response envelope.
- *
- * @param doc      Destination mutable JSON document.
- * @param id       Request id to echo back.
- * @param code     JSON-RPC error code (e.g. -32800 for RequestCancelled).
- * @param message  Human-readable description.
- * @return The JSON-RPC error response object.
- */
 static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
                                             int code, const char *message) {
     yyjson_mut_val *resp = yyjson_mut_obj(doc);
@@ -688,210 +533,65 @@ static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   Workspace snapshots
+   Global tj_node tree rebuild
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * Capture a pinned read-only view of every in-use document slot.
- * For each slot: strdup the URI and text, parse_result_acquire the
- * parse, record doc_version.  The returned snapshot is independent
- * of subsequent notifications; release it with workspace_snapshot_release().
+/* TODO(global-tree): real implementation must:
+ *   1. Identify the canonical .tjp Document.  Error out cleanly when
+ *      multiple ambiguous candidates exist.  Accept the .tji-only
+ *      workspace by treating every .tji as a synthetic top-level.
+ *   2. Clear every Document's included_children arrays so stale hoists
+ *      go away.
+ *   3. Walk each Document's include list and append the included
+ *      Document's top-level entries to the includer's prefix-target
+ *      node's included_children (per kind, using the per-kind
+ *      *_prefix string captured during parsing).
+ *   4. Anchor g_task_tree.children / etc. on the canonical Document's
+ *      per-kind tree (or merge from .tji-only fallback).
  *
- * @param primary_uri  URI of the request's target document (or NULL).
- *                     Copied into snap->primary_uri so handlers can
- *                     pick out their target without rescanning params.
- */
-static WorkspaceSnapshot snapshot_workspace_for(const char *primary_uri) {
-    WorkspaceSnapshot snap = {0};
+ * For the moment this just zeroes the synthetic globals so handlers
+ * that try to walk them see an empty tree. */
+static void rebuild_global_trees(void) {
+    tj_node *roots[] = {
+        &g_task_tree, &g_account_tree,
+        &g_report_tree, &g_resource_tree,
+    };
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
+        tj_node_clear_included(roots[i]);
 
-    pthread_mutex_lock(&docs_mutex);
-
-    int in_use_count = 0;
-    for (int i = 0; i < MAX_DOCS; i++)
-        if (docs[i].in_use) in_use_count++;
-
-    if (in_use_count > 0) {
-        snap.docs = calloc((size_t)in_use_count, sizeof(DocSnapshot));
-        if (!snap.docs) {
-            pthread_mutex_unlock(&docs_mutex);
-            fprintf(stderr, "taskjuggler-lsp: out of memory\n");
-            exit(1);
-        }
-        size_t w = 0;
-        for (int i = 0; i < MAX_DOCS; i++) {
-            if (!docs[i].in_use) continue;
-            DocSnapshot *s = &snap.docs[w++];
-            s->uri       = docs[i].uri  ? strdup(docs[i].uri)  : NULL;
-            s->text      = docs[i].text ? strdup(docs[i].text) : NULL;
-            s->parse     = docs[i].parse ? parse_result_acquire(docs[i].parse) : NULL;
-            s->version   = atomic_load(&docs[i].doc_version);
-            s->disk_only = docs[i].disk_only;
-        }
-        snap.count = w;
-    }
-
-    pthread_mutex_unlock(&docs_mutex);
-
-    if (primary_uri) {
-        char *canon = normalize_uri(primary_uri);
-        snap.primary_uri = canon ? canon : strdup(primary_uri);
-    }
-    return snap;
-}
-
-/**
- * Find the DocSnapshot for @p uri in @p snap.  Returns NULL when no
- * match exists.  Compares against the canonical URI form that
- * snapshot_workspace_for stored.
- */
-static const DocSnapshot *snapshot_find(const WorkspaceSnapshot *snap,
-                                        const char *uri) {
-    if (!snap || !uri) return NULL;
-    /* Fast path: exact match (most clients send canonical URIs). */
-    for (size_t i = 0; i < snap->count; i++)
-        if (snap->docs[i].uri && strcmp(snap->docs[i].uri, uri) == 0)
-            return &snap->docs[i];
-    /* Slow path: normalize and retry. */
-    char *canon = normalize_uri(uri);
-    if (!canon) return NULL;
-    const DocSnapshot *found = NULL;
-    if (strcmp(canon, uri) != 0) {
-        for (size_t i = 0; i < snap->count; i++)
-            if (snap->docs[i].uri && strcmp(snap->docs[i].uri, canon) == 0) {
-                found = &snap->docs[i];
-                break;
-            }
-    }
-    free(canon);
-    return found;
-}
-
-/**
- * Return the snapshot's primary document (the one named by primary_uri
- * at capture time).  NULL when the request had no target URI or the
- * URI wasn't in the workspace.
- */
-static const DocSnapshot *snapshot_primary(const WorkspaceSnapshot *snap) {
-    if (!snap || !snap->primary_uri) return NULL;
-    return snapshot_find(snap, snap->primary_uri);
-}
-
-void server_capture_snapshot_for(Job *job) {
-    if (!job) return;
-    yyjson_val *root   = yyjson_doc_get_root(job->request_doc);
-    yyjson_val *params = yyjson_obj_get(root, "params");
-    const char *primary_uri = NULL;
-    if (params) {
-        yyjson_val *td = yyjson_obj_get(params, "textDocument");
-        if (td) primary_uri = json_str(td, "uri");
-        if (!primary_uri) {
-            yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
-            if (tdp) {
-                td = yyjson_obj_get(tdp, "textDocument");
-                if (td) primary_uri = json_str(td, "uri");
-            }
-        }
-    }
-    job->snapshot = snapshot_workspace_for(primary_uri);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   Cross-file revalidation
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-/**
- * Revalidate cross-file dep refs in all open documents, then publish updated
- * diagnostics.  Called after any document open, change, or close.
- *
- * Under the immutable-after-publication contract, this is a four-phase
- * sequence:
- *   A. Clone every doc's current ParseResult via
- *      parse_result_clone_for_revalidate().  The clones start with
- *      cross-file link arrays empty and transient diagnostics truncated.
- *   B. For each clone, resolve cross_file_deps[] against the OTHER
- *      clones' freshly-built symbol trees (so all cross-file links go
- *      onto the new immutable copies, not the old ones).
- *   C. Atomic swap: install the new ParseResults via
- *      doc_install_new_parse() — bumps doc_version, releases the old
- *      parse.  Snapshots still holding refs to the old ParseResult
- *      keep it alive.
- *   D. Publish diagnostics for editor-managed documents only.
- *
- * Caller must hold docs_mutex.
- */
-static void revalidate_all_docs(void) {
-    /* Phase A: clone every doc's parse. */
-    ParseResult *new_parses[MAX_DOCS] = {0};
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use || !docs[i].parse) continue;
-        new_parses[i] = parse_result_clone_for_revalidate(docs[i].parse);
+        ParseOutput *p = docs[i].parse;
+        tj_node *kind_roots[] = {
+            p->tasks, p->accounts, p->reports, p->resources,
+        };
+        for (size_t k = 0; k < sizeof(kind_roots) / sizeof(kind_roots[0]); k++)
+            tj_node_clear_included(kind_roots[k]);
     }
+}
 
-    /* Phase B: resolve cross-file deps on each clone using the other
-     * clones' symbol trees. */
-    DocSymbol *const *extra_roots[MAX_DOCS];
-    int               extra_counts[MAX_DOCS];
-    const char       *extra_uris[MAX_DOCS];
-    for (int i = 0; i < MAX_DOCS; i++) {
-        if (!new_parses[i]) continue;
-
-        int num_extra = 0;
-        for (int j = 0; j < MAX_DOCS; j++) {
-            if (!new_parses[j] || j == i) continue;
-            extra_roots[num_extra]  = new_parses[j]->doc_symbols;
-            extra_counts[num_extra] = new_parses[j]->num_doc_symbols;
-            extra_uris[num_extra]   = docs[j].uri;
-            num_extra++;
-        }
-
-        resolve_cross_file_deps(new_parses[i],
-                                extra_roots, extra_counts, extra_uris,
-                                num_extra, docs[i].uri);
-    }
-
-    /* Phase C: atomic swap.  Old parses are released after install;
-     * snapshots still referencing them keep them alive. */
-    for (int i = 0; i < MAX_DOCS; i++) {
-        if (!new_parses[i]) continue;
-        doc_install_new_parse(&docs[i], new_parses[i]);
-    }
-
-    /* Phase D: publish diagnostics for editor-managed documents only.
-     * disk_only documents are loaded by the workspace scan and by
-     * include resolution; the editor hasn't asked about them, so
-     * publishing diagnostics for them would spam the client with noise
-     * (and potentially huge payloads from unrelated files in the
-     * workspace). */
+/* Republish (now-empty) diagnostics for editor-managed documents after a
+ * notification so the client clears stale markers from the pre-refactor
+ * diagnostic stream. */
+static void republish_all_diagnostics(void) {
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
         if (docs[i].disk_only) continue;
-        publish_diagnostics(docs[i].uri, docs[i].parse);
+        publish_diagnostics(docs[i].uri);
     }
+}
+
+static void revalidate_all_docs(void) {
+    rebuild_global_trees();
+    republish_all_diagnostics();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Handlers
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * Handle the `initialize` request.
- *
- * Responds with the server's capabilities and registers all supported
- * language features.  Client capabilities in @p params are not yet
- * inspected.
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Initialize parameters (currently unused).
- * @return The JSON-RPC response.
- */
 static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
-    // TODO none of the client capabilities are checked here.
-
-    /* Extract workspace root paths for use in handle_initialized().
-     * Collect rootUri first, then all workspaceFolders entries, deduplicating
-     * by URI string so a client that sends both doesn't double-scan. */
     if (params) {
         yyjson_val *root_uri_val = yyjson_obj_get(params, "rootUri");
         if (root_uri_val && yyjson_is_str(root_uri_val)
@@ -910,7 +610,6 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
                 if (!uri) continue;
                 char *path = uri_to_path(uri);
                 if (!path) continue;
-                /* Skip if already present (rootUri == workspaceFolders[0]) */
                 int duplicate = 0;
                 for (int k = 0; k < g_num_workspace_roots; k++) {
                     if (strcmp(g_workspace_roots[k], path) == 0) {
@@ -923,13 +622,10 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
         }
     }
 
-    /* Server info — LSP InitializeResult.serverInfo.
-     * Per LSP spec, both fields are strings, not arrays. */
     yyjson_mut_val *server_info = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_str(doc, server_info, "name",    "taskjuggler-lsp");
     yyjson_mut_obj_add_str(doc, server_info, "version", VERSION_STRING);
 
-    /* Completion options */
     yyjson_mut_val *comp_triggers = yyjson_mut_arr(doc);
     yyjson_mut_arr_add_str(doc, comp_triggers, "!");
     yyjson_mut_arr_add_str(doc, comp_triggers, ".");
@@ -937,18 +633,15 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_obj_add_val(doc,  comp_opts, "triggerCharacters", comp_triggers);
     yyjson_mut_obj_add_bool(doc, comp_opts, "resolveProvider", false);
 
-    /* Signature help */
     yyjson_mut_val *sig_triggers = yyjson_mut_arr(doc);
     yyjson_mut_arr_add_str(doc, sig_triggers, " ");
     yyjson_mut_val *sig_opts = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, sig_opts, "triggerCharacters", sig_triggers);
 
-    /* Capabilities */
     yyjson_mut_val *caps = yyjson_mut_obj(doc);
     yyjson_mut_val *tds = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_uint(doc, tds, "change", 2); /* TextDocumentSyncKind.Incremental */
+    yyjson_mut_obj_add_uint(doc, tds, "change", 2);
     yyjson_mut_obj_add_bool(doc, tds, "openClose", true);
-    /* Semantic tokens */
     yyjson_mut_val *sem_types = yyjson_mut_arr(doc);
     for (int i = 0; i < num_semantic_token_types; i++)
         yyjson_mut_arr_add_str(doc, sem_types, semantic_token_type_names[i]);
@@ -963,7 +656,6 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_val *sem_full = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_bool(doc, sem_full, "delta", true);
     yyjson_mut_obj_add_val(doc, sem_opts, "full", sem_full);
-    /* TODO: add "range": true when textDocument/semanticTokens/range is implemented */
 
     yyjson_mut_obj_add_val(doc,  caps, "textDocumentSync",          tds);
     yyjson_mut_obj_add_bool(doc, caps, "documentSymbolProvider",    true);
@@ -980,8 +672,6 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_obj_add_val(doc,  caps, "semanticTokensProvider",    sem_opts);
     yyjson_mut_obj_add_bool(doc, caps, "workspaceSymbolProvider",   true);
 
-    /* workspace.fileOperations.didRename — server wants rename notifications
-     * for .tjp and .tji files so it can update the document store. */
     yyjson_mut_val *rename_filter_tjp = yyjson_mut_obj(doc);
     yyjson_mut_val *pattern_tjp = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_str(doc, pattern_tjp, "glob", "**/*.tjp");
@@ -1008,25 +698,10 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     return make_response(doc, id, result);
 }
 
-/**
- * Handle the `shutdown` request.
- *
- * Returns a null result as required by the LSP spec; the server process
- * exits on the subsequent `exit` notification.
- *
- * @param doc  Destination mutable JSON document.
- * @param id   Request id to echo back.
- * @return The JSON-RPC response.
- */
 static yyjson_mut_val *handle_shutdown(yyjson_mut_doc *doc, yyjson_val *id) {
     return make_response(doc, id, yyjson_mut_null(doc));
 }
 
-/**
- * Send client/registerCapability to ask the client to watch all .tjp and
- * .tji files in the workspace.  The server will then receive
- * workspace/didChangeWatchedFiles whenever those files change on disk.
- */
 static void handle_initialized(void) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
 
@@ -1064,29 +739,12 @@ static void handle_initialized(void) {
     lsp_send_message(text);
     free(text);
 
-    /* Perform an initial scan of the workspace for existing .tji files.
-     * File watchers only fire on future changes, so without this scan the
-     * server would never learn about .tji files that already exist on disk
-     * when the session starts. */
     for (int i = 0; i < g_num_workspace_roots; i++)
         load_tj_files_recursive(g_workspace_roots[i]);
     if (g_num_workspace_roots > 0)
         revalidate_all_docs();
 }
 
-/**
- * Handle `workspace/didChangeWatchedFiles`.
- *
- * The LSP spec defines three change types:
- *   1 = Created, 2 = Changed, 3 = Deleted
- *
- * For Created and Changed: read the file from disk and update (or add) it
- * in the document store, then re-parse.  For Deleted: remove the document
- * from the store.  In all cases, revalidate_all_docs() is called so that
- * cross-file dependency diagnostics are kept up to date.
- *
- * @param params  Notification `params` object.
- */
 static void handle_did_change_watched_files(yyjson_val *params) {
     if (!params) return;
     yyjson_val *changes = yyjson_obj_get(params, "changes");
@@ -1097,25 +755,18 @@ static void handle_did_change_watched_files(yyjson_val *params) {
     size_t idx, max;
     yyjson_val *event;
     yyjson_arr_foreach(changes, idx, max, event) {
-        const char *uri   = json_str(event, "uri");
+        const char *uri = json_str(event, "uri");
         yyjson_val *type_item = yyjson_obj_get(event, "type");
         if (!uri || !type_item || !yyjson_is_num(type_item)) continue;
         int type = (int)yyjson_get_num(type_item);
 
         if (type == 3) {
-            /* Deleted — remove from store.  Skip if the editor has the file
-             * open: the editor's in-memory version stays authoritative until
-             * it sends didClose.  No publish needed — disk_only documents
-             * never had diagnostics published to the client. */
             Document *document = doc_find(uri);
             if (document && document->disk_only) {
                 doc_free(document);
                 changed = 1;
             }
         } else {
-            /* Created (1) or Changed (2) — read from disk and (re-)parse.
-             * Skip if the editor has the file open: the editor's in-memory
-             * version is authoritative and it will send didChange itself. */
             Document *document = doc_find(uri);
             if (document && !document->disk_only) continue;
 
@@ -1130,8 +781,7 @@ static void handle_did_change_watched_files(yyjson_val *params) {
             free(document->text);
             document->text      = text;
             document->disk_only = 1;
-            parse_result_release(document->parse);
-            document->parse = parse(text);
+            doc_install_new_parse(document, parse(text));
             follow_includes(path, document->parse);
             free(path);
             changed = 1;
@@ -1141,16 +791,6 @@ static void handle_did_change_watched_files(yyjson_val *params) {
     if (changed) revalidate_all_docs();
 }
 
-/**
- * Handle `workspace/didRenameFiles`.
- *
- * For each renamed file: remove the old URI from the document store
- * (clearing its diagnostics), then read the new URI from disk and add it.
- * Revalidates all documents once at the end so that cross-file references
- * are updated.
- *
- * @param params  Notification `params` object.
- */
 static void handle_did_rename_files(yyjson_val *params) {
     if (!params) return;
     yyjson_val *files = yyjson_obj_get(params, "files");
@@ -1165,19 +805,14 @@ static void handle_did_rename_files(yyjson_val *params) {
         const char *new_uri = json_str(file_item, "newUri");
         if (!old_uri || !new_uri) continue;
 
-        /* Remove old URI.  Only publish empty if the editor had this file
-         * open — disk_only documents never had diagnostics on the client. */
         Document *old_doc = doc_find(old_uri);
         if (old_doc) {
-            if (!old_doc->disk_only) {
-                ParseResult empty = {0};
-                publish_diagnostics(old_uri, &empty);
-            }
+            if (!old_doc->disk_only)
+                publish_diagnostics(old_uri);
             doc_free(old_doc);
             changed = 1;
         }
 
-        /* Load new URI from disk */
         char *path = uri_to_path(new_uri);
         if (!path) continue;
         char *text = read_file(path);
@@ -1188,10 +823,9 @@ static void handle_did_rename_files(yyjson_val *params) {
         if (!new_doc) { free(text); free(path); continue; }
 
         free(new_doc->text);
-        parse_result_release(new_doc->parse);
         new_doc->text      = text;
         new_doc->disk_only = 1;
-        new_doc->parse     = parse(text);
+        doc_install_new_parse(new_doc, parse(text));
         follow_includes(path, new_doc->parse);
         free(path);
         changed = 1;
@@ -1200,15 +834,6 @@ static void handle_did_rename_files(yyjson_val *params) {
     if (changed) revalidate_all_docs();
 }
 
-/**
- * Handle `textDocument/didOpen`.
- *
- * Stores the document text, parses it, and triggers cross-file
- * revalidation so that references to symbols in this file resolve.
- *
- * @param params  Notification params containing `textDocument.uri` and
- *                `textDocument.text`.
- */
 static void handle_didopen(yyjson_val *params) {
     if (!params) return;
     yyjson_val *tdi = yyjson_obj_get(params, "textDocument");
@@ -1220,28 +845,22 @@ static void handle_didopen(yyjson_val *params) {
 
     Document *d = doc_find(uri);
     if (d) {
-        if (!d->disk_only) return; /* duplicate open: LSP spec client error */
-        /* File was pre-loaded from disk.
-         * If the editor text matches the disk content, just promote the
-         * document to editor-managed and publish — we skipped the publish
-         * during the workspace scan so the editor has never seen diagnostics
-         * for this file. */
+        if (!d->disk_only) return; /* duplicate open: client error */
         if (d->text && strcmp(d->text, text) == 0) {
             d->disk_only = 0;
             revalidate_all_docs();
             return;
         }
-        /* Text differs from disk — replace with authoritative editor content */
         free(d->text);
-        parse_result_release(d->parse);
+        parse_output_free(d->parse);
         d->parse = NULL;
     } else {
         d = doc_alloc(uri);
-        if (!d) return; /* document store full */
+        if (!d) return;
     }
     d->disk_only = 0;
     d->text  = strdup(text);
-    d->parse = parse(text);
+    doc_install_new_parse(d, parse(text));
 
     char *path = uri_to_path(uri);
     if (path) {
@@ -1252,18 +871,6 @@ static void handle_didopen(yyjson_val *params) {
     revalidate_all_docs();
 }
 
-/**
- * Handle `textDocument/didChange`.
- *
- * Applies each content change in order to the stored document text,
- * re-parses, and revalidates all open documents.  Each change may be a
- * full replacement (no `range` field) or an incremental edit (has `range`
- * and `text` fields).  Changes are applied sequentially; each change's
- * range is relative to the text produced by the previous one.
- *
- * @param params  Notification params containing `textDocument.uri` and
- *                `contentChanges[]`.
- */
 static void handle_didchange(yyjson_val *params) {
     if (!params) return;
     yyjson_val *tdi     = yyjson_obj_get(params, "textDocument");
@@ -1275,13 +882,9 @@ static void handle_didchange(yyjson_val *params) {
 
     if (yyjson_arr_size(changes) == 0) return;
 
-    /* LSP requires didOpen before any didChange for a given URI.  If we have
-     * no record of this document, the client is violating the protocol —
-     * ignore the notification rather than silently synthesising an open. */
     Document *d = doc_find(uri);
     if (!d) return;
 
-    /* Start with the current document text (may be NULL for a fresh slot). */
     char *current = d->text ? strdup(d->text) : strdup("");
     if (!current) return;
 
@@ -1293,7 +896,6 @@ static void handle_didchange(yyjson_val *params) {
         if (!new_text) { free(current); return; }
 
         if (range_obj) {
-            /* Incremental edit: apply the range-based replacement. */
             LspRange range;
             range.start = json_to_pos(yyjson_obj_get(range_obj, "start"));
             range.end   = json_to_pos(yyjson_obj_get(range_obj, "end"));
@@ -1302,7 +904,6 @@ static void handle_didchange(yyjson_val *params) {
             if (!next) return;
             current = next;
         } else {
-            /* Full replacement. */
             free(current);
             current = strdup(new_text);
             if (!current) return;
@@ -1311,10 +912,8 @@ static void handle_didchange(yyjson_val *params) {
 
     free(d->text);
     d->text = current;
-    parse_result_release(d->parse);
-    d->parse = parse(d->text);
+    doc_install_new_parse(d, parse(d->text));
 
-    /* Pick up any new `include` directives the edit introduced. */
     char *path = uri_to_path(uri);
     if (path) {
         follow_includes(path, d->parse);
@@ -1324,16 +923,6 @@ static void handle_didchange(yyjson_val *params) {
     revalidate_all_docs();
 }
 
-/**
- * Handle `textDocument/didClose`.
- *
- * When the editor closes a file, attempt to reload it from disk so that
- * cross-file features (completions, definition, references) keep working
- * even when the file is not open in the editor.  If the file cannot be
- * read, remove it from the store and clear client-side diagnostics.
- *
- * @param params  Notification params containing `textDocument.uri`.
- */
 static void handle_didclose(yyjson_val *params) {
     if (!params) return;
     yyjson_val *tdi = yyjson_obj_get(params, "textDocument");
@@ -1346,189 +935,137 @@ static void handle_didclose(yyjson_val *params) {
     if (!d) return;
 
     char *path = uri_to_path(uri);
-    char *text  = path ? read_file(path) : NULL;
+    char *text = path ? read_file(path) : NULL;
 
     if (text) {
-        /* Reload from disk — keep the document as a background (disk-only) entry */
         free(d->text);
         d->text      = text;
         d->disk_only = 1;
-        parse_result_release(d->parse);
-        d->parse = parse(text);
+        doc_install_new_parse(d, parse(text));
         follow_includes(path, d->parse);
     } else {
-        /* File gone from disk — remove and clear client-side diagnostics */
-        ParseResult empty = {0};
-        publish_diagnostics(uri, &empty);
+        publish_diagnostics(uri);
         doc_free(d);
     }
     free(path);
 
-    /* Revalidate remaining docs — the closed file's symbols are no longer available */
     revalidate_all_docs();
 }
 
-/**
- * Handle `textDocument/documentSymbol`.
+/* ── Read-only query handlers ─────────────────────────────────────────────
  *
- * Returns the doc_symbols[] tree for the requested document as a
- * hierarchical symbol list, or null if the document is not open.
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Request params containing `textDocument.uri`.
- * @return The JSON-RPC response.
+ * Each handler takes `d` (the primary Document, already located by the
+ * dispatcher under docs_mutex) and returns the response JSON.  Caller
+ * holds docs_mutex; no further locking is needed because the previous
+ * snapshot machinery was retired.
  */
+
 static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                               yyjson_val *params,
-                                               const WorkspaceSnapshot *snap) {
+                                               yyjson_val *params, Document *d) {
     (void)params;
-    const DocSnapshot *primary = snapshot_primary(snap);
-    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
+
+    /* For now, render the four per-kind trees concatenated at the top
+     * level (project node first when present).  TODO(document-symbol):
+     * once the project block reliably contains its children in the
+     * hierarchical sense, fold the per-kind entries inside it. */
+    int top_n = 0;
+    if (d->parse->project) top_n++;
+    top_n += d->parse->tasks->num_children;
+    top_n += d->parse->accounts->num_children;
+    top_n += d->parse->reports->num_children;
+    top_n += d->parse->resources->num_children;
+
+    tj_node **top = top_n
+        ? malloc((size_t)top_n * sizeof(tj_node *))
+        : NULL;
+    int w = 0;
+    if (d->parse->project)
+        top[w++] = d->parse->project;
+    for (int i = 0; i < d->parse->tasks->num_children;     i++) top[w++] = d->parse->tasks->children[i];
+    for (int i = 0; i < d->parse->accounts->num_children;  i++) top[w++] = d->parse->accounts->children[i];
+    for (int i = 0; i < d->parse->reports->num_children;   i++) top[w++] = d->parse->reports->children[i];
+    for (int i = 0; i < d->parse->resources->num_children; i++) top[w++] = d->parse->resources->children[i];
 
     size_t  json_len = 0;
-    char   *json     = build_document_symbols_json(primary->parse->doc_symbols,
-                                                    primary->parse->num_doc_symbols,
-                                                    &json_len);
+    char   *json     = build_document_symbols_json(top, w, &json_len);
+    free(top);
     if (!json) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_mut_val *raw = yyjson_mut_rawncpy(doc, json, json_len);
     free(json);
     return make_response(doc, id, raw);
 }
 
-/**
- * Handle `textDocument/foldingRange`.
- *
- * Returns folding ranges derived from the brace token spans of the
- * document.
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Request params containing `textDocument.uri`.
- * @return The JSON-RPC response.
- */
+/* Reusable: gather every doc's top-level nodes (project + four trees) as
+ * a flat array, for handlers that take a tj_node *const * symbols pool. */
+static tj_node **flatten_top_nodes(Document *d, int *out_n) {
+    *out_n = 0;
+    if (!d || !d->parse) return NULL;
+    int n = (d->parse->project ? 1 : 0)
+          + d->parse->tasks->num_children
+          + d->parse->accounts->num_children
+          + d->parse->reports->num_children
+          + d->parse->resources->num_children;
+    if (!n) return NULL;
+    tj_node **arr = malloc((size_t)n * sizeof(tj_node *));
+    int w = 0;
+    if (d->parse->project) arr[w++] = d->parse->project;
+    for (int i = 0; i < d->parse->tasks->num_children;     i++) arr[w++] = d->parse->tasks->children[i];
+    for (int i = 0; i < d->parse->accounts->num_children;  i++) arr[w++] = d->parse->accounts->children[i];
+    for (int i = 0; i < d->parse->reports->num_children;   i++) arr[w++] = d->parse->reports->children[i];
+    for (int i = 0; i < d->parse->resources->num_children; i++) arr[w++] = d->parse->resources->children[i];
+    *out_n = w;
+    return arr;
+}
+
 static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
-                                             yyjson_val *params,
-                                             const WorkspaceSnapshot *snap) {
+                                             yyjson_val *params, Document *d) {
     (void)params;
-    const DocSnapshot *primary = snapshot_primary(snap);
-    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
+    int n = 0;
+    tj_node **top = flatten_top_nodes(d, &n);
     yyjson_mut_val *arr = build_folding_ranges_json(doc,
-                                                     primary->parse->tok_spans,
-                                                     primary->parse->num_tok_spans,
-                                                     primary->parse->doc_symbols,
-                                                     primary->parse->num_doc_symbols);
+                                                     d->parse->tok_spans,
+                                                     d->parse->num_tok_spans,
+                                                     top, n);
+    free(top);
     return make_response(doc, id, arr);
 }
 
-/**
- * Handle `textDocument/codeLens`.
- *
- * Returns code lenses derived from token-level analysis: a hint above
- * each `length` / `duration` keyword whose enclosing task carries an
- * explicit `start` or `end` date.
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Request params containing `textDocument.uri`.
- * @return The JSON-RPC response.
- */
 static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
-                                         yyjson_val *params,
-                                         const WorkspaceSnapshot *snap) {
+                                         yyjson_val *params, Document *d) {
     (void)params;
-    const DocSnapshot *primary = snapshot_primary(snap);
-    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
+    int n = 0;
+    tj_node **top = flatten_top_nodes(d, &n);
     yyjson_mut_val *arr = build_code_lens_json(doc,
-                                                primary->parse->tok_spans,
-                                                primary->parse->num_tok_spans,
-                                                primary->parse->doc_symbols,
-                                                primary->parse->num_doc_symbols);
+                                                d->parse->tok_spans,
+                                                d->parse->num_tok_spans,
+                                                top, n);
+    free(top);
     return make_response(doc, id, arr);
 }
 
-/**
- * Return a human-readable label for a DocSymbol keyword.
- *
- * @param keyword  KW_* constant from grammar.tab.h.
- * @return Static string label (e.g. `"Task"`, `"Resource"`).  Returns
- *         `"Symbol"` for keywords with no specific label.
- */
-static const char *sym_kind_label(int keyword) {
-    switch (keyword) {
-    case KW_TASK:     return "Task";
-    case KW_RESOURCE: return "Resource";
-    case KW_ACCOUNT:  return "Account";
-    case KW_SHIFT:    return "Shift";
-    case KW_PROJECT:  return "Project";
-    default:          return "Symbol";
-    }
-}
-
-/**
- * Handle `textDocument/hover`.
- *
- * First checks whether the cursor lands on a resolved dependency
- * reference; if so, returns the target symbol's name and kind as a hover
- * card.  Falls back to keyword documentation if no definition link
- * matches.
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Request params containing `textDocument.uri` and
- *                `position`.
- * @return The JSON-RPC response.
- */
 static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
-                                     yyjson_val *params,
-                                     const WorkspaceSnapshot *snap) {
+                                     yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
-    if (!tdp) tdp = params; /* some clients pass position at top level */
+    if (!tdp) tdp = params;
 
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
-
-    const DocSnapshot *primary = snapshot_primary(snap);
-    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
 
-    /* Check whether the cursor is on a resolved dependency/allocation reference.
-     * If so, show the target symbol's kind, id, and name instead of keyword docs. */
-    const DefinitionLink *hover_link = find_def_link_at(
-        primary->parse->tok_spans, primary->parse->num_tok_spans, pos);
-    if (hover_link) {
-        const DocSymbol *sym = hover_link->target;
-        if (!sym) goto keyword_hover;
-
-        /* Build: "**<Kind> `<dotted.id>`** — <name>" */
-        const char *label    = sym_kind_label(sym->keyword);
-        char       *sym_id   = sym_qualified_id(sym);
-        const char *sym_name = sym->name   ? sym->name   : "";
-        char hover_text[512];
-        snprintf(hover_text, sizeof(hover_text),
-                 "**%s `%s`** \xe2\x80\x94 %s", label, sym_id, sym_name);
-        free(sym_id);
-
-        yyjson_mut_val *contents = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_str(doc, contents, "kind",  "markdown");
-        yyjson_mut_obj_add_strcpy(doc, contents, "value", hover_text);
-
-        yyjson_mut_val *hover = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_val(doc, hover, "contents", contents);
-        yyjson_mut_obj_add_val(doc, hover, "range",    range_json(doc, hover_link->source));
-        return make_response(doc, id, hover);
-    }
-
-keyword_hover:;
-    /* Fall back to keyword documentation */
-    ActiveKeyword ak = active_keyword_at(primary->parse->tok_spans,
-                                          primary->parse->num_tok_spans, pos);
+    /* TODO(hover): the previous design checked dep-link hover targets
+     * first.  With link resolution offline, fall through directly to
+     * keyword documentation. */
+    ActiveKeyword ak = active_keyword_at(d->parse->tok_spans,
+                                          d->parse->num_tok_spans, pos);
     if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     const char *doc_text = keyword_docs(ak.keyword);
@@ -1546,22 +1083,8 @@ keyword_hover:;
     return make_response(doc, id, hover);
 }
 
-/**
- * Handle `textDocument/signatureHelp`.
- *
- * Determines the active keyword context at the cursor and returns a
- * SignatureHelp object with the keyword's argument signature.  Returns
- * null when the cursor is not in a recognised keyword context.
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Request params containing `textDocument.uri` and
- *                `position`.
- * @return The JSON-RPC response.
- */
 static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id,
-                                              yyjson_val *params,
-                                              const WorkspaceSnapshot *snap) {
+                                              yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
@@ -1569,14 +1092,11 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
 
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
-
-    const DocSnapshot *primary = snapshot_primary(snap);
-    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-    ActiveContext ac = active_context(primary->parse->tok_spans,
-                                       primary->parse->num_tok_spans, pos);
+    ActiveContext ac = active_context(d->parse->tok_spans,
+                                       d->parse->num_tok_spans, pos);
     if (!ac.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_mut_val *sig = build_signature_help_json(doc, ac.keyword, ac.arg_count);
@@ -1585,9 +1105,6 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
     return make_response(doc, id, sig);
 }
 
-/** Format the document's next resultId as a heap-allocated decimal
- * string.  Caller must hold docs_mutex (the field is a plain
- * non-atomic uint64_t — read-modify-write). */
 static char *mint_sem_tokens_result_id(Document *d) {
     char buf[32];
     int n = snprintf(buf, sizeof(buf), "%" PRIu64,
@@ -1596,92 +1113,37 @@ static char *mint_sem_tokens_result_id(Document *d) {
     return strdup(buf);
 }
 
-/**
- * Handle `textDocument/semanticTokens/full`.
- *
- * Returns the full delta-encoded semantic token list for the document
- * together with a fresh resultId.  The data is cached on the Document
- * so a subsequent `semanticTokens/full/delta` request can diff against
- * exactly what was sent.
- *
- * Computes from the snapshot's parse (so the response reflects
- * arrival-order state, not whatever a racing notification has done since).
- * Takes docs_mutex only for the brief cache read / mint / write.
- */
 static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
-                                                    yyjson_val *params,
-                                                    const WorkspaceSnapshot *snap) {
+                                                    yyjson_val *params, Document *d) {
     (void)params;
-    const DocSnapshot *primary = snapshot_primary(snap);
-    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     uint32_t *buf = NULL;
     size_t    count = 0;
-    compute_semantic_tokens_data(primary->parse->tok_spans,
-                                  primary->parse->num_tok_spans,
-                                  primary->parse->num_sem_entries,
+    compute_semantic_tokens_data(d->parse->tok_spans,
+                                  d->parse->num_tok_spans,
+                                  d->parse->num_sem_entries,
                                   &buf, &count);
-
-    pthread_mutex_lock(&docs_mutex);
-    Document *d = doc_find(primary->uri);
-    if (!d) {
-        /* Document was closed/freed between snapshot and now.  Return
-         * the computed full data with a fixed resultId; no cache write
-         * needed because there's no document to cache against. */
-        pthread_mutex_unlock(&docs_mutex);
-        char *result_id = strdup("0");
-        yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
-        free(buf);
-        free(result_id);
-        return make_response(doc, id, result);
-    }
 
     char *result_id = mint_sem_tokens_result_id(d);
     yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
-    /* Transfer ownership of buf and result_id to the document cache. */
     semantic_token_result_replace(&d->sem_tokens, buf, count, result_id);
-    pthread_mutex_unlock(&docs_mutex);
     return make_response(doc, id, result);
 }
 
-/**
- * Handle `textDocument/semanticTokens/full/delta`.
- *
- * If the document has a cached previous response and its resultId
- * matches the request's @c previousResultId, the response is a
- * `SemanticTokensDelta` describing the minimal patch from the cached
- * data to the current data.  Otherwise the response is a full
- * `SemanticTokens` (the spec-mandated fallback when the server cannot
- * compute a diff).  In either case the cache is replaced with the
- * newly computed data and a fresh resultId.
- */
 static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yyjson_val *id,
-                                                          yyjson_val *params,
-                                                          const WorkspaceSnapshot *snap) {
+                                                          yyjson_val *params, Document *d) {
     const char *previous_result_id = params ? json_str(params, "previousResultId") : NULL;
-    const DocSnapshot *primary = snapshot_primary(snap);
-    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     uint32_t *new_buf = NULL;
     size_t    new_count = 0;
-    compute_semantic_tokens_data(primary->parse->tok_spans,
-                                  primary->parse->num_tok_spans,
-                                  primary->parse->num_sem_entries,
+    compute_semantic_tokens_data(d->parse->tok_spans,
+                                  d->parse->num_tok_spans,
+                                  d->parse->num_sem_entries,
                                   &new_buf, &new_count);
 
-    pthread_mutex_lock(&docs_mutex);
-    Document *d = doc_find(primary->uri);
-    if (!d) {
-        pthread_mutex_unlock(&docs_mutex);
-        char *result_id = strdup("0");
-        yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, new_buf, new_count, result_id);
-        free(new_buf);
-        free(result_id);
-        return make_response(doc, id, result);
-    }
-
     char *result_id = mint_sem_tokens_result_id(d);
-
     yyjson_mut_val *result;
     if (d->sem_tokens.data && d->sem_tokens.result_id && previous_result_id &&
         strcmp(d->sem_tokens.result_id, previous_result_id) == 0) {
@@ -1690,198 +1152,126 @@ static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yy
                                                    new_buf, new_count,
                                                    result_id);
     } else {
-        /* Fallback: client and server are out of sync — send a full set. */
         result = build_semantic_tokens_json_from_buf(doc, new_buf, new_count, result_id);
     }
 
     semantic_token_result_replace(&d->sem_tokens, new_buf, new_count, result_id);
-    pthread_mutex_unlock(&docs_mutex);
     return make_response(doc, id, result);
 }
 
-/**
- * Handle `textDocument/references`.
- *
- * Returns all locations that reference the symbol under the cursor, using
- * the precomputed def_links[] and doc_symbols[] from the parsed document.
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Request params containing `textDocument.uri` and
- *                `position`.
- * @return The JSON-RPC response.
- */
 static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params,
-                                          const WorkspaceSnapshot *snap) {
+                                          yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
-
-    const DocSnapshot *primary = snapshot_primary(snap);
-    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_references_json(doc,
-                                                    primary->uri,
-                                                    primary->parse->tok_spans,
-                                                    primary->parse->num_tok_spans,
+                                                    d->uri,
+                                                    d->parse->tok_spans,
+                                                    d->parse->num_tok_spans,
                                                     pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
 }
 
-/**
- * Handle `textDocument/documentHighlight`.
- *
- * Returns all occurrences of the symbol under the cursor within the same
- * document, using def_links[], doc_symbols[], and tok_spans[].
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Request params containing `textDocument.uri` and
- *                `position`.
- * @return The JSON-RPC response.
- */
 static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
                                                   yyjson_val *id,
-                                                  yyjson_val *params,
-                                                  const WorkspaceSnapshot *snap) {
+                                                  yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
-    const DocSnapshot *primary = snapshot_primary(snap);
-    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
+    int n = 0;
+    tj_node **top = flatten_top_nodes(d, &n);
 
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_document_highlight_json(doc,
-                                                            primary->parse->doc_symbols,
-                                                            primary->parse->num_doc_symbols,
-                                                            primary->parse->tok_spans,
-                                                            primary->parse->num_tok_spans,
+                                                            top, n,
+                                                            d->parse->tok_spans,
+                                                            d->parse->num_tok_spans,
                                                             pos);
+    free(top);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
 }
 
-/**
- * Handle `textDocument/definition`.
- *
- * Returns the definition location for the dep-ref expression under the
- * cursor, looked up from the precomputed def_links[] in the parsed
- * document.
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Request params containing `textDocument.uri` and
- *                `position`.
- * @return The JSON-RPC response.
- */
 static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params,
-                                          const WorkspaceSnapshot *snap) {
+                                          yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
-    const DocSnapshot *primary = snapshot_primary(snap);
-    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
-
-    LspPos pos         = json_to_pos(pos_obj);
+    LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_definition_json(doc,
-                                                    primary->parse->tok_spans,
-                                                    primary->parse->num_tok_spans,
-                                                    pos, primary->uri);
+                                                    d->parse->tok_spans,
+                                                    d->parse->num_tok_spans,
+                                                    pos, d->uri);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
 }
 
-/**
- * Handle `textDocument/completion`.
- *
- * Returns a completion list appropriate for the cursor context, including
- * keyword suggestions and task-identifier completions from the symbol
- * tree.
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Request params containing `textDocument.uri` and
- *                `position`.
- * @return The JSON-RPC response.
- */
 static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params,
-                                          const WorkspaceSnapshot *snap) {
+                                          yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
     if (!tdp) tdp = params;
 
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->parse) return make_response(doc, id, yyjson_mut_null(doc));
 
-    const DocSnapshot *primary = snapshot_primary(snap);
-    if (!primary || !primary->parse) return make_response(doc, id, yyjson_mut_null(doc));
-
-    /* Gather symbol pools from other editor-managed documents.  disk_only
-     * documents (workspace scan + include follows) are excluded: the
-     * workspace may contain large unrelated .tjp files, and recursing
-     * their symbol trees would produce enormous completion responses. */
-    DocSymbol *const *extra_pools[MAX_DOCS];
-    int               extra_counts[MAX_DOCS];
-    int               num_extra = 0;
-    for (size_t i = 0; i < snap->count && num_extra < MAX_DOCS; i++) {
-        const DocSnapshot *s = &snap->docs[i];
-        if (s == primary) continue;
-        if (s->disk_only) continue;
-        if (!s->parse) continue;
-        extra_pools[num_extra]  = s->parse->doc_symbols;
-        extra_counts[num_extra] = s->parse->num_doc_symbols;
+    /* Gather top-level nodes of other editor-managed Documents as extra
+     * pools.  TODO(completion): once the global tj_node tree is built we
+     * can drop the per-doc walk here in favour of the global view. */
+    tj_node *const *extra_pools[MAX_DOCS];
+    int             extra_counts[MAX_DOCS];
+    tj_node       **extra_alloc[MAX_DOCS] = {0};
+    int             num_extra = 0;
+    for (int i = 0; i < MAX_DOCS && num_extra < MAX_DOCS; i++) {
+        if (!docs[i].in_use) continue;
+        if (&docs[i] == d) continue;
+        if (docs[i].disk_only) continue;
+        int n = 0;
+        tj_node **top = flatten_top_nodes(&docs[i], &n);
+        if (!top) continue;
+        extra_alloc[num_extra]  = top;
+        extra_pools[num_extra]  = top;
+        extra_counts[num_extra] = n;
         num_extra++;
     }
 
+    int self_n = 0;
+    tj_node **self_top = flatten_top_nodes(d, &self_n);
+
     LspPos pos             = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_completions_json(doc,
-                                                     primary->parse->tok_spans,
-                                                     primary->parse->num_tok_spans,
+                                                     d->parse->tok_spans,
+                                                     d->parse->num_tok_spans,
                                                      pos,
-                                                     primary->parse->doc_symbols,
-                                                     primary->parse->num_doc_symbols,
+                                                     self_top, self_n,
                                                      extra_pools,
                                                      extra_counts,
                                                      num_extra,
-                                                     primary->text);
+                                                     d->text);
+    free(self_top);
+    for (int i = 0; i < num_extra; i++) free(extra_alloc[i]);
     return make_response(doc, id, result);
 }
 
-/**
- * Handle `workspace/symbol`.
- *
- * Returns all task symbols across all open documents whose names contain
- * the request's query string.
- *
- * @param doc     Destination mutable JSON document.
- * @param id      Request id to echo back.
- * @param params  Request params containing `query`.
- * @return The JSON-RPC response.
- */
 static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                                yyjson_val *params,
-                                                const WorkspaceSnapshot *snap) {
+                                                yyjson_val *params) {
     const char *query = params ? json_str(params, "query") : NULL;
     if (!query) query = "";
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    if (snap) {
-        for (size_t i = 0; i < snap->count; i++) {
-            const DocSnapshot *s = &snap->docs[i];
-            if (!s->parse) continue;
-            collect_workspace_symbols(doc, query,
-                                      s->parse->doc_symbols,
-                                      s->parse->num_doc_symbols,
-                                      s->uri, arr);
-        }
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use || !docs[i].parse) continue;
+        int n = 0;
+        tj_node **top = flatten_top_nodes(&docs[i], &n);
+        if (!top) continue;
+        collect_workspace_symbols(doc, query, top, n, docs[i].uri, arr);
+        free(top);
     }
     return make_response(doc, id, arr);
 }
@@ -1890,12 +1280,6 @@ static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *
    Main dispatch
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Return 1 when @p method names an LSP notification — a fire-and-forget
- * message with no `id` — that must run inline on the coordinator so
- * subsequent queries observe its state change.  0 for LSP requests
- * (initialize / shutdown / hover / completion / ...).  NULL or unknown
- * methods are treated as queries so that the query worker pool's
- * null-response fallback fires. */
 static int is_notification_method(const char *method) {
     if (!method) return 0;
     return strcmp(method, "initialized") == 0
@@ -1906,8 +1290,6 @@ static int is_notification_method(const char *method) {
         || strcmp(method, "workspace/didRenameFiles") == 0;
 }
 
-/* Serialize a response yyjson tree to stdout.  After serialization the
- * resulting text is independent of every yyjson value that built it. */
 static void send_response(yyjson_mut_doc *out_doc, yyjson_mut_val *resp) {
     yyjson_mut_doc_set_root(out_doc, resp);
     char *text = yyjson_mut_write(out_doc, 0, NULL);
@@ -1923,11 +1305,6 @@ void server_dispatch_notification(Job *job) {
     yyjson_val *params  = yyjson_obj_get(root, "params");
     const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
 
-    /* Hold docs_mutex for the entire notification handler.  The
-     * coordinator dispatches notifications inline (one at a time), so
-     * no other writer can interleave.  Query workers only contend
-     * during their brief snapshot capture windows, so even long
-     * notification handlers don't permanently block them. */
     pthread_mutex_lock(&docs_mutex);
 
     if (strcmp(m, "initialized") == 0) {
@@ -1943,8 +1320,6 @@ void server_dispatch_notification(Job *job) {
     } else if (strcmp(m, "workspace/didRenameFiles") == 0) {
         handle_did_rename_files(params);
     }
-    /* Unknown notifications are silently ignored (per LSP spec: a
-     * server MAY ignore notifications it doesn't recognise). */
 
     pthread_mutex_unlock(&docs_mutex);
 }
@@ -1971,42 +1346,57 @@ void server_dispatch_query(Job *job) {
     yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *resp = NULL;
 
-    /* The snapshot was captured by the coordinator before this Job
-     * landed in the query pool — it reflects state in arrival order,
-     * so the result is automatically correct relative to LSP message
-     * ordering even when later notifications race ahead during compute. */
+    /* Locate the primary Document (if any) so handlers receive a stable
+     * pointer.  Held docs_mutex covers both lookup and handler execution. */
+    pthread_mutex_lock(&docs_mutex);
+
+    const char *primary_uri = NULL;
+    if (params) {
+        yyjson_val *td = yyjson_obj_get(params, "textDocument");
+        if (td) primary_uri = json_str(td, "uri");
+        if (!primary_uri) {
+            yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
+            if (tdp) {
+                td = yyjson_obj_get(tdp, "textDocument");
+                if (td) primary_uri = json_str(td, "uri");
+            }
+        }
+    }
+    Document *primary = primary_uri ? doc_find(primary_uri) : NULL;
+
     if (strcmp(m, "initialize") == 0) {
         resp = handle_initialize(out_doc, id_item, params);
     } else if (strcmp(m, "shutdown") == 0) {
         resp = handle_shutdown(out_doc, id_item);
     } else if (strcmp(m, "textDocument/documentSymbol") == 0) {
-        resp = handle_document_symbol(out_doc, id_item, params, &job->snapshot);
+        resp = handle_document_symbol(out_doc, id_item, params, primary);
     } else if (strcmp(m, "textDocument/foldingRange") == 0) {
-        resp = handle_folding_range(out_doc, id_item, params, &job->snapshot);
+        resp = handle_folding_range(out_doc, id_item, params, primary);
     } else if (strcmp(m, "textDocument/codeLens") == 0) {
-        resp = handle_code_lens(out_doc, id_item, params, &job->snapshot);
+        resp = handle_code_lens(out_doc, id_item, params, primary);
     } else if (strcmp(m, "textDocument/hover") == 0) {
-        resp = handle_hover(out_doc, id_item, params, &job->snapshot);
+        resp = handle_hover(out_doc, id_item, params, primary);
     } else if (strcmp(m, "textDocument/signatureHelp") == 0) {
-        resp = handle_signature_help(out_doc, id_item, params, &job->snapshot);
+        resp = handle_signature_help(out_doc, id_item, params, primary);
     } else if (strcmp(m, "textDocument/references") == 0) {
-        resp = handle_references(out_doc, id_item, params, &job->snapshot);
+        resp = handle_references(out_doc, id_item, params, primary);
     } else if (strcmp(m, "textDocument/documentHighlight") == 0) {
-        resp = handle_document_highlight(out_doc, id_item, params, &job->snapshot);
+        resp = handle_document_highlight(out_doc, id_item, params, primary);
     } else if (strcmp(m, "textDocument/definition") == 0) {
-        resp = handle_definition(out_doc, id_item, params, &job->snapshot);
+        resp = handle_definition(out_doc, id_item, params, primary);
     } else if (strcmp(m, "textDocument/completion") == 0) {
-        resp = handle_completion(out_doc, id_item, params, &job->snapshot);
+        resp = handle_completion(out_doc, id_item, params, primary);
     } else if (strcmp(m, "workspace/symbol") == 0) {
-        resp = handle_workspace_symbol(out_doc, id_item, params, &job->snapshot);
+        resp = handle_workspace_symbol(out_doc, id_item, params);
     } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
-        resp = handle_semantic_tokens_full(out_doc, id_item, params, &job->snapshot);
+        resp = handle_semantic_tokens_full(out_doc, id_item, params, primary);
     } else if (strcmp(m, "textDocument/semanticTokens/full/delta") == 0) {
-        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params, &job->snapshot);
+        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params, primary);
     } else if (id_item) {
-        /* Unknown request — null result */
         resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
     }
+
+    pthread_mutex_unlock(&docs_mutex);
 
     if (resp) send_response(out_doc, resp);
     yyjson_mut_doc_free(out_doc);
@@ -2026,11 +1416,6 @@ void server_process(const char *json_text) {
         exit(0);
     }
 
-    /* Cancellation is handled inline in the reader thread.
-     * threadpool_cancel_by_id walks both queues and marks any matching
-     * Job; the worker checks is_cancelled before dispatching the
-     * handler.  A cancel that arrives after the worker has popped is
-     * a sub-microsecond no-op window. */
     if (strcmp(m, "$/cancelRequest") == 0) {
         yyjson_val *p      = yyjson_obj_get(root, "params");
         yyjson_val *id_val = p ? yyjson_obj_get(p, "id") : NULL;
@@ -2043,12 +1428,8 @@ void server_process(const char *json_text) {
 
     Job *job = calloc(1, sizeof(Job));
     if (!job) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    job->request_doc = in_doc; /* ownership transferred */
+    job->request_doc = in_doc;
 
-    /* Capture the JSON-RPC id as a first-class Job field so the Job is
-     * addressable by id (currently used by threadpool_cancel_by_id).
-     * Same int-only policy as elsewhere — string/null ids leave has_id=0
-     * and are therefore not cancellable by id. */
     yyjson_val *id_item = yyjson_obj_get(root, "id");
     if (id_item && yyjson_is_int(id_item)) {
         job->has_id = 1;
@@ -2062,4 +1443,8 @@ void server_process(const char *json_text) {
 void server_init() {
     for (int i = 0; i < MAX_DOCS; i++)
         docs[i].in_use = 0;
+    memset(&g_task_tree,     0, sizeof(g_task_tree));
+    memset(&g_account_tree,  0, sizeof(g_account_tree));
+    memset(&g_report_tree,   0, sizeof(g_report_tree));
+    memset(&g_resource_tree, 0, sizeof(g_resource_tree));
 }

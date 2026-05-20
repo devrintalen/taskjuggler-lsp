@@ -23,38 +23,25 @@
 #include "parser.h"
 #include <yyjson.h>
 
+/*
+ * TODO(definition): textDocument/definition was driven by per-symbol
+ * DefinitionLinks computed during dep-ref resolution.  Both have been
+ * removed for the tj_node refactor.  build_definition_json() is
+ * preserved as a stub that always reports "no definition" so the
+ * dispatch path keeps compiling; restore real lookup once the global
+ * task tree and dependency resolution are reinstated.
+ */
+
 /**
- * Build a Location JSON object for textDocument/definition.
+ * Stub: always returns NULL so the LSP response becomes JSON null.
  *
- * Locates a DefinitionLink whose source range contains @p cursor via
- * symbol_at() + parent-chain walk.  When found, returns a JSON object
- * of the form `{ "uri": "<uri>", "range": <target selection_range> }`.
- *
- * Values are allocated in @p doc; caller owns @p doc.
- *
- * @param doc         Destination mutable JSON document.
- * @param tokens      Token spans of the current document.
- * @param num_tokens  Length of @p tokens.
- * @param cursor      Cursor position.
- * @param uri         URI placed into the response's `uri` field when the
- *                    target lives in the same document as the source.
- * @return The Location JSON object, or NULL when no definition link
- *         covers @p cursor.
+ * @param doc         Destination mutable JSON document (unused).
+ * @param tokens      Token spans of the current document (unused).
+ * @param num_tokens  Length of @p tokens (unused).
+ * @param cursor      Cursor position (unused).
+ * @param uri         URI placed into the response (unused).
+ * @return Always NULL.
  */
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
                                        const TokenSpan *tokens, int num_tokens,
                                        LspPos cursor, const char *uri);
-
-/**
- * Find a DefinitionLink whose source range contains the cursor.
- *
- * Uses symbol_at() to locate the innermost enclosing DocSymbol and scans its
- * def_links, walking parents on miss.
- *
- * @param tokens      Token spans of the current document.
- * @param num_tokens  Length of @p tokens.
- * @param cursor      Cursor position.
- * @return Pointer to the matching link, or NULL when none covers the cursor.
- */
-const DefinitionLink *find_def_link_at(const TokenSpan *tokens, int num_tokens,
-                                       LspPos cursor);

@@ -24,14 +24,14 @@
 %code requires {
 #include "parser.h"
 
-/* Dynamic array of Symbol pointers, used for body children. */
-typedef struct { DocSymbol **arr; int n, cap; } SymArr;
+/* Dynamic array of tj_node pointers, used for body children. */
+typedef struct { tj_node **arr; int n, cap; } SymArr;
 
 /* Return type for opt_body and body_items rules. */
 typedef struct { SymArr syms; LspPos end; } BodyResult;
 
-/* Return type for item rule: either a DocSymbol pointer or nothing. */
-typedef struct { DocSymbol *sym; int has_sym; } ItemResult;
+/* Return type for item rule: either a tj_node pointer or nothing. */
+typedef struct { tj_node *sym; int has_sym; } ItemResult;
 
 /* Return type for dep_path and task_ref rules. */
 typedef struct {
@@ -43,37 +43,62 @@ typedef struct {
 }
 
 %{
-#include "parser.h"           /* Token, DocSymbol, ParseResult, LspRange, etc. */
+#include "parser.h"           /* Token, tj_node, ParseOutput, LspRange, etc. */
 #include "grammar.tab.h"      /* TK_* / KW_* constants, YYSTYPE */
 #include "document_symbol.h"  /* symbol_kind_for() */
-#include "diagnostics.h"      /* DIAG_ERROR, push_diagnostic() */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* Globals defined in parser.c, shared with lexer.l */
-extern ParseResult *g_result;
+extern ParseOutput *g_output;
 
 int  yylex(void);
 void yyerror(const char *msg);
 
 /* ── Helpers (declared/defined in parser.c) ─────────────────────────────── */
 
-extern void push_doc_symbol    (ParseResult *r, DocSymbol *s);
-extern void push_included_file (ParseResult *r, const char *quoted_text);
-extern void push_diagnostic(ParseResult *r, LspRange range, int severity,
-                             const char *msg);
-extern void push_dep_ref   (int bang_count, const char *path,
-                             DocSymbol *owner, LspPos start, LspPos end);
+extern void push_included_file(ParseOutput *po, const char *quoted_text);
+
+/* ── Per-kind tree routing ──────────────────────────────────────────────── *
+ *
+ * Map a declaration keyword to the per-kind synthetic root on g_output it
+ * belongs under.  Returns NULL for keywords that should not enter any
+ * tree (e.g. KW_PROJECT, which is stored on g_output->project directly).
+ *
+ * Tasks, accounts, resources/shifts are obvious.  The "reports" bucket
+ * absorbs every other top-level declaration that produces a tj_node:
+ * all the report kinds plus navigator/scenario/timesheet/statussheet/
+ * tagfile/journalentry.  This keeps the four-tree model uniform while
+ * still surfacing those declarations through the per-document state.
+ */
+static tj_node *tree_for_keyword(int kw) {
+    if (!g_output) return NULL;
+    switch (kw) {
+    case KW_TASK:
+        return g_output->tasks;
+    case KW_ACCOUNT:
+        return g_output->accounts;
+    case KW_RESOURCE:
+    case KW_SHIFT:
+        return g_output->resources;
+    case KW_PROJECT:
+        return NULL; /* stored on g_output->project, not in any tree */
+    default:
+        /* Reports / navigator / scenario / timesheet / statussheet / tagfile /
+         * journalentry — every other top-level declaration kind. */
+        return g_output->reports;
+    }
+}
 
 /* ── Current-symbol stack ───────────────────────────────────────────────── *
- * Tracks the current DocSymbol being parsed so that dep refs can capture
- * the owning symbol directly.  Pushed when entering a task body, popped
- * on exit.                                                                  */
-static DocSymbol *g_sym_stack[128];
-static int        g_sym_stack_n = 0;
+ * Tracks the current task being parsed so that the KW_START / KW_END
+ * date-attribute actions can store the parsed date on the right node.
+ * Pushed when entering a task body, popped on exit.                        */
+static tj_node *g_sym_stack[128];
+static int      g_sym_stack_n = 0;
 
-static void sym_stack_push(DocSymbol *s) {
+static void sym_stack_push(tj_node *s) {
     if (g_sym_stack_n < 128)
         g_sym_stack[g_sym_stack_n++] = s;
 }
@@ -83,42 +108,37 @@ static void sym_stack_pop(void) {
         g_sym_stack_n--;
 }
 
-static DocSymbol *sym_stack_top(void) {
+static tj_node *sym_stack_top(void) {
     return g_sym_stack_n > 0 ? g_sym_stack[g_sym_stack_n - 1] : NULL;
 }
 
-/* ── DocSymbol array helper ─────────────────────────────────────────────────── */
+/* ── tj_node array helper ──────────────────────────────────────────────── */
 
-static void symarr_push(SymArr *a, DocSymbol *s) {
+static void symarr_push(SymArr *a, tj_node *s) {
     if (a->n >= a->cap) {
         a->cap = a->cap ? a->cap * 2 : 4;
-        DocSymbol **tmp = realloc(a->arr, (size_t)a->cap * sizeof(DocSymbol *));
+        tj_node **tmp = realloc(a->arr, (size_t)a->cap * sizeof(tj_node *));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         a->arr = tmp;
     }
     a->arr[a->n++] = s;
 }
 
-/* ── Build a DocSymbol from the components of a symbol_decl rule ───────────── */
+/* ── Build a tj_node from the components of a symbol_decl rule ───────────── */
 
-/* Allocate a DocSymbol and populate it with header fields (kind, id, name,
- * selection_range).  Body fields (range.end, children) are NOT set here —
- * they are filled in later because the symbol must exist before its body
- * is parsed (so dep refs can capture the owner pointer).
- *
- * Returns a heap-allocated DocSymbol whose address is stable for the
- * lifetime of the parse.  Ownership transfers to the caller (ultimately
- * to ParseResult via push_doc_symbol or SymArr). */
-static DocSymbol *alloc_doc_symbol(Token kw, Token id, Token name) {
-    DocSymbol *s = calloc(1, sizeof(DocSymbol));
+/* Allocate a tj_node and populate it with header fields (kind, id, name,
+ * selection_range).  Body fields (range.end, children) are filled in
+ * later by finish_tj_node().                                              */
+static tj_node *alloc_tj_node(Token kw, Token id, Token name) {
+    tj_node *s = calloc(1, sizeof(tj_node));
     if (!s) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     s->keyword = kw.kind;
 
     if (id.text) {
-        s->id             = id.text;   /* take ownership */
+        s->id              = id.text;   /* take ownership */
         s->selection_range = (LspRange){ id.start, id.end };
     } else {
-        s->id             = strdup(kw.text);
+        s->id              = strdup(kw.text);
         s->selection_range = (LspRange){ kw.start, kw.end };
     }
 
@@ -130,16 +150,27 @@ static DocSymbol *alloc_doc_symbol(Token kw, Token id, Token name) {
     return s;
 }
 
-/* Finalize a DocSymbol after its body has been parsed. */
-static void finish_doc_symbol(DocSymbol *s, Token kw, BodyResult body) {
+/* Finalize a tj_node after its body has been parsed. */
+static void finish_tj_node(tj_node *s, Token kw, BodyResult body) {
     LspPos range_end = body.end;
     if (range_end.line == 0 && range_end.character == 0)
         range_end = kw.end;
     s->range.end = range_end;
 
+    /* Take ownership of the body's children, wiring up parent pointers. */
     s->children     = body.syms.arr;
     s->num_children = body.syms.n;
     s->children_cap = body.syms.cap;
+    for (int i = 0; i < s->num_children; i++)
+        s->children[i]->parent_node = s;
+}
+
+/* Free a transient body's collected children.  Used by attribute rules
+ * whose opt_body content is discarded (e.g. dailymax dur_val opt_body). */
+static void discard_body(BodyResult *b) {
+    for (int i = 0; i < b->syms.n; i++)
+        tj_node_free(b->syms.arr[i]);
+    free(b->syms.arr);
 }
 %}
 
@@ -147,7 +178,7 @@ static void finish_doc_symbol(DocSymbol *s, Token kw, BodyResult body) {
 
 %union {
     Token      tok;   /* single token (kind / start / end / text) */
-    DocSymbol    *sym;   /* heap-allocated symbol */
+    tj_node   *sym;   /* heap-allocated tj_node */
     BodyResult body;  /* body: children + closing-brace position */
     ItemResult item;  /* item: optional symbol */
     TaskRef    tref;  /* dep path + bang count */
@@ -299,8 +330,24 @@ items
     : /* empty */
     | items item
         {
-            if ($2.has_sym)
-                push_doc_symbol(g_result, $2.sym);
+            if ($2.has_sym) {
+                tj_node *node = $2.sym;
+                if (node->keyword == KW_PROJECT) {
+                    /* At most one project block per file.  If we somehow
+                     * see a second one (malformed input), drop it on the
+                     * floor rather than leak. */
+                    if (g_output && !g_output->project)
+                        g_output->project = node;
+                    else
+                        tj_node_free(node);
+                } else {
+                    tj_node *tree = tree_for_keyword(node->keyword);
+                    if (tree)
+                        tj_node_append_child(tree, node);
+                    else
+                        tj_node_free(node);
+                }
+            }
         }
     ;
 
@@ -324,7 +371,7 @@ items
  *
  * ────────────────────────────────────────────────────────────────────────── */
 item
-    /* ── DocSymbol-introducing declarations ── */
+    /* ── tj_node-introducing declarations ── */
     : symbol_decl
         { $$.sym = $1; $$.has_sym = 1; }
     | report_decl
@@ -352,7 +399,7 @@ item
     /* Syntax: start <date>                                                   */
     | KW_START TK_DATE
         {
-            DocSymbol *task = sym_stack_top();
+            tj_node *task = sym_stack_top();
             if (task && task->keyword == KW_TASK) {
                 time_t parsed;
                 if (parse_tjp_date($2.text, &parsed)) {
@@ -365,7 +412,7 @@ item
     /* Syntax: end <date>                                                     */
     | KW_END TK_DATE
         {
-            DocSymbol *task = sym_stack_top();
+            tj_node *task = sym_stack_top();
             if (task && task->keyword == KW_TASK) {
                 time_t parsed;
                 if (parse_tjp_date($2.text, &parsed)) {
@@ -437,42 +484,42 @@ item
      */
     | KW_DAILYMAX dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) { doc_symbol_free($3.syms.arr[i]); free($3.syms.arr[i]); }
+          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: dailymin <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_DAILYMIN dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) { doc_symbol_free($3.syms.arr[i]); free($3.syms.arr[i]); }
+          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: weeklymax <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_WEEKLYMAX dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) { doc_symbol_free($3.syms.arr[i]); free($3.syms.arr[i]); }
+          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: weeklymin <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_WEEKLYMIN dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) { doc_symbol_free($3.syms.arr[i]); free($3.syms.arr[i]); }
+          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: monthlymax <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_MONTHLYMAX dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) { doc_symbol_free($3.syms.arr[i]); free($3.syms.arr[i]); }
+          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: monthlymin <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_MONTHLYMIN dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) { doc_symbol_free($3.syms.arr[i]); free($3.syms.arr[i]); }
+          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: maximum <value> (min | h | d | w | m | y) [{ <attributes> }]  */
     | KW_MAXIMUM dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) { doc_symbol_free($3.syms.arr[i]); free($3.syms.arr[i]); }
+          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: minimum <value> (min | h | d | w | m | y) [{ <attributes> }]  */
     | KW_MINIMUM dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) { doc_symbol_free($3.syms.arr[i]); free($3.syms.arr[i]); }
+          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
 
     /* ── Numeric attributes ── */
@@ -765,7 +812,7 @@ item
      * Body attributes: overtime.booking, sloppy.booking                     */
     | KW_BOOKING TK_IDENT booking_interval_list opt_body
         { token_free(&$1); token_free(&$2);
-          for (int i = 0; i < $4.syms.n; i++) { doc_symbol_free($4.syms.arr[i]); free($4.syms.arr[i]); }
+          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: shift <shift> [<interval2>] [, <shift> [<interval2>] ...]
      * (attribute form inside resource/task; differs from the shift declaration) */
@@ -778,12 +825,12 @@ item
     /* Syntax: limits [{ <attributes> }]                                     */
     | KW_LIMITS opt_body
         { token_free(&$1);
-          for (int i = 0; i < $2.syms.n; i++) { doc_symbol_free($2.syms.arr[i]); free($2.syms.arr[i]); }
+          for (int i = 0; i < $2.syms.n; i++) tj_node_free($2.syms.arr[i]);
           free($2.syms.arr); $$.has_sym = 0; }
     /* Syntax: projection [{ <attributes> }]                                  */
     | KW_PROJECTION opt_body
         { token_free(&$1);
-          for (int i = 0; i < $2.syms.n; i++) { doc_symbol_free($2.syms.arr[i]); free($2.syms.arr[i]); }
+          for (int i = 0; i < $2.syms.n; i++) tj_node_free($2.syms.arr[i]);
           free($2.syms.arr); $$.has_sym = 0; }
 
     /* ── Account/charge attributes ── */
@@ -906,13 +953,13 @@ item
      * (inside timesheet task or statussheet)                                */
     | KW_STATUS TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) { doc_symbol_free($4.syms.arr[i]); free($4.syms.arr[i]); }
+          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: newtask <task> <STRING> { <attributes> }
      * (inside timesheet)                                                    */
     | KW_NEWTASK TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) { doc_symbol_free($4.syms.arr[i]); free($4.syms.arr[i]); }
+          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
 
     /* ── Format specifiers ── */
@@ -938,27 +985,27 @@ item
      * (inside 'extend (task|resource) { }' body)                            */
     | KW_DATE TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) { doc_symbol_free($4.syms.arr[i]); free($4.syms.arr[i]); }
+          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: number <id> <name> [{ <attributes> }]                          */
     | KW_NUMBER TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) { doc_symbol_free($4.syms.arr[i]); free($4.syms.arr[i]); }
+          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: reference <id> <name> [{ <attributes> }]                       */
     | KW_REFERENCE TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) { doc_symbol_free($4.syms.arr[i]); free($4.syms.arr[i]); }
+          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: richtext <id> <name> [{ <attributes> }]                        */
     | KW_RICHTEXT TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) { doc_symbol_free($4.syms.arr[i]); free($4.syms.arr[i]); }
+          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: text <id> <name> [{ <attributes> }]                            */
     | KW_TEXT TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) { doc_symbol_free($4.syms.arr[i]); free($4.syms.arr[i]); }
+          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
 
     /* ── Tokens used only in logical expressions ─────────────────────────── *
@@ -1003,10 +1050,7 @@ item
      * Also handles any future keywords not yet in the KW_* token set.      */
     | TK_IDENT opt_args opt_body
         {
-            for (int i = 0; i < $3.syms.n; i++) {
-                doc_symbol_free($3.syms.arr[i]); free($3.syms.arr[i]);
-            }
-            free($3.syms.arr);
+            discard_body(&$3);
             token_free(&$1);
             $$.has_sym = 0;
         }
@@ -1028,23 +1072,23 @@ item
  * extract the symbol even if the file is syntactically incomplete).        */
 symbol_decl
     : KW_PROJECT opt_id opt_name
-      { $<sym>$ = alloc_doc_symbol($1, $2, $3); }
+      { $<sym>$ = alloc_tj_node($1, $2, $3); }
       opt_version interval2 opt_body
         {
             $$ = $<sym>4;
-            finish_doc_symbol($$, $1, $7);
+            finish_tj_node($$, $1, $7);
             token_free(&$1);
             if ($5.text) token_free(&$5); /* discard version string */
             /* TODO: store interval $6 as the project time range */
         }
     | sym_kw opt_id opt_name
-      { $<sym>$ = alloc_doc_symbol($1, $2, $3);
+      { $<sym>$ = alloc_tj_node($1, $2, $3);
         if ($1.kind == KW_TASK) sym_stack_push($<sym>$); }
       opt_body
         {
             if ($1.kind == KW_TASK) sym_stack_pop();
             $$ = $<sym>4;
-            finish_doc_symbol($$, $1, $5);
+            finish_tj_node($$, $1, $5);
             token_free(&$1);
         }
     ;
@@ -1077,23 +1121,23 @@ sym_kw
 report_decl
     : report_kw opt_id opt_name opt_body
         {
-            $$ = alloc_doc_symbol($1, $2, $3);
-            finish_doc_symbol($$, $1, $4);
+            $$ = alloc_tj_node($1, $2, $3);
+            finish_tj_node($$, $1, $4);
             token_free(&$1);
         }
     | KW_ICALREPORT string_val opt_name opt_body
         {
             Token no_id = {0};
-            $$ = alloc_doc_symbol($1, no_id, $2);
-            finish_doc_symbol($$, $1, $4);
+            $$ = alloc_tj_node($1, no_id, $2);
+            finish_tj_node($$, $1, $4);
             token_free(&$1);
             if ($3.text) token_free(&$3); /* second string (unused as display name) */
         }
     | KW_NIKUREPORT string_val opt_name opt_body
         {
             Token no_id = {0};
-            $$ = alloc_doc_symbol($1, no_id, $2);
-            finish_doc_symbol($$, $1, $4);
+            $$ = alloc_tj_node($1, no_id, $2);
+            finish_tj_node($$, $1, $4);
             token_free(&$1);
             if ($3.text) token_free(&$3);
         }
@@ -1117,8 +1161,8 @@ navigator_decl
     : KW_NAVIGATOR TK_IDENT opt_body
         {
             Token no_name = {0};
-            $$ = alloc_doc_symbol($1, $2, no_name);
-            finish_doc_symbol($$, $1, $3);
+            $$ = alloc_tj_node($1, $2, no_name);
+            finish_tj_node($$, $1, $3);
             token_free(&$1);
         }
     ;
@@ -1130,8 +1174,8 @@ navigator_decl
 scenario_decl
     : KW_SCENARIO TK_IDENT opt_name opt_body
         {
-            $$ = alloc_doc_symbol($1, $2, $3);
-            finish_doc_symbol($$, $1, $4);
+            $$ = alloc_tj_node($1, $2, $3);
+            finish_tj_node($$, $1, $4);
             token_free(&$1);
         }
     ;
@@ -1144,8 +1188,8 @@ timesheet_decl
     : KW_TIMESHEET TK_IDENT interval3 opt_body
         {
             Token no_name = {0};
-            $$ = alloc_doc_symbol($1, $2, no_name);
-            finish_doc_symbol($$, $1, $4);
+            $$ = alloc_tj_node($1, $2, no_name);
+            finish_tj_node($$, $1, $4);
             token_free(&$1);
         }
     ;
@@ -1157,8 +1201,8 @@ statussheet_decl
     : KW_STATUSSHEET TK_IDENT interval3 opt_body
         {
             Token no_name = {0};
-            $$ = alloc_doc_symbol($1, $2, no_name);
-            finish_doc_symbol($$, $1, $4);
+            $$ = alloc_tj_node($1, $2, no_name);
+            finish_tj_node($$, $1, $4);
             token_free(&$1);
         }
     ;
@@ -1169,8 +1213,8 @@ statussheet_decl
 tagfile_decl
     : KW_TAGFILE opt_id opt_name opt_body
         {
-            $$ = alloc_doc_symbol($1, $2, $3);
-            finish_doc_symbol($$, $1, $4);
+            $$ = alloc_tj_node($1, $2, $3);
+            finish_tj_node($$, $1, $4);
             token_free(&$1);
         }
     ;
@@ -1178,16 +1222,16 @@ tagfile_decl
 /* ── journalentry_decl ──────────────────────────────────────────────────── *
  * Syntax: journalentry <date> <headline> [{ <attributes> }]
  * Body attributes: alert, author, details, flags.journalentry, summary
- * Note: journalentry is treated as a DocSymbol-producing declaration so that
+ * Note: journalentry is treated as a tj_node-producing declaration so that
  *       it appears in the document outline.
- * TODO: decide whether journalentry should be a DocSymbol or just an attribute. */
+ * TODO: decide whether journalentry should be a tj_node or just an attribute. */
 journalentry_decl
     : KW_JOURNALENTRY TK_DATE string_val opt_body
         {
             Token no_id = {0};
             /* Use the date as the detail and the headline as the name */
-            $$ = alloc_doc_symbol($1, no_id, $3);
-            finish_doc_symbol($$, $1, $4);
+            $$ = alloc_tj_node($1, no_id, $3);
+            finish_tj_node($$, $1, $4);
             token_free(&$1);
             token_free(&$2); /* date token */
         }
@@ -1201,7 +1245,7 @@ extend_stmt
     : KW_EXTEND extend_target opt_body
         {
             token_free(&$1); token_free(&$2);
-            for (int i = 0; i < $3.syms.n; i++) { doc_symbol_free($3.syms.arr[i]); free($3.syms.arr[i]); }
+            for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
             free($3.syms.arr);
         }
     ;
@@ -1221,7 +1265,7 @@ supplement_stmt
     : KW_SUPPLEMENT supplement_target dotted_id opt_body
         {
             token_free(&$1); token_free(&$2);
-            for (int i = 0; i < $4.syms.n; i++) { doc_symbol_free($4.syms.arr[i]); free($4.syms.arr[i]); }
+            for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
             free($4.syms.arr);
         }
     ;
@@ -1251,9 +1295,9 @@ macro_stmt
 include_stmt
     : KW_INCLUDE string_val opt_body
         {
-            push_included_file(g_result, $2.text);
+            push_included_file(g_output, $2.text);
             token_free(&$1); token_free(&$2);
-            for (int i = 0; i < $3.syms.n; i++) { doc_symbol_free($3.syms.arr[i]); free($3.syms.arr[i]); }
+            for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
             free($3.syms.arr);
         }
     ;
@@ -1425,14 +1469,11 @@ task_ref
 dep_ref
     : task_ref opt_body
         {
-            push_dep_ref($1.bang_count, $1.path,
-                         sym_stack_top(), $1.start, $1.end);
+            /* Cross-reference resolution is intentionally dropped during
+             * the data-structure refactor; restore here once the global
+             * tree is built and dependency tracking is reinstated. */
             free($1.path);
-            for (int i = 0; i < $2.syms.n; i++) {
-                doc_symbol_free($2.syms.arr[i]);
-                free($2.syms.arr[i]);
-            }
-            free($2.syms.arr);
+            discard_body(&$2);
         }
     ;
 
@@ -1451,7 +1492,7 @@ alloc_ref
     : TK_IDENT opt_body
         {
             token_free(&$1);
-            for (int i = 0; i < $2.syms.n; i++) { doc_symbol_free($2.syms.arr[i]); free($2.syms.arr[i]); }
+            for (int i = 0; i < $2.syms.n; i++) tj_node_free($2.syms.arr[i]);
             free($2.syms.arr);
         }
     ;
@@ -1551,7 +1592,7 @@ column_id
 column_entry
     : column_id opt_body
         {
-            for (int i = 0; i < $2.syms.n; i++) { doc_symbol_free($2.syms.arr[i]); free($2.syms.arr[i]); }
+            for (int i = 0; i < $2.syms.n; i++) tj_node_free($2.syms.arr[i]);
             free($2.syms.arr);
         }
     ;
@@ -1928,11 +1969,10 @@ opt_body
         }
     | TK_LBRACE body_items error
         {
+            /* Diagnostic recording is dropped for now; the structural
+             * recovery (carrying the partial body up) still happens. */
             $$.syms = $2.syms;
             $$.end  = (LspPos){0};
-            push_diagnostic(g_result,
-                            (LspRange){ $1.start, $1.end },
-                            DIAG_ERROR, "unclosed `{`");
             token_free(&$1);
         }
     ;

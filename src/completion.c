@@ -250,8 +250,8 @@ static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor
 
 /**
  * Build the stack of block-opener keyword constants enclosing @p cursor
- * (outermost first).  Uses symbol_at() to locate the innermost enclosing
- * DocSymbol, then walks up the parent chain, recording keywords in reverse
+ * (outermost first).  Uses tj_node_at() to locate the innermost enclosing
+ * tj_node, then walks up the parent chain, recording keywords in reverse
  * order into a scratch array and emitting them outermost-first.
  *
  * @param tokens      Token spans of the current document.
@@ -259,7 +259,7 @@ static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor
  * @param cursor      Cursor position.
  * @param out_n       Receives the stack depth.
  * @return Heap-allocated array of KW_* values; caller must free.  NULL when
- *         @p cursor sits outside every DocSymbol.
+ *         @p cursor sits outside every tj_node.
  */
 static int *block_stack(const TokenSpan *tokens, int num_tokens,
                         LspPos cursor, int *out_n) {
@@ -267,8 +267,8 @@ static int *block_stack(const TokenSpan *tokens, int num_tokens,
 
     /* Count the chain depth up from the innermost. */
     int depth = 0;
-    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
-         sym != NULL; sym = sym->parent)
+    for (tj_node *sym = tj_node_at(tokens, num_tokens, cursor);
+         sym != NULL; sym = sym->parent_node)
         depth++;
     if (depth == 0) return NULL;
 
@@ -277,8 +277,8 @@ static int *block_stack(const TokenSpan *tokens, int num_tokens,
 
     /* Fill in reverse so the result reads outermost-first. */
     int i = depth;
-    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
-         sym != NULL; sym = sym->parent)
+    for (tj_node *sym = tj_node_at(tokens, num_tokens, cursor);
+         sym != NULL; sym = sym->parent_node)
         result[--i] = sym->keyword;
 
     *out_n = depth;
@@ -488,7 +488,7 @@ static void idlist_free(IdList *il) {
  *                be `""`).
  * @param out     IdList to append to.
  */
-static void collect_ids(DocSymbol *const *syms, int n, int kind,
+static void collect_ids(tj_node *const *syms, int n, int kind,
                          const char *prefix, IdList *out) {
     for (int i = 0; i < n; i++) {
         if (syms[i]->keyword == kind && syms[i]->id && syms[i]->id[0]) {
@@ -518,7 +518,7 @@ static void collect_ids(DocSymbol *const *syms, int n, int kind,
 /**
  * Return the ordered list of task IDs enclosing @p cursor (outermost
  * first).  Used to determine the bang-relative dep-ref scope for
- * dependency completions.  Uses symbol_at() + parent walk to locate the
+ * dependency completions.  Uses tj_node_at() + parent walk to locate the
  * enclosing chain, collects KW_TASK ids in reverse order, then fills the
  * output outermost-first.
  *
@@ -533,10 +533,10 @@ static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
                                  LspPos cursor, int *out_n) {
     *out_n = 0;
 
-    DocSymbol *innermost = symbol_at(tokens, num_tokens, cursor);
+    tj_node *innermost = tj_node_at(tokens, num_tokens, cursor);
 
     int depth = 0;
-    for (DocSymbol *sym = innermost; sym != NULL; sym = sym->parent) {
+    for (tj_node *sym = innermost; sym != NULL; sym = sym->parent_node) {
         if (sym->keyword == KW_TASK && sym->id && sym->id[0])
             depth++;
     }
@@ -546,7 +546,7 @@ static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
     if (!result) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
 
     int i = depth;
-    for (DocSymbol *sym = innermost; sym != NULL; sym = sym->parent) {
+    for (tj_node *sym = innermost; sym != NULL; sym = sym->parent_node) {
         if (sym->keyword == KW_TASK && sym->id && sym->id[0])
             result[--i] = strdup(sym->id);
     }
@@ -665,8 +665,8 @@ static int id_kind_for_keyword(const char *keyword) {
  * @param id_kind      KW_* kind to collect.
  * @param ids          Destination IdList.
  */
-static void collect_all_ids(DocSymbol *const *symbols, int num_symbols,
-                            DocSymbol *const **extra_pools,
+static void collect_all_ids(tj_node *const *symbols, int num_symbols,
+                            tj_node *const **extra_pools,
                             const int *extra_counts, int num_extra,
                             int id_kind, IdList *ids) {
     collect_ids(symbols, num_symbols, id_kind, "", ids);
@@ -758,8 +758,8 @@ static void emit_id_item(yyjson_mut_doc *doc, yyjson_mut_val *items,
 static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                   const TokenSpan *tokens, int num_tokens,
                                   LspPos cursor,
-                                  DocSymbol *const *symbols, int num_symbols,
-                                  DocSymbol *const **extra_pools,
+                                  tj_node *const *symbols, int num_symbols,
+                                  tj_node *const **extra_pools,
                                   const int *extra_counts, int num_extra,
                                   int id_kind, int *out_incomplete) {
     LspPos first_bang_pos = {0, 0};
@@ -777,7 +777,7 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
 
         if (bang_count <= scope_n) {
             int ch_n = 0;
-            DocSymbol *const *ch = doc_symbol_find_path(
+            tj_node *const *ch = tj_node_find_path(
                 symbols, num_symbols,
                 (const char **)scope, scope_n - bang_count, &ch_n);
             if (ch) collect_ids(ch, ch_n, id_kind, "", &ids);
@@ -830,8 +830,8 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
 static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                 const TokenSpan *tokens, int num_tokens,
                                 LspPos cursor,
-                                DocSymbol *const *symbols, int num_symbols,
-                                DocSymbol *const **extra_pools,
+                                tj_node *const *symbols, int num_symbols,
+                                tj_node *const **extra_pools,
                                 const int *extra_counts, int num_extra,
                                 int id_kind, int *out_incomplete) {
     if (id_kind == KW_TASK)
@@ -903,8 +903,8 @@ static int build_keyword_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
 yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const TokenSpan *tokens, int num_tokens,
                                         LspPos cursor,
-                                        DocSymbol *const *symbols, int num_symbols,
-                                        DocSymbol *const **extra_pools,
+                                        tj_node *const *symbols, int num_symbols,
+                                        tj_node *const **extra_pools,
                                         const int *extra_counts,
                                         int num_extra,
                                         const char *text) {

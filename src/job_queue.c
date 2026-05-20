@@ -77,24 +77,9 @@ void job_queue_close(JobQueue *q) {
     pthread_mutex_unlock(&q->mutex);
 }
 
-void workspace_snapshot_release(WorkspaceSnapshot *snap) {
-    if (!snap) return;
-    for (size_t i = 0; i < snap->count; i++) {
-        free(snap->docs[i].uri);
-        free(snap->docs[i].text);
-        parse_result_release(snap->docs[i].parse);
-    }
-    free(snap->docs);
-    free(snap->primary_uri);
-    snap->docs        = NULL;
-    snap->count       = 0;
-    snap->primary_uri = NULL;
-}
-
 void job_free(Job *job) {
     if (!job) return;
     yyjson_doc_free(job->request_doc);
-    workspace_snapshot_release(&job->snapshot);
     free(job);
 }
 

@@ -90,7 +90,7 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
  * @return Heap-allocated dotted id (empty string if @p sym or its id is
  *         NULL).  Caller must free.
  */
-char *sym_qualified_id(const DocSymbol *sym);
+char *sym_qualified_id(const tj_node *sym);
 
 /**
  * Return Markdown documentation for a TJP keyword, or NULL if unknown.

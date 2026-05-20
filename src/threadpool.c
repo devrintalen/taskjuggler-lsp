@@ -23,13 +23,11 @@
 
 #include <pthread.h>
 
-/* One query worker for now.  The snapshot + immutable-ParseResult
- * machinery is already in place to scale this up, but
- * pthread_mutex_t is not FIFO — multiple workers racing for the
- * docs_mutex during a sem_tokens cache write produce non-deterministic
- * resultIds.  The fix is a per-document ticket / queue (called out in
- * the TODO at the top of parser.c, alongside the doc-symbol-tree
- * follow-ups).  Until that lands, keep parallelism at 1. */
+/* TODO(workspace-snapshot): one query worker for now.  The snapshot +
+ * immutable-parse-result machinery that previously let query workers
+ * run lock-free was retired during the tj_node refactor; while
+ * server_dispatch_query() serialises under docs_mutex, raising the
+ * worker count buys nothing.  See job_queue.h for context. */
 #define NUM_QUERY_WORKERS 1
 
 /* Single arrival-ordered FIFO populated by the reader.  The
@@ -48,20 +46,17 @@ static pthread_t coordinator_thread;
 static pthread_t query_threads[NUM_QUERY_WORKERS];
 static int       pool_started = 0;
 
-/* Coordinator thread.  Pops jobs from work_queue in arrival order.
+/* Coordinator thread.  Pops jobs from work_queue in arrival order and
+ * dispatches each inline so the LSP "messages processed in arrival
+ * order" rule is preserved.
  *
- * Notification jobs: dispatched inline.  server_dispatch_notification
- * takes docs_mutex, applies any state change, releases.  By running
- * inline (not on a worker), the coordinator blocks while the
- * notification completes, so any subsequent query the reader pushes
- * will observe the new state.
- *
- * Query jobs: the coordinator takes a workspace snapshot HERE (before
- * handing off), so the snapshot reflects the state at the moment this
- * job's turn in arrival order would have come up.  This is what
- * guarantees correctness when later notifications race ahead while
- * query workers are still computing — the workers run on their own
- * pinned snapshot, not on live docs[]. */
+ * TODO(workspace-snapshot): the previous design split queries onto a
+ * separate worker pool and used a refcounted snapshot taken here so
+ * query workers could run lock-free.  That machinery was retired
+ * during the tj_node refactor.  request_queue and the worker thread
+ * are still allocated below so the public threadpool API does not
+ * need to churn; once snapshotting returns, restore the split and
+ * re-enable query parallelism. */
 static void *coordinator(void *arg) {
     (void)arg;
     while (1) {
@@ -69,27 +64,23 @@ static void *coordinator(void *arg) {
         if (!job) break;
         if (job->is_notification) {
             server_dispatch_notification(job);
-            job_free(job);
+        } else if (job->is_cancelled) {
+            server_dispatch_cancelled(job);
         } else {
-            server_capture_snapshot_for(job);
-            job_queue_push(request_queue, job);
+            server_dispatch_query(job);
         }
+        job_free(job);
     }
     job_queue_close(request_queue);
     return NULL;
 }
 
-/* Query worker.  Pops a Job (with snapshot already attached), runs the
- * handler against the snapshot, and emits the response.  No coordination
- * with notifications is needed at this point — the snapshot is independent. */
+/* Query worker.  Currently idle — see coordinator() TODO. */
 static void *query_worker(void *arg) {
     (void)arg;
     while (1) {
         Job *job = job_queue_pop(request_queue);
         if (!job) break;
-        /* Cancellation short-circuit: the reader walked the queues for
-         * $/cancelRequest and marked this Job before it was popped.
-         * Skip the handler and send the RequestCancelled error. */
         if (job->is_cancelled) {
             server_dispatch_cancelled(job);
         } else {

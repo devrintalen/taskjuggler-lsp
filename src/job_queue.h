@@ -20,52 +20,9 @@
 
 #pragma once
 
-#include "parser.h"
-
 #include <stddef.h>
 #include <stdint.h>
 #include <yyjson.h>
-
-/**
- * A pinned read-only view of a single document captured at a point in
- * time.  Each entry holds owned copies of the URI and text plus a
- * refcount on the ParseResult, so the snapshot is valid for the entire
- * lifetime of the owning Job — independent of subsequent notifications.
- *
- * `version` records the Document.doc_version at capture time.  Query
- * workers compare it against the current version before sending their
- * response; a mismatch means the document changed mid-query, and the
- * worker replies with LSP ContentModified (-32801).
- */
-typedef struct DocSnapshot {
-    char        *uri;     /**< owned copy of the document URI */
-    char        *text;    /**< owned copy of the document text (may be NULL) */
-    ParseResult *parse;   /**< refcount held; released on job free */
-    uint64_t     version; /**< Document.doc_version at capture time */
-    int          disk_only; /**< 1 = background workspace entry, 0 = editor-managed */
-} DocSnapshot;
-
-/**
- * A pinned view of every open / background document in the workspace.
- * Captured once per Job at the start of worker execution; the rest of
- * the handler runs without touching the live document store.
- *
- * `primary_uri` is the URI of the request's target document (when the
- * method has one) — handlers do a linear scan of `docs[]` to find the
- * matching DocSnapshot.  NULL for methods with no target (workspace
- * methods, initialize, etc.).
- */
-typedef struct WorkspaceSnapshot {
-    DocSnapshot *docs;          /**< pinned views of every active slot */
-    size_t       count;         /**< number of entries in docs */
-    char        *primary_uri;   /**< owned; URI of the request target, or NULL */
-} WorkspaceSnapshot;
-
-/**
- * Release every dynamic resource held by @p snap, including the
- * per-document ParseResult refcounts.  Zeroes the struct on return.
- */
-void workspace_snapshot_release(WorkspaceSnapshot *snap);
 
 /**
  * One pending unit of work parsed off stdin by the reader thread and
@@ -81,27 +38,24 @@ void workspace_snapshot_release(WorkspaceSnapshot *snap);
  * including state-mutating lifecycle ones like initialize/shutdown —
  * are queries.
  *
- * `snapshot` is filled by the worker just before running the handler.
- * The reader leaves it zeroed — taking the snapshot at the moment of
- * execution (rather than at enqueue time) keeps it fresh even when a
- * job sits in the queue for a long time.
+ * TODO(workspace-snapshot): The previous design captured a refcounted
+ * WorkspaceSnapshot at dispatch time so query workers could run lock-
+ * free.  The snapshot model was tied to per-Document ParseResult
+ * refcounts and was retired during the tj_node refactor.  Until a
+ * replacement snapshotting strategy lands, server_dispatch_query()
+ * serialises every handler under docs_mutex.
  *
  * `id` / `has_id` carry the JSON-RPC request id as a first-class field
- * on the Job.  The first per-job operation is $/cancelRequest: the
- * reader walks both queues looking for a matching id and sets
- * `is_cancelled`, so cancellation is deterministic for any Job still
- * resident in a queue when the cancel arrives.  Notifications and
- * string/null ids leave `has_id = 0` and are therefore not cancellable
- * by id (matching the existing int-only policy in server.c).
+ * on the Job so $/cancelRequest can mark queued Jobs.  Notifications
+ * and string/null ids leave `has_id = 0`.
  */
 typedef struct Job {
-    yyjson_doc        *request_doc;
-    WorkspaceSnapshot  snapshot;
-    int                is_notification;
-    int                is_cancelled;
-    int                has_id;
-    int64_t            id;
-    struct Job        *next;
+    yyjson_doc *request_doc;
+    int         is_notification;
+    int         is_cancelled;
+    int         has_id;
+    int64_t     id;
+    struct Job *next;
 } Job;
 
 /** Opaque thread-safe FIFO of Job pointers. */

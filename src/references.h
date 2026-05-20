@@ -32,7 +32,7 @@
  * @param cursor_uri  URI of the document the cursor is in (used for
  *                    same-document references where source_uri is NULL).
  * @param tokens      Token spans of the cursor document (carry `.owner`
- *                    links that let symbol_at() locate the declaration
+ *                    links that let tj_node_at() locate the declaration
  *                    under cursor).
  * @param num_tokens  Length of @p tokens.
  * @param cursor      Cursor position.
