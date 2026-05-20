@@ -620,37 +620,190 @@ static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
    Global tj_node tree rebuild
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* TODO(global-tree): real implementation must:
- *   1. Identify the canonical .tjp Document.  Error out cleanly when
- *      multiple ambiguous candidates exist.  Accept the .tji-only
- *      workspace by treating every .tji as a synthetic top-level.
- *   2. Clear every Document's included_children arrays so stale hoists
- *      go away.
- *   3. Walk each Document's include list and append the included
- *      Document's top-level entries to the includer's prefix-target
- *      node's included_children (per kind, using the per-kind
- *      *_prefix string captured during parsing).
- *   4. Anchor g_task_tree.children / etc. on the canonical Document's
- *      per-kind tree (or merge from .tji-only fallback).
+/** Recursively reset @p n's included_children plus those of every locally
+ *  declared descendant.  Included pointers themselves are not freed —
+ *  Documents own the nodes — we just drop the borrowed pointers so the
+ *  next hoist pass starts from a clean slate. */
+static void clear_included_recursive(tj_node *n) {
+    if (!n) return;
+    tj_node_clear_included(n);
+    for (int i = 0; i < n->num_children; i++)
+        clear_included_recursive(n->children[i]);
+}
+
+/** Return 1 when @p uri's path component ends in ".tjp" (case-sensitive). */
+static int uri_is_tjp(const char *uri) {
+    if (!uri) return 0;
+    size_t len = strlen(uri);
+    return len >= 4 && strcmp(uri + len - 4, ".tjp") == 0;
+}
+
+/** Pick the canonical project Document for hoisting.
  *
- * For the moment this just zeroes the synthetic globals so handlers
- * that try to walk them see an empty tree. */
+ *  Preference order:
+ *    1. The single editor-open .tjp, if exactly one exists.
+ *    2. Any editor-open .tjp (warn that the choice is ambiguous).
+ *    3. The single loaded .tjp on disk.
+ *    4. Any loaded .tjp (warn).
+ *    5. NULL — no .tjp loaded; the caller falls back to .tji-only mode.
+ *
+ *  TODO(canonical-selection): the user-facing spec says the canonical .tjp
+ *  is the one that transitively includes the currently-edited file, with
+ *  ambiguity raising an error.  This stub uses a simpler heuristic until
+ *  diagnostics are reintroduced and we can route a real error to the
+ *  client.
+ */
+static Document *find_canonical_tjp(void) {
+    Document *editor_pick = NULL;
+    int       editor_count = 0;
+    Document *any_pick = NULL;
+    int       any_count = 0;
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use || !docs[i].tasks) continue;
+        if (!uri_is_tjp(docs[i].uri)) continue;
+        any_count++;
+        if (!any_pick) any_pick = &docs[i];
+        if (!docs[i].disk_only) {
+            editor_count++;
+            if (!editor_pick) editor_pick = &docs[i];
+        }
+    }
+    if (editor_count == 1) return editor_pick;
+    if (editor_count > 1) {
+        fprintf(stderr,
+                "taskjuggler-lsp: %d .tjp files open in editor; picking %s\n",
+                editor_count, editor_pick->uri);
+        return editor_pick;
+    }
+    if (any_count == 1) return any_pick;
+    if (any_count > 1) {
+        fprintf(stderr,
+                "taskjuggler-lsp: %d .tjp files in workspace and none open in editor; picking %s\n",
+                any_count, any_pick->uri);
+        return any_pick;
+    }
+    return NULL;
+}
+
+/** Walk @p start's effective subtree (children + included_children) along
+ *  the dot-separated @p path and return the matched node.  Returns @p start
+ *  when @p path is NULL or empty.  Used to resolve prefix targets when
+ *  hoisting an included Document into the canonical tree. */
+static tj_node *find_node_by_dotted_path(tj_node *start, const char *path) {
+    if (!start) return NULL;
+    if (!path || !path[0]) return start;
+
+    char *copy = strdup(path);
+    if (!copy) return NULL;
+    tj_node *cur = start;
+    for (char *seg = strtok(copy, "."); seg && cur; seg = strtok(NULL, ".")) {
+        tj_node *next = NULL;
+        for (int i = 0; i < cur->num_children && !next; i++)
+            if (cur->children[i]->id && strcmp(cur->children[i]->id, seg) == 0)
+                next = cur->children[i];
+        for (int i = 0; i < cur->num_included_children && !next; i++)
+            if (cur->included_children[i]->id
+                    && strcmp(cur->included_children[i]->id, seg) == 0)
+                next = cur->included_children[i];
+        cur = next;
+    }
+    free(copy);
+    return cur;
+}
+
+/** Hoist every top-level child of @p from_root into @p target's
+ *  included_children.  Used by both the canonical-anchored path and the
+ *  .tji-only fallback. */
+static void hoist_top_level(tj_node *target, tj_node *from_root) {
+    if (!target || !from_root) return;
+    for (int i = 0; i < from_root->num_children; i++)
+        tj_node_append_included(target, from_root->children[i]);
+}
+
+/** For each of the four kinds, find @p d's prefix target inside @p canon
+ *  and hoist @p d's top-level entries there.  When a prefix doesn't
+ *  resolve to a node in @p canon's tree, this kind's hoist is skipped —
+ *  TODO(global-tree): emit a diagnostic instead once the diagnostic
+ *  channel returns.
+ *
+ *  TODO(nested-includes): when @p d itself includes another .tji whose
+ *  prefix target lives only in @p d's tree, the second .tji needs @p d's
+ *  hoist to have happened first.  Document slot order today follows load
+ *  order, which is includer-before-includee for the workspace scan, so
+ *  the simple in-order pass below is usually right — but it's not
+ *  guaranteed.  A topological pass is the proper fix. */
+static void hoist_document(Document *canon, Document *d) {
+    struct {
+        tj_node    *canon_root;
+        tj_node    *doc_root;
+        const char *prefix;
+    } kinds[] = {
+        { canon->tasks,     d->tasks,     d->task_prefix     },
+        { canon->accounts,  d->accounts,  d->account_prefix  },
+        { canon->reports,   d->reports,   d->report_prefix   },
+        { canon->resources, d->resources, d->resource_prefix },
+    };
+    for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
+        tj_node *target = find_node_by_dotted_path(kinds[k].canon_root,
+                                                    kinds[k].prefix);
+        if (!target) continue;
+        hoist_top_level(target, kinds[k].doc_root);
+    }
+}
+
+/** Build the global per-kind trees from the current Document store.
+ *
+ *  Rebuilds from scratch on every notification: cheap because we only
+ *  touch the borrowed-pointer included_children arrays — locally
+ *  declared subtrees stay immutable. */
 static void rebuild_global_trees(void) {
-    tj_node *roots[] = {
+    /* 1. Drop every hoist from the previous cycle. */
+    tj_node *globals[] = {
         &g_task_tree, &g_account_tree,
         &g_report_tree, &g_resource_tree,
     };
-    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        tj_node_clear_included(roots[i]);
+    for (size_t i = 0; i < sizeof(globals) / sizeof(globals[0]); i++)
+        tj_node_clear_included(globals[i]);
 
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use || !docs[i].tasks) continue;
-        tj_node *kind_roots[] = {
-            docs[i].tasks, docs[i].accounts,
-            docs[i].reports, docs[i].resources,
-        };
-        for (size_t k = 0; k < sizeof(kind_roots) / sizeof(kind_roots[0]); k++)
-            tj_node_clear_included(kind_roots[k]);
+        clear_included_recursive(docs[i].tasks);
+        clear_included_recursive(docs[i].accounts);
+        clear_included_recursive(docs[i].reports);
+        clear_included_recursive(docs[i].resources);
+        if (docs[i].project)
+            clear_included_recursive(docs[i].project);
+    }
+
+    /* 2. Pick the canonical project. */
+    Document *canon = find_canonical_tjp();
+
+    if (canon) {
+        /* 3a. Anchor the globals on canon's top-level entries.  Canon's
+         *     per-kind synthetic root is itself never the global root;
+         *     instead its children become the global's included_children
+         *     so hoisted .tji entries can join them seamlessly. */
+        hoist_top_level(&g_task_tree,     canon->tasks);
+        hoist_top_level(&g_account_tree,  canon->accounts);
+        hoist_top_level(&g_report_tree,   canon->reports);
+        hoist_top_level(&g_resource_tree, canon->resources);
+
+        /* 3b. Hoist every other loaded Document at its prefix target. */
+        for (int i = 0; i < MAX_DOCS; i++) {
+            if (!docs[i].in_use || !docs[i].tasks) continue;
+            if (&docs[i] == canon) continue;
+            hoist_document(canon, &docs[i]);
+        }
+    } else {
+        /* 4. .tji-only fallback: treat every loaded document as if it
+         *    were hoisted at the synthetic root with no prefix. */
+        for (int i = 0; i < MAX_DOCS; i++) {
+            if (!docs[i].in_use || !docs[i].tasks) continue;
+            hoist_top_level(&g_task_tree,     docs[i].tasks);
+            hoist_top_level(&g_account_tree,  docs[i].accounts);
+            hoist_top_level(&g_report_tree,   docs[i].reports);
+            hoist_top_level(&g_resource_tree, docs[i].resources);
+        }
     }
 }
 

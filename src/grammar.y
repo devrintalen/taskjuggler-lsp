@@ -1124,8 +1124,34 @@ symbol_decl
       { $<sym>$ = alloc_tj_node($1, $2, $3); }
       opt_version interval2 opt_body
         {
+            /* A project block is metadata only — its body's task /
+             * resource / account / report children are conceptually
+             * top-level declarations of the file, so we route each
+             * body child into the matching per-kind tree on g_output
+             * (the same destination as items declared outside the
+             * project block).  The project tj_node itself ends up
+             * with no children; document_symbol rendering composes
+             * the outline shape on demand. */
             $$ = $<sym>4;
-            finish_tj_node($$, $1, $7);
+            LspPos range_end = $7.end;
+            if (range_end.line == 0 && range_end.character == 0)
+                range_end = $1.end;
+            $$->range.end = range_end;
+            for (int i = 0; i < $7.syms.n; i++) {
+                tj_node *child = $7.syms.arr[i];
+                if (child->keyword == KW_PROJECT) {
+                    /* Nested `project` inside a project block is malformed;
+                     * drop it rather than corrupt the tree. */
+                    tj_node_free(child);
+                    continue;
+                }
+                tj_node *tree = tree_for_keyword(child->keyword);
+                if (tree)
+                    tj_node_append_child(tree, child);
+                else
+                    tj_node_free(child);
+            }
+            free($7.syms.arr);
             token_free(&$1);
             if ($5.text) token_free(&$5); /* discard version string */
             /* TODO: store interval $6 as the project time range */
