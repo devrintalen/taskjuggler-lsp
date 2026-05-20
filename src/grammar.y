@@ -58,7 +58,50 @@ void yyerror(const char *msg);
 
 /* ── Helpers (declared/defined in parser.c) ─────────────────────────────── */
 
-extern void push_included_file(ParseOutput *po, const char *quoted_text);
+extern void push_include(ParseOutput *po, const char *quoted_text,
+                         const char *task_prefix,
+                         const char *resource_prefix,
+                         const char *account_prefix,
+                         const char *report_prefix);
+
+/* ── Include-statement prefix capture ────────────────────────────────────
+ *
+ * Bumped while parsing the body of an `include` statement so that the
+ * KW_TASKPREFIX / KW_RESOURCEPREFIX / KW_ACCOUNTPREFIX / KW_REPORTPREFIX
+ * attribute actions know to stash their argument into one of the
+ * g_pending_*_prefix globals.  When the enclosing include_stmt action
+ * fires, it consumes the pending values (taking ownership of the
+ * strings) and resets them for the next include.
+ *
+ * The depth counter handles only the direct body — nested include
+ * statements are not legal inside an include body, so the counter
+ * never legitimately exceeds 1.  We still use a counter rather than a
+ * boolean so an accidentally-nested include doesn't corrupt the outer
+ * include's pending state. */
+static int   g_in_include_depth        = 0;
+static char *g_pending_task_prefix     = NULL;
+static char *g_pending_resource_prefix = NULL;
+static char *g_pending_account_prefix  = NULL;
+static char *g_pending_report_prefix   = NULL;
+
+static void set_pending_prefix(char **slot, char *value) {
+    if (g_in_include_depth > 0) {
+        free(*slot);
+        *slot = value;     /* take ownership */
+    } else {
+        free(value);       /* dropped: appearing outside an include body */
+    }
+}
+
+/* Called from parser.c at the start of every parse() so a partial
+ * include-body parse from a previous run cannot leak pending state. */
+void reset_pending_include_state(void) {
+    g_in_include_depth = 0;
+    free(g_pending_task_prefix);     g_pending_task_prefix     = NULL;
+    free(g_pending_resource_prefix); g_pending_resource_prefix = NULL;
+    free(g_pending_account_prefix);  g_pending_account_prefix  = NULL;
+    free(g_pending_report_prefix);   g_pending_report_prefix   = NULL;
+}
 
 /* ── Per-kind tree routing ──────────────────────────────────────────────── *
  *
@@ -183,6 +226,7 @@ static void discard_body(BodyResult *b) {
     ItemResult item;  /* item: optional symbol */
     TaskRef    tref;  /* dep path + bang count */
     int        ival;  /* integer (bang count) */
+    char      *text;  /* heap-allocated string (e.g. joined dotted id) */
 }
 
 /* ── Token declarations ──────────────────────────────────────────────────── */
@@ -313,6 +357,7 @@ static void discard_body(BodyResult *b) {
 %type <body> opt_body body_items
 %type <tref> dep_path task_ref
 %type <ival> bang_seq
+%type <text> prefix_path_id
 
 %type <item> item
 
@@ -650,17 +695,21 @@ item
     | KW_AUTHOR TK_IDENT
         { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
     /* Syntax: taskprefix <task ID>                                           */
-    | KW_TASKPREFIX dotted_id
-        { token_free(&$1); $$.has_sym = 0; }
+    | KW_TASKPREFIX prefix_path_id
+        { set_pending_prefix(&g_pending_task_prefix, $2);
+          token_free(&$1); $$.has_sym = 0; }
     /* Syntax: resourceprefix <resource ID>                                   */
-    | KW_RESOURCEPREFIX TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
+    | KW_RESOURCEPREFIX prefix_path_id
+        { set_pending_prefix(&g_pending_resource_prefix, $2);
+          token_free(&$1); $$.has_sym = 0; }
     /* Syntax: accountprefix <account ID>                                     */
-    | KW_ACCOUNTPREFIX TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
+    | KW_ACCOUNTPREFIX prefix_path_id
+        { set_pending_prefix(&g_pending_account_prefix, $2);
+          token_free(&$1); $$.has_sym = 0; }
     /* Syntax: reportprefix <report ID>                                       */
-    | KW_REPORTPREFIX TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
+    | KW_REPORTPREFIX prefix_path_id
+        { set_pending_prefix(&g_pending_report_prefix, $2);
+          token_free(&$1); $$.has_sym = 0; }
     /* Syntax: taskroot (<ABSOLUTE_ID> | <ID>)                               */
     | KW_TASKROOT dotted_id
         { token_free(&$1); $$.has_sym = 0; }
@@ -1291,14 +1340,30 @@ macro_stmt
 /* ── include_stmt ───────────────────────────────────────────────────────── *
  * Syntax (in properties context): include <filename> [{ <attributes> }]
  * Syntax (in project context):    include <filename>
- * We use opt_body for leniency.                                             */
+ * We use opt_body for leniency.
+ *
+ * The mid-rule action bumps g_in_include_depth before opt_body fires so
+ * that any KW_TASKPREFIX / KW_RESOURCEPREFIX / KW_ACCOUNTPREFIX /
+ * KW_REPORTPREFIX attribute inside the body stashes its value into the
+ * matching g_pending_*_prefix global.  The trailing action then consumes
+ * those globals into an IncludeRef and resets them. */
 include_stmt
-    : KW_INCLUDE string_val opt_body
+    : KW_INCLUDE string_val
+        { g_in_include_depth++; }
+      opt_body
         {
-            push_included_file(g_output, $2.text);
+            g_in_include_depth--;
+            push_include(g_output, $2.text,
+                         g_pending_task_prefix,
+                         g_pending_resource_prefix,
+                         g_pending_account_prefix,
+                         g_pending_report_prefix);
+            free(g_pending_task_prefix);     g_pending_task_prefix     = NULL;
+            free(g_pending_resource_prefix); g_pending_resource_prefix = NULL;
+            free(g_pending_account_prefix);  g_pending_account_prefix  = NULL;
+            free(g_pending_report_prefix);   g_pending_report_prefix   = NULL;
             token_free(&$1); token_free(&$2);
-            for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
-            free($3.syms.arr);
+            discard_body(&$4);
         }
     ;
 
@@ -1392,12 +1457,36 @@ interval3
 
 /* ── dotted_id: dot-separated identifier path ───────────────────────────── *
  * Syntax: <id> [. <id> [. <id> ...]]
- * Used for: taskroot, taskprefix, adopt targets, supplement target IDs     */
+ * Used for: taskroot, adopt targets, supplement target IDs                 */
 dotted_id
     : TK_IDENT
         { token_free(&$1); }
     | dotted_id TK_DOT TK_IDENT
         { token_free(&$2); token_free(&$3); }
+    ;
+
+/* ── prefix_path_id: dotted identifier returned as a heap-allocated string
+ *
+ * Same shape as dotted_id but the action joins the segments and yields
+ * the result string for the caller to consume.  Used by the *prefix
+ * attribute rules so the include_stmt action can stash the value into
+ * an IncludeRef. */
+prefix_path_id
+    : TK_IDENT
+        { $$ = $1.text; $1.text = NULL; /* transfer ownership */ }
+    | prefix_path_id TK_DOT TK_IDENT
+        {
+            size_t plen = strlen($1);
+            size_t slen = strlen($3.text);
+            char *buf = malloc(plen + 1 + slen + 1);
+            if (!buf) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+            memcpy(buf, $1, plen);
+            buf[plen] = '.';
+            memcpy(buf + plen + 1, $3.text, slen + 1);
+            free($1);
+            $$ = buf;
+            token_free(&$2); token_free(&$3);
+        }
     ;
 
 /* ── dotted_id_list: comma-separated list of dotted IDs ────────────────── */

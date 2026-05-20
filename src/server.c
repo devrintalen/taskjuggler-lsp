@@ -90,18 +90,14 @@ typedef struct Document {
     int          num_tok_spans;
     int          tok_span_cap;
     int          num_sem_entries;
-    char       **included_files;    /**< unquoted filenames from `include` directives */
-    int          num_included_files;
-    int          included_files_cap;
+    IncludeRef  *includes;          /**< one entry per `include` directive (file + per-kind prefixes) */
+    int          num_includes;
+    int          includes_cap;
 
     /* Prefixes applied to this Document by the includer's `include` block,
-     * one per kind.  Populated by the include pass when the canonical
-     * project file pulls this .tji in (and zeroed for the canonical .tjp
-     * itself or for orphan .tji files in a .tji-only workspace).
-     *
-     * TODO(include-prefixes): the grammar does not yet capture the
-     * *prefix attributes from inside an include statement's body, so
-     * these stay NULL until that lands. */
+     * one per kind.  Populated by follow_includes() from the includer's
+     * captured IncludeRef when this file is pulled in; stay NULL on a
+     * canonical .tjp or on orphan .tji files in a .tji-only workspace. */
     char        *task_prefix;
     char        *account_prefix;
     char        *report_prefix;
@@ -204,12 +200,17 @@ static void doc_clear_parse_state(Document *d) {
     d->tok_span_cap    = 0;
     d->num_sem_entries = 0;
 
-    for (int i = 0; i < d->num_included_files; i++)
-        free(d->included_files[i]);
-    free(d->included_files);
-    d->included_files       = NULL;
-    d->num_included_files   = 0;
-    d->included_files_cap   = 0;
+    for (int i = 0; i < d->num_includes; i++) {
+        free(d->includes[i].filename);
+        free(d->includes[i].task_prefix);
+        free(d->includes[i].resource_prefix);
+        free(d->includes[i].account_prefix);
+        free(d->includes[i].report_prefix);
+    }
+    free(d->includes);
+    d->includes      = NULL;
+    d->num_includes  = 0;
+    d->includes_cap  = 0;
 }
 
 /** Move every parse-derived field from @p po into @p d, releasing whatever
@@ -227,9 +228,9 @@ static void doc_install_parse(Document *d, ParseOutput *po) {
         d->num_tok_spans       = po->num_tok_spans;
         d->tok_span_cap        = po->tok_span_cap;
         d->num_sem_entries     = po->num_sem_entries;
-        d->included_files      = po->included_files;
-        d->num_included_files  = po->num_included_files;
-        d->included_files_cap  = po->included_files_cap;
+        d->includes            = po->includes;
+        d->num_includes        = po->num_includes;
+        d->includes_cap        = po->includes_cap;
         /* Zero the source so parse_output_free does not double-free. */
         memset(po, 0, sizeof(*po));
         free(po);
@@ -407,8 +408,15 @@ static void load_file_from_disk(const char *path) {
     follow_includes(path, document);
 }
 
+/** Replace @p *slot with a fresh strdup of @p value (NULL when @p value
+ *  is NULL).  Used to copy IncludeRef prefix strings onto the includee. */
+static void replace_string(char **slot, const char *value) {
+    free(*slot);
+    *slot = value ? strdup(value) : NULL;
+}
+
 static void follow_includes(const char *file_path, const Document *d) {
-    if (!d || !d->num_included_files) return;
+    if (!d || !d->num_includes) return;
 
     size_t path_len = strlen(file_path);
     const char *last_slash = NULL;
@@ -417,8 +425,10 @@ static void follow_includes(const char *file_path, const Document *d) {
     }
     size_t dir_len = last_slash ? (size_t)(last_slash - file_path) : 0;
 
-    for (int i = 0; i < d->num_included_files; i++) {
-        const char *filename = d->included_files[i];
+    for (int i = 0; i < d->num_includes; i++) {
+        const IncludeRef *inc = &d->includes[i];
+        const char *filename = inc->filename;
+        if (!filename) continue;
         size_t fname_len = strlen(filename);
 
         char *full_path;
@@ -439,6 +449,20 @@ static void follow_includes(const char *file_path, const Document *d) {
         }
 
         load_file_from_disk(full_path);
+
+        /* Locate the included Document and propagate this include's
+         * prefixes onto it.  load_file_from_disk normalises and
+         * inserts under a file:// URI, so look it up the same way. */
+        char *target_uri = path_to_uri(full_path);
+        Document *target = target_uri ? doc_find(target_uri) : NULL;
+        free(target_uri);
+        if (target) {
+            replace_string(&target->task_prefix,     inc->task_prefix);
+            replace_string(&target->resource_prefix, inc->resource_prefix);
+            replace_string(&target->account_prefix,  inc->account_prefix);
+            replace_string(&target->report_prefix,   inc->report_prefix);
+        }
+
         free(full_path);
     }
 }

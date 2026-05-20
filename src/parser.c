@@ -40,6 +40,11 @@ extern int             yylineno;
 /* ── Shared globals (used by lexer.l and grammar.y via extern) ───────────── */
 
 /** Currently-being-built ParseOutput; lexer/grammar populate this directly. */
+/* Defined in grammar.y.  Called at the start of every parse() so that a
+ * partial include-body parse from a previous run cannot leak its pending
+ * prefix strings into the next parse. */
+extern void reset_pending_include_state(void);
+
 ParseOutput *g_output         = NULL;
 /** Backing storage for the token-span array under construction. */
 TokenSpan   *g_tok_spans      = NULL;
@@ -165,14 +170,23 @@ void parse_output_free(ParseOutput *po) {
         free(po->tok_spans[i].text);
     free(po->tok_spans);
 
-    for (int i = 0; i < po->num_included_files; i++)
-        free(po->included_files[i]);
-    free(po->included_files);
+    for (int i = 0; i < po->num_includes; i++) {
+        free(po->includes[i].filename);
+        free(po->includes[i].task_prefix);
+        free(po->includes[i].resource_prefix);
+        free(po->includes[i].account_prefix);
+        free(po->includes[i].report_prefix);
+    }
+    free(po->includes);
 
     free(po);
 }
 
-void push_included_file(ParseOutput *po, const char *quoted_text) {
+void push_include(ParseOutput *po, const char *quoted_text,
+                  const char *task_prefix,
+                  const char *resource_prefix,
+                  const char *account_prefix,
+                  const char *report_prefix) {
     if (!quoted_text) return;
     size_t len = strlen(quoted_text);
     const char *inner = quoted_text;
@@ -181,19 +195,24 @@ void push_included_file(ParseOutput *po, const char *quoted_text) {
         inner     = quoted_text + 1;
         inner_len = len - 2;
     }
-    char *copy = malloc(inner_len + 1);
-    if (!copy) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    memcpy(copy, inner, inner_len);
-    copy[inner_len] = '\0';
+    char *filename = malloc(inner_len + 1);
+    if (!filename) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    memcpy(filename, inner, inner_len);
+    filename[inner_len] = '\0';
 
-    if (po->num_included_files >= po->included_files_cap) {
-        int nc = po->included_files_cap ? po->included_files_cap * 2 : 4;
-        char **tmp = realloc(po->included_files, (size_t)nc * sizeof(char *));
+    if (po->num_includes >= po->includes_cap) {
+        int nc = po->includes_cap ? po->includes_cap * 2 : 4;
+        IncludeRef *tmp = realloc(po->includes, (size_t)nc * sizeof(IncludeRef));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        po->included_files     = tmp;
-        po->included_files_cap = nc;
+        po->includes     = tmp;
+        po->includes_cap = nc;
     }
-    po->included_files[po->num_included_files++] = copy;
+    IncludeRef *e = &po->includes[po->num_includes++];
+    e->filename        = filename;
+    e->task_prefix     = task_prefix     ? strdup(task_prefix)     : NULL;
+    e->resource_prefix = resource_prefix ? strdup(resource_prefix) : NULL;
+    e->account_prefix  = account_prefix  ? strdup(account_prefix)  : NULL;
+    e->report_prefix   = report_prefix   ? strdup(report_prefix)   : NULL;
 }
 
 /* ── tj_node tree linkage ────────────────────────────────────────────────── *
@@ -321,6 +340,7 @@ ParseOutput *parse(const char *src) {
     g_num_sem_entries = 0;
     yycolumn          = 0;
     yylineno          = 1;
+    reset_pending_include_state();
 
     YY_BUFFER_STATE buf = yy_scan_string(src);
     yyparse();

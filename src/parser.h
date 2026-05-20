@@ -228,6 +228,23 @@ typedef struct {
 } TokenSpan;
 
 /**
+ * One entry per `include` directive seen in the source.  `filename` is the
+ * unquoted target as it appeared in the include statement.  The four
+ * `*_prefix` fields carry the matching attribute from the include body
+ * (e.g. `include "bar.tji" { taskprefix t1.t2 }` produces
+ * `task_prefix = "t1.t2"`); each is NULL when the corresponding attribute
+ * was not present.  All strings are heap-allocated and owned by the
+ * ParseOutput / Document that holds the IncludeRef.
+ */
+typedef struct {
+    char *filename;
+    char *task_prefix;
+    char *resource_prefix;
+    char *account_prefix;
+    char *report_prefix;
+} IncludeRef;
+
+/**
  * The complete output of a single parse() call for one document.
  *
  * One ParseOutput per parse — its lifetime is tied to the owning Document
@@ -257,9 +274,9 @@ typedef struct {
     int        tok_span_cap;
     int        num_sem_entries; /**< upper bound on semantic-token entries (one per source line covered) */
 
-    char     **included_files;   /**< unquoted filenames from `include` statements */
-    int        num_included_files;
-    int        included_files_cap;
+    IncludeRef *includes;       /**< one entry per `include` directive */
+    int         num_includes;
+    int         includes_cap;
 } ParseOutput;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -282,13 +299,23 @@ ParseOutput *parse(const char *src);
 void parse_output_free(ParseOutput *po);
 
 /**
- * Record an `include` directive's target in @p po->included_files.
+ * Append an `include` directive entry to @p po->includes.  The four prefix
+ * pointers may be NULL (attribute not present); when non-NULL each is
+ * deep-copied so the caller retains ownership of its inputs.
  *
- * @param po           ParseOutput being populated.
- * @param quoted_text  Raw `include` argument as it appears in source; the
- *                     surrounding quotes are stripped before storing.
+ * @param po              ParseOutput being populated.
+ * @param quoted_text     Raw `include` argument as it appears in source;
+ *                        the surrounding quotes are stripped before storing.
+ * @param task_prefix     Value of `taskprefix` attribute, or NULL.
+ * @param resource_prefix Value of `resourceprefix` attribute, or NULL.
+ * @param account_prefix  Value of `accountprefix` attribute, or NULL.
+ * @param report_prefix   Value of `reportprefix` attribute, or NULL.
  */
-void push_included_file(ParseOutput *po, const char *quoted_text);
+void push_include(ParseOutput *po, const char *quoted_text,
+                  const char *task_prefix,
+                  const char *resource_prefix,
+                  const char *account_prefix,
+                  const char *report_prefix);
 
 /**
  * Parse a `YYYY-MM-DD` date prefix from a TaskJuggler `TK_DATE` token's
