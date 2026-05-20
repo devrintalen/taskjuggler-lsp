@@ -64,18 +64,7 @@ typedef struct {
     char        *uri;                 /**< document URI, heap-allocated */
     char        *text;                /**< full source text, heap-allocated */
     ParseResult *parse;               /**< parse output for the current text; NULL when slot has no parse */
-    /* Last semantic-tokens response sent to the client.  Retained across
-     * revalidations so semanticTokens/full/delta requests can diff against
-     * exactly what the client is holding.  NULL until the client makes its
-     * first semanticTokens request.  All sem_tokens_* fields are
-     * read/written under docs_mutex. */
-    uint32_t   *sem_tokens_data;
-    size_t      sem_tokens_count;     /**< entries in sem_tokens_data (multiple of 5) */
-    char       *sem_tokens_result_id; /**< resultId returned alongside the data */
-    /* Monotonic per-document counter used to mint resultIds for
-     * semanticTokens responses.  Scoped to the document so different
-     * documents produce independent ID sequences. */
-    uint64_t        next_sem_tokens_result_id;
+    SemanticTokenResult sem_tokens;   /**< cached semantic-tokens response + id generator */
     /* Monotonic per-document version, incremented under docs_mutex
      * whenever `parse` or `text` is swapped.  Query workers compare
      * the snapshot's captured version against this on send and reply
@@ -160,7 +149,7 @@ static Document *doc_alloc(const char *uri) {
             docs[i].uri    = canon; /* ownership transferred */
             docs[i].text   = NULL;
             docs[i].parse  = NULL;
-            docs[i].next_sem_tokens_result_id = 1;
+            docs[i].sem_tokens.next_result_id = 1;
             atomic_store(&docs[i].doc_version, 1);
             return &docs[i];
         }
@@ -193,8 +182,7 @@ static void doc_install_new_parse(Document *d, ParseResult *new_parse) {
 static void doc_free(Document *d) {
     free(d->uri);
     free(d->text);
-    free(d->sem_tokens_data);
-    free(d->sem_tokens_result_id);
+    semantic_token_result_release(&d->sem_tokens);
     parse_result_release(d->parse);
     memset(d, 0, sizeof(*d));
 }
@@ -1603,24 +1591,9 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
 static char *mint_sem_tokens_result_id(Document *d) {
     char buf[32];
     int n = snprintf(buf, sizeof(buf), "%" PRIu64,
-                     d->next_sem_tokens_result_id++);
+                     d->sem_tokens.next_result_id++);
     if (n < 0) return NULL;
     return strdup(buf);
-}
-
-/**
- * Replace the cached semantic-tokens data stored on @p d with @p new_buf
- * and @p new_result_id, freeing whatever was there before.  Ownership of
- * both pointers transfers to @p d.  Caller must hold docs_mutex.
- */
-static void doc_set_sem_tokens(Document *d,
-                                uint32_t *new_buf, size_t new_count,
-                                char *new_result_id) {
-    free(d->sem_tokens_data);
-    free(d->sem_tokens_result_id);
-    d->sem_tokens_data      = new_buf;
-    d->sem_tokens_count     = new_count;
-    d->sem_tokens_result_id = new_result_id;
 }
 
 /**
@@ -1666,7 +1639,7 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
     char *result_id = mint_sem_tokens_result_id(d);
     yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
     /* Transfer ownership of buf and result_id to the document cache. */
-    doc_set_sem_tokens(d, buf, count, result_id);
+    semantic_token_result_replace(&d->sem_tokens, buf, count, result_id);
     pthread_mutex_unlock(&docs_mutex);
     return make_response(doc, id, result);
 }
@@ -1710,10 +1683,10 @@ static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yy
     char *result_id = mint_sem_tokens_result_id(d);
 
     yyjson_mut_val *result;
-    if (d->sem_tokens_data && d->sem_tokens_result_id && previous_result_id &&
-        strcmp(d->sem_tokens_result_id, previous_result_id) == 0) {
+    if (d->sem_tokens.data && d->sem_tokens.result_id && previous_result_id &&
+        strcmp(d->sem_tokens.result_id, previous_result_id) == 0) {
         result = build_semantic_tokens_delta_json(doc,
-                                                   d->sem_tokens_data, d->sem_tokens_count,
+                                                   d->sem_tokens.data, d->sem_tokens.count,
                                                    new_buf, new_count,
                                                    result_id);
     } else {
@@ -1721,7 +1694,7 @@ static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yy
         result = build_semantic_tokens_json_from_buf(doc, new_buf, new_count, result_id);
     }
 
-    doc_set_sem_tokens(d, new_buf, new_count, result_id);
+    semantic_token_result_replace(&d->sem_tokens, new_buf, new_count, result_id);
     pthread_mutex_unlock(&docs_mutex);
     return make_response(doc, id, result);
 }
