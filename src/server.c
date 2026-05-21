@@ -90,9 +90,6 @@ typedef struct Document {
     int          num_tok_spans;
     int          tok_span_cap;
     int          num_sem_entries;
-    IncludeRef  *includes;          /**< one entry per `include` directive (file + per-kind prefixes) */
-    int          num_includes;
-    int          includes_cap;
 
     /* Prefixes applied to this Document by the includer's `include` block,
      * one per kind.  Populated by follow_includes() from the includer's
@@ -102,13 +99,6 @@ typedef struct Document {
     char        *account_prefix;
     char        *report_prefix;
     char        *resource_prefix;
-
-    /* Other Documents this one pulls in via `include`.  Populated by the
-     * include resolver.  Borrowed pointers — the Document store owns
-     * every slot. */
-    struct Document **included_docs;
-    int          num_included_docs;
-    int          included_docs_cap;
 } Document;
 
 static Document docs[MAX_DOCS];
@@ -122,7 +112,7 @@ static char *g_workspace_root = NULL;
 /* Forward declarations. */
 static char *normalize_uri(const char *raw_uri);
 static void  load_file_from_disk(const char *path);
-static void  follow_includes(const char *file_path, const Document *d);
+static void  follow_includes(const char *file_path, const ParseOutput *po);
 static void  load_tj_files_recursive(const char *dir_path);
 static void  rebuild_global_trees(void);
 
@@ -196,23 +186,13 @@ static void doc_clear_parse_state(Document *d) {
     d->num_tok_spans   = 0;
     d->tok_span_cap    = 0;
     d->num_sem_entries = 0;
-
-    for (int i = 0; i < d->num_includes; i++) {
-        free(d->includes[i].filename);
-        free(d->includes[i].task_prefix);
-        free(d->includes[i].resource_prefix);
-        free(d->includes[i].account_prefix);
-        free(d->includes[i].report_prefix);
-    }
-    free(d->includes);
-    d->includes      = NULL;
-    d->num_includes  = 0;
-    d->includes_cap  = 0;
 }
 
-/** Move every parse-derived field from @p po into @p d, releasing whatever
- *  @p d held previously.  @p po is freed (its fields have been moved out,
- *  so the shell is empty afterwards). */
+/** Move every parse-derived field that the Document keeps long-term out
+ *  of @p po into @p d, releasing whatever @p d held previously.
+ *  Includes are not part of that long-term state — callers consume them
+ *  via follow_includes() before calling here; parse_output_free()
+ *  releases the leftover include array along with the shell. */
 static void doc_install_parse(Document *d, ParseOutput *po) {
     doc_clear_parse_state(d);
     if (po) {
@@ -225,12 +205,16 @@ static void doc_install_parse(Document *d, ParseOutput *po) {
         d->num_tok_spans       = po->num_tok_spans;
         d->tok_span_cap        = po->tok_span_cap;
         d->num_sem_entries     = po->num_sem_entries;
-        d->includes            = po->includes;
-        d->num_includes        = po->num_includes;
-        d->includes_cap        = po->includes_cap;
-        /* Zero the source so parse_output_free does not double-free. */
-        memset(po, 0, sizeof(*po));
-        free(po);
+        /* Null out moved-out fields so parse_output_free only releases
+         * what po still owns: the includes array (whose strings live
+         * past follow_includes() because replace_string() strdups them)
+         * and the struct shell. */
+        po->tasks = po->accounts = po->reports = po->resources = po->project = NULL;
+        po->tok_spans       = NULL;
+        po->num_tok_spans   = 0;
+        po->tok_span_cap    = 0;
+        po->num_sem_entries = 0;
+        parse_output_free(po);
     }
     atomic_fetch_add(&d->doc_version, 1);
 }
@@ -244,7 +228,6 @@ static void doc_free(Document *d) {
     free(d->account_prefix);
     free(d->report_prefix);
     free(d->resource_prefix);
-    free(d->included_docs);
     memset(d, 0, sizeof(*d));
 }
 
@@ -401,8 +384,9 @@ static void load_file_from_disk(const char *path) {
 
     document->text      = text;
     document->disk_only = 1;
-    doc_install_parse(document, parse(text));
-    follow_includes(path, document);
+    ParseOutput *po = parse(text);
+    follow_includes(path, po);
+    doc_install_parse(document, po);
 }
 
 /** Replace @p *slot with a fresh strdup of @p value (NULL when @p value
@@ -412,8 +396,8 @@ static void replace_string(char **slot, const char *value) {
     *slot = value ? strdup(value) : NULL;
 }
 
-static void follow_includes(const char *file_path, const Document *d) {
-    if (!d || !d->num_includes) return;
+static void follow_includes(const char *file_path, const ParseOutput *po) {
+    if (!po || !po->num_includes) return;
 
     size_t path_len = strlen(file_path);
     const char *last_slash = NULL;
@@ -422,8 +406,8 @@ static void follow_includes(const char *file_path, const Document *d) {
     }
     size_t dir_len = last_slash ? (size_t)(last_slash - file_path) : 0;
 
-    for (int i = 0; i < d->num_includes; i++) {
-        const IncludeRef *inc = &d->includes[i];
+    for (int i = 0; i < po->num_includes; i++) {
+        const IncludeRef *inc = &po->includes[i];
         const char *filename = inc->filename;
         if (!filename) continue;
         size_t fname_len = strlen(filename);
@@ -979,8 +963,9 @@ static void handle_did_change_watched_files(yyjson_val *params) {
             free(document->text);
             document->text      = text;
             document->disk_only = 1;
-            doc_install_parse(document, parse(text));
-            follow_includes(path, document);
+            ParseOutput *po = parse(text);
+            follow_includes(path, po);
+            doc_install_parse(document, po);
             free(path);
             changed = 1;
         }
@@ -1023,8 +1008,9 @@ static void handle_did_rename_files(yyjson_val *params) {
         free(new_doc->text);
         new_doc->text      = text;
         new_doc->disk_only = 1;
-        doc_install_parse(new_doc, parse(text));
-        follow_includes(path, new_doc);
+        ParseOutput *po = parse(text);
+        follow_includes(path, po);
+        doc_install_parse(new_doc, po);
         free(path);
         changed = 1;
     }
@@ -1058,13 +1044,14 @@ static void handle_didopen(yyjson_val *params) {
     }
     d->disk_only = 0;
     d->text  = strdup(text);
-    doc_install_parse(d, parse(text));
+    ParseOutput *po = parse(text);
 
     char *path = uri_to_path(uri);
     if (path) {
-        follow_includes(path, d);
+        follow_includes(path, po);
         free(path);
     }
+    doc_install_parse(d, po);
 
     revalidate_all_docs();
 }
@@ -1110,13 +1097,14 @@ static void handle_didchange(yyjson_val *params) {
 
     free(d->text);
     d->text = current;
-    doc_install_parse(d, parse(d->text));
+    ParseOutput *po = parse(d->text);
 
     char *path = uri_to_path(uri);
     if (path) {
-        follow_includes(path, d);
+        follow_includes(path, po);
         free(path);
     }
+    doc_install_parse(d, po);
 
     revalidate_all_docs();
 }
@@ -1139,8 +1127,9 @@ static void handle_didclose(yyjson_val *params) {
         free(d->text);
         d->text      = text;
         d->disk_only = 1;
-        doc_install_parse(d, parse(text));
-        follow_includes(path, d);
+        ParseOutput *po = parse(text);
+        follow_includes(path, po);
+        doc_install_parse(d, po);
     } else {
         publish_diagnostics(uri);
         doc_free(d);
