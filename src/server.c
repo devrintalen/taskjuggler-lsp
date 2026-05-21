@@ -46,6 +46,7 @@
 #include "semantic_tokens_delta.h"
 #include "workspace_symbol.h"
 #include "code_lens.h"
+#include "compile_commands.h"
 #include "version.h"
 
 #include <yyjson.h>
@@ -109,12 +110,25 @@ static pthread_mutex_t docs_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static char *g_workspace_root = NULL;
 
+/* compile_commands.json cache.  g_cc_path is set once at initialize so
+ * the stat-poll in revalidate_all_docs has a stable target.  The
+ * mtime/size pair is bumped each time the file is read; a difference
+ * triggers reload.  g_cc_attempted is set after the first load attempt
+ * so missing-file errors are only surfaced once per change. */
+static char  *g_cc_path        = NULL;
+static time_t g_cc_mtime_sec   = 0;
+static long   g_cc_mtime_nsec  = 0;
+static off_t  g_cc_size        = 0;
+static int    g_cc_attempted   = 0;
+
 /* Forward declarations. */
 static char *normalize_uri(const char *raw_uri);
 static void  load_file_from_disk(const char *path);
 static void  follow_includes(const char *file_path, const ParseOutput *po);
 static void  load_tj_files_recursive(const char *dir_path);
 static void  rebuild_global_trees(void);
+static void  reload_compile_commands(void);
+static void  maybe_reload_compile_commands(void);
 
 /* ── Global tj_node trees ───────────────────────────────────────────────── *
  *
@@ -242,6 +256,29 @@ void lsp_send_message(const char *msg) {
     printf("Content-Length: %zu\r\n\r\n%s", strlen(msg), msg);
     fflush(stdout);
     pthread_mutex_unlock(&stdout_mutex);
+}
+
+/** Send a window/showMessage notification to the client.  Used to
+ *  surface non-fatal load/configuration errors (e.g. missing
+ *  compile_commands.json) without crashing the session.  @p type
+ *  follows the LSP MessageType enum: 1=Error, 2=Warning, 3=Info,
+ *  4=Log. */
+static void show_message(int type, const char *message) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *params = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_int(doc, params, "type", type);
+    yyjson_mut_obj_add_str(doc, params, "message", message);
+    yyjson_mut_val *note = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, note, "jsonrpc", "2.0");
+    yyjson_mut_obj_add_str(doc, note, "method",  "window/showMessage");
+    yyjson_mut_obj_add_val(doc, note, "params",  params);
+    yyjson_mut_doc_set_root(doc, note);
+    char *text = yyjson_mut_write(doc, 0, NULL);
+    yyjson_mut_doc_free(doc);
+    if (text) {
+        lsp_send_message(text);
+        free(text);
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -783,7 +820,102 @@ static void republish_all_diagnostics(void) {
     }
 }
 
+/** Read compile_commands.json from g_cc_path and call
+ *  load_file_from_disk() on every listed .tjp.  Each load cascades
+ *  into follow_includes() so the .tjp's transitive .tji closure ends
+ *  up in docs[] as disk_only.  Already-loaded files short-circuit
+ *  inside load_file_from_disk(), so reloads are idempotent.
+ *
+ *  Errors surface via window/showMessage; the server stays alive in a
+ *  degraded state when the file is missing or malformed.
+ *
+ *  Updates the mtime/size cache on every call (even on failure) so
+ *  the stat-poll does not re-trigger until the file changes again. */
+static void reload_compile_commands(void) {
+    g_cc_attempted = 1;
+
+    if (!g_cc_path) {
+        show_message(2,
+            "taskjuggler-lsp: no workspace root; compile_commands.json "
+            "not loaded.  LSP features will be limited.");
+        return;
+    }
+
+    struct stat st;
+    if (stat(g_cc_path, &st) == 0) {
+        g_cc_mtime_sec  = st.st_mtim.tv_sec;
+        g_cc_mtime_nsec = st.st_mtim.tv_nsec;
+        g_cc_size       = st.st_size;
+    } else {
+        g_cc_mtime_sec = g_cc_mtime_nsec = 0;
+        g_cc_size      = 0;
+    }
+
+    CompileEntry *entries = NULL;
+    int           n       = 0;
+    CompileCommandsResult res =
+        compile_commands_load(g_workspace_root, &entries, &n);
+
+    switch (res) {
+    case CC_OK:
+        for (int i = 0; i < n; i++) {
+            if (entries[i].file_abs)
+                load_file_from_disk(entries[i].file_abs);
+        }
+        break;
+    case CC_NOT_FOUND:
+        show_message(1,
+            "taskjuggler-lsp: compile_commands.json not found at workspace "
+            "root.  LSP features will be limited; create the file to "
+            "enable project-aware behavior.");
+        break;
+    case CC_PARSE_ERROR:
+        show_message(1,
+            "taskjuggler-lsp: compile_commands.json is not valid JSON; "
+            "see server stderr for details.");
+        break;
+    case CC_SCHEMA_ERROR:
+        show_message(1,
+            "taskjuggler-lsp: compile_commands.json does not match the "
+            "expected schema (array of objects with `file` field).");
+        break;
+    case CC_NO_ROOT:
+        /* Already handled above by the g_cc_path NULL check. */
+        break;
+    }
+
+    compile_commands_free(entries, n);
+}
+
+/** Stat g_cc_path; if its mtime or size has changed since the last
+ *  load (or the file is now present after a missing-first-attempt),
+ *  trigger reload_compile_commands.  Called at the top of every
+ *  revalidate_all_docs(), so every user-driven parse event picks up
+ *  on-disk edits to compile_commands.json. */
+static void maybe_reload_compile_commands(void) {
+    if (!g_cc_path) return;
+    struct stat st;
+    if (stat(g_cc_path, &st) != 0) {
+        /* File disappeared since the last successful load.  Only nag
+         * the user once per transition by clearing the cache. */
+        if (g_cc_mtime_sec || g_cc_mtime_nsec || g_cc_size) {
+            g_cc_mtime_sec = g_cc_mtime_nsec = 0;
+            g_cc_size      = 0;
+            show_message(1,
+                "taskjuggler-lsp: compile_commands.json has been removed.");
+        }
+        return;
+    }
+    if (st.st_mtim.tv_sec  != g_cc_mtime_sec ||
+        st.st_mtim.tv_nsec != g_cc_mtime_nsec ||
+        st.st_size         != g_cc_size      ||
+        !g_cc_attempted) {
+        reload_compile_commands();
+    }
+}
+
 static void revalidate_all_docs(void) {
+    maybe_reload_compile_commands();
     rebuild_global_trees();
     republish_all_diagnostics();
 }
@@ -798,6 +930,19 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
         yyjson_val *root_uri_val = yyjson_obj_get(params, "rootUri");
         if (root_uri_val && yyjson_is_str(root_uri_val)) {
             g_workspace_root = uri_to_path(yyjson_get_str(root_uri_val));
+        }
+    }
+    if (g_workspace_root && !g_cc_path) {
+        size_t root_len = strlen(g_workspace_root);
+        int need_sep = (root_len > 0 && g_workspace_root[root_len - 1] != '/');
+        const char *fname = "compile_commands.json";
+        size_t fname_len = strlen(fname);
+        g_cc_path = malloc(root_len + (need_sep ? 1 : 0) + fname_len + 1);
+        if (g_cc_path) {
+            memcpy(g_cc_path, g_workspace_root, root_len);
+            size_t off = root_len;
+            if (need_sep) g_cc_path[off++] = '/';
+            memcpy(g_cc_path + off, fname, fname_len + 1);
         }
     }
 
@@ -923,7 +1068,12 @@ static void handle_initialized(void) {
 
     if (g_workspace_root) {
         load_tj_files_recursive(g_workspace_root);
+        reload_compile_commands();
         revalidate_all_docs();
+    } else {
+        /* No rootUri provided: still attempt the load so the user gets
+         * the standard "no workspace root" warning. */
+        reload_compile_commands();
     }
 }
 
