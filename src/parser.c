@@ -118,7 +118,6 @@ void tj_node_free(tj_node *n) {
     for (int i = 0; i < n->num_children; i++)
         tj_node_free(n->children[i]);
     free(n->children);
-    free(n->included_children);
     free(n);
 }
 
@@ -134,20 +133,26 @@ void tj_node_append_child(tj_node *parent, tj_node *child) {
     child->parent_node = parent;
 }
 
-void tj_node_append_included(tj_node *parent, tj_node *child) {
-    if (parent->num_included_children >= parent->included_children_cap) {
-        int nc = parent->included_children_cap ? parent->included_children_cap * 2 : 4;
-        tj_node **tmp = realloc(parent->included_children,
-                                (size_t)nc * sizeof(tj_node *));
-        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        parent->included_children     = tmp;
-        parent->included_children_cap = nc;
+tj_node *tj_node_clone(const tj_node *src) {
+    if (!src) return NULL;
+    tj_node *dst = calloc(1, sizeof(tj_node));
+    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    dst->keyword         = src->keyword;
+    dst->id              = src->id   ? strdup(src->id)   : NULL;
+    dst->name            = src->name ? strdup(src->name) : NULL;
+    dst->range           = src->range;
+    dst->selection_range = src->selection_range;
+    dst->start_date      = src->start_date;
+    dst->end_date        = src->end_date;
+    dst->has_start       = src->has_start;
+    dst->has_end         = src->has_end;
+    /* parent_node / parent_doc deliberately NULL on the root; recursive
+     * children below get their parent_node set via tj_node_append_child. */
+    for (int i = 0; i < src->num_children; i++) {
+        tj_node *child_copy = tj_node_clone(src->children[i]);
+        tj_node_append_child(dst, child_copy);
     }
-    parent->included_children[parent->num_included_children++] = child;
-}
-
-void tj_node_clear_included(tj_node *n) {
-    n->num_included_children = 0;
+    return dst;
 }
 
 /* ── ParseOutput helpers ─────────────────────────────────────────────────── */

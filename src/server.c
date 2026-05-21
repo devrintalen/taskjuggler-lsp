@@ -128,15 +128,14 @@ static void  rebuild_global_trees(void);
 
 /* ── Global tj_node trees ───────────────────────────────────────────────── *
  *
- * TODO(global-tree): single canonical project per workspace.  These
- * statically-allocated synthetic roots hold the merged view of every
- * Document's per-kind tree, with .tji subtrees hoisted under their
- * include site via prefix.  Rebuilt from scratch by rebuild_global_trees()
- * after any document-state-changing notification.
+ * Synthetic per-kind roots holding the merged view of every Document's
+ * per-kind tree.  Built fresh by rebuild_global_trees() on every
+ * document-state-changing notification: deep-copy the canonical
+ * project's children in, then deep-copy every other Document's
+ * top-level children at the prefix target inside the global tree.
  *
- * The roots stay zeroed when there is no project to anchor them.
- * Today rebuild_global_trees() is a stub that resets their
- * included_children to empty until the hoist pass lands. */
+ * These trees own their children — completely separate memory from the
+ * Document-owned trees, which stay immutable after parse. */
 static tj_node g_task_tree;
 static tj_node g_account_tree;
 static tj_node g_report_tree;
@@ -618,15 +617,17 @@ static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
    Global tj_node tree rebuild
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/** Recursively reset @p n's included_children plus those of every locally
- *  declared descendant.  Included pointers themselves are not freed —
- *  Documents own the nodes — we just drop the borrowed pointers so the
- *  next hoist pass starts from a clean slate. */
-static void clear_included_recursive(tj_node *n) {
-    if (!n) return;
-    tj_node_clear_included(n);
-    for (int i = 0; i < n->num_children; i++)
-        clear_included_recursive(n->children[i]);
+/** Free every owned child of @p root, leaving @p root itself as an empty
+ *  synthetic-root shell.  Used to tear down the global trees before each
+ *  rebuild. */
+static void free_global_root_children(tj_node *root) {
+    if (!root) return;
+    for (int i = 0; i < root->num_children; i++)
+        tj_node_free(root->children[i]);
+    free(root->children);
+    root->children     = NULL;
+    root->num_children = 0;
+    root->children_cap = 0;
 }
 
 /** Return 1 when @p uri's path component ends in ".tjp" (case-sensitive). */
@@ -683,10 +684,10 @@ static Document *find_canonical_tjp(void) {
     return NULL;
 }
 
-/** Walk @p start's effective subtree (children + included_children) along
- *  the dot-separated @p path and return the matched node.  Returns @p start
- *  when @p path is NULL or empty.  Used to resolve prefix targets when
- *  hoisting an included Document into the canonical tree. */
+/** Walk @p start's children along the dot-separated @p path and return
+ *  the matched node.  Returns @p start when @p path is NULL or empty.
+ *  Operates on the global tree (which owns its children outright), so
+ *  there is no separate "included" array to consult. */
 static tj_node *find_node_by_dotted_path(tj_node *start, const char *path) {
     if (!start) return NULL;
     if (!path || !path[0]) return start;
@@ -699,108 +700,90 @@ static tj_node *find_node_by_dotted_path(tj_node *start, const char *path) {
         for (int i = 0; i < cur->num_children && !next; i++)
             if (cur->children[i]->id && strcmp(cur->children[i]->id, seg) == 0)
                 next = cur->children[i];
-        for (int i = 0; i < cur->num_included_children && !next; i++)
-            if (cur->included_children[i]->id
-                    && strcmp(cur->included_children[i]->id, seg) == 0)
-                next = cur->included_children[i];
         cur = next;
     }
     free(copy);
     return cur;
 }
 
-/** Hoist every top-level child of @p from_root into @p target's
- *  included_children.  Used by both the canonical-anchored path and the
- *  .tji-only fallback. */
-static void hoist_top_level(tj_node *target, tj_node *from_root) {
+/** Deep-copy each top-level child of @p from_root and attach the copies
+ *  to @p target. */
+static void copy_top_level(tj_node *target, tj_node *from_root) {
     if (!target || !from_root) return;
-    for (int i = 0; i < from_root->num_children; i++)
-        tj_node_append_included(target, from_root->children[i]);
+    for (int i = 0; i < from_root->num_children; i++) {
+        tj_node *copy = tj_node_clone(from_root->children[i]);
+        tj_node_append_child(target, copy);
+    }
 }
 
-/** For each of the four kinds, find @p d's prefix target inside @p canon
- *  and hoist @p d's top-level entries there.  When a prefix doesn't
- *  resolve to a node in @p canon's tree, this kind's hoist is skipped —
- *  TODO(global-tree): emit a diagnostic instead once the diagnostic
- *  channel returns.
+/** For each of the four kinds, find @p d's prefix target inside the
+ *  matching global root and deep-copy @p d's top-level entries under
+ *  that target.  When a prefix doesn't resolve to a node in the global
+ *  tree, this kind's copy is skipped — TODO(global-tree): emit a
+ *  diagnostic instead once the diagnostic channel returns.
  *
  *  TODO(nested-includes): when @p d itself includes another .tji whose
  *  prefix target lives only in @p d's tree, the second .tji needs @p d's
- *  hoist to have happened first.  Document slot order today follows load
+ *  copy to have happened first.  Document slot order today follows load
  *  order, which is includer-before-includee for the workspace scan, so
  *  the simple in-order pass below is usually right — but it's not
  *  guaranteed.  A topological pass is the proper fix. */
-static void hoist_document(Document *canon, Document *d) {
+static void copy_document_into_globals(Document *d) {
     struct {
-        tj_node    *canon_root;
+        tj_node    *global_root;
         tj_node    *doc_root;
         const char *prefix;
     } kinds[] = {
-        { canon->tasks,     d->tasks,     d->task_prefix     },
-        { canon->accounts,  d->accounts,  d->account_prefix  },
-        { canon->reports,   d->reports,   d->report_prefix   },
-        { canon->resources, d->resources, d->resource_prefix },
+        { &g_task_tree,     d->tasks,     d->task_prefix     },
+        { &g_account_tree,  d->accounts,  d->account_prefix  },
+        { &g_report_tree,   d->reports,   d->report_prefix   },
+        { &g_resource_tree, d->resources, d->resource_prefix },
     };
     for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
-        tj_node *target = find_node_by_dotted_path(kinds[k].canon_root,
+        tj_node *target = find_node_by_dotted_path(kinds[k].global_root,
                                                     kinds[k].prefix);
         if (!target) continue;
-        hoist_top_level(target, kinds[k].doc_root);
+        copy_top_level(target, kinds[k].doc_root);
     }
 }
 
 /** Build the global per-kind trees from the current Document store.
  *
- *  Rebuilds from scratch on every notification: cheap because we only
- *  touch the borrowed-pointer included_children arrays — locally
- *  declared subtrees stay immutable. */
+ *  Rebuilds from scratch on every notification: free the prior copy,
+ *  deep-copy the canonical project's children in, then deep-copy every
+ *  other Document's top-level children at its prefix target. */
 static void rebuild_global_trees(void) {
-    /* 1. Drop every hoist from the previous cycle. */
-    tj_node *globals[] = {
-        &g_task_tree, &g_account_tree,
-        &g_report_tree, &g_resource_tree,
-    };
-    for (size_t i = 0; i < sizeof(globals) / sizeof(globals[0]); i++)
-        tj_node_clear_included(globals[i]);
-
-    for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use || !docs[i].tasks) continue;
-        clear_included_recursive(docs[i].tasks);
-        clear_included_recursive(docs[i].accounts);
-        clear_included_recursive(docs[i].reports);
-        clear_included_recursive(docs[i].resources);
-        if (docs[i].project)
-            clear_included_recursive(docs[i].project);
-    }
+    /* 1. Free everything from the previous cycle. */
+    free_global_root_children(&g_task_tree);
+    free_global_root_children(&g_account_tree);
+    free_global_root_children(&g_report_tree);
+    free_global_root_children(&g_resource_tree);
 
     /* 2. Pick the canonical project. */
     Document *canon = find_canonical_tjp();
 
     if (canon) {
-        /* 3a. Anchor the globals on canon's top-level entries.  Canon's
-         *     per-kind synthetic root is itself never the global root;
-         *     instead its children become the global's included_children
-         *     so hoisted .tji entries can join them seamlessly. */
-        hoist_top_level(&g_task_tree,     canon->tasks);
-        hoist_top_level(&g_account_tree,  canon->accounts);
-        hoist_top_level(&g_report_tree,   canon->reports);
-        hoist_top_level(&g_resource_tree, canon->resources);
+        /* 3a. Anchor the globals on copies of canon's top-level entries. */
+        copy_top_level(&g_task_tree,     canon->tasks);
+        copy_top_level(&g_account_tree,  canon->accounts);
+        copy_top_level(&g_report_tree,   canon->reports);
+        copy_top_level(&g_resource_tree, canon->resources);
 
-        /* 3b. Hoist every other loaded Document at its prefix target. */
+        /* 3b. Copy every other loaded Document under its prefix target. */
         for (int i = 0; i < MAX_DOCS; i++) {
             if (!docs[i].in_use || !docs[i].tasks) continue;
             if (&docs[i] == canon) continue;
-            hoist_document(canon, &docs[i]);
+            copy_document_into_globals(&docs[i]);
         }
     } else {
-        /* 4. .tji-only fallback: treat every loaded document as if it
-         *    were hoisted at the synthetic root with no prefix. */
+        /* 4. .tji-only fallback: copy every loaded document's top-levels
+         *    onto the synthetic root with no prefix. */
         for (int i = 0; i < MAX_DOCS; i++) {
             if (!docs[i].in_use || !docs[i].tasks) continue;
-            hoist_top_level(&g_task_tree,     docs[i].tasks);
-            hoist_top_level(&g_account_tree,  docs[i].accounts);
-            hoist_top_level(&g_report_tree,   docs[i].reports);
-            hoist_top_level(&g_resource_tree, docs[i].resources);
+            copy_top_level(&g_task_tree,     docs[i].tasks);
+            copy_top_level(&g_account_tree,  docs[i].accounts);
+            copy_top_level(&g_report_tree,   docs[i].reports);
+            copy_top_level(&g_resource_tree, docs[i].resources);
         }
     }
 }

@@ -91,10 +91,10 @@ void token_free(Token *t);
  * field — a raw KW_* / TK_* constant from grammar.tab.h.
  *
  * Memory ownership: Documents own every tj_node they parse.  When this
- * Document is freed, the entire owned subtree is freed.  Cross-document
- * references (parent_node and included_children) borrow pointers into
- * other Documents' subtrees; they are recomputed each time the include
- * pass runs and never freed directly by tj_node_free().
+ * Document is freed, the entire owned subtree is freed.  Per-Document
+ * tj_node trees are immutable after parse — cross-Document hoisting
+ * lives in a wholly separate global tree built by server.c, not on
+ * these nodes.
  */
 typedef struct tj_node tj_node;
 
@@ -136,31 +136,18 @@ struct tj_node {
      *
      * children       — locally declared children in source order.
      *                  Owned by this node; freed by tj_node_free().
-     *
-     * included_children — nodes hoisted in from other Documents via
-     *                  `include` directives with the relevant
-     *                  *prefix.  Borrowed pointers; rebuilt by the
-     *                  include pass each cycle and never freed by
-     *                  this node.
      */
     tj_node   *parent_node;
     tj_node   *parent_doc;
     tj_node  **children;
     int        num_children;
     int        children_cap;
-    tj_node  **included_children;
-    int        num_included_children;
-    int        included_children_cap;
 };
 
 /**
  * Recursively free a tj_node subtree.  Frees the node's own strings, its
  * children (recursively, via the owned `children` array), and the node
- * itself.
- *
- * Does NOT touch `included_children` — those are borrowed pointers into
- * other Documents' subtrees, owned and freed by their declaring
- * Document.  Does NOT walk `parent_node` upward.
+ * itself.  Does NOT walk `parent_node` upward.
  *
  * @param n  Root of the subtree to free.  Safe to call with NULL.
  */
@@ -176,24 +163,16 @@ void tj_node_free(tj_node *n);
 void tj_node_append_child(tj_node *parent, tj_node *child);
 
 /**
- * Append @p child to @p parent's `included_children` array (borrowed
- * pointer).  Does NOT touch @p child's parent_node.  Caller is
- * responsible for setting parent_node when appropriate (the include
- * pass sets it to the prefix target node).
+ * Deep-copy a tj_node subtree.  The returned tree owns its own children
+ * (recursively) and carries copies of @p src's id/name strings.
+ * `parent_node` on the returned tree is set internally so the copy is
+ * self-consistent; the root's `parent_node` and `parent_doc` are NULL
+ * (the caller wires the root in wherever it belongs).
  *
- * @param parent  Node receiving the hoisted child reference.
- * @param child   Child reference (borrowed, not owned).
+ * @param src  Source node.  NULL is returned as NULL.
+ * @return Newly allocated independent subtree.
  */
-void tj_node_append_included(tj_node *parent, tj_node *child);
-
-/**
- * Reset @p n's `included_children` array to empty without freeing any
- * borrowed pointers.  Used by the include pass to clear stale hoists
- * before rebuilding them.
- *
- * @param n  Node whose included_children should be cleared.
- */
-void tj_node_clear_included(tj_node *n);
+tj_node *tj_node_clone(const tj_node *src);
 
 
 /** Forward declaration; the full struct is defined in diagnostics.h. */
@@ -254,8 +233,9 @@ typedef struct {
  *
  * Per-kind synthetic roots (`tasks`, `accounts`, `reports`, `resources`)
  * are always non-NULL.  Their `keyword` is 0; their `children` array holds
- * the top-level declarations of that kind in source order.  `included_children`
- * is empty at parse time; the server's include pass populates it.
+ * the top-level declarations of that kind in source order.  These trees
+ * are immutable after parse — cross-Document hoisting happens in a
+ * separately allocated global tree built by server.c.
  *
  * `project` is the project block's tj_node when the file declared one
  * (only ever set for .tjp files that contain `project ... { ... }`), or
