@@ -66,6 +66,8 @@
 
 #define MAX_DOCS 64
 
+struct Project;
+
 /** Document store slot.  Each slot owns the parse-derived state directly
  *  (per-kind synthetic roots, tokens, include filenames); parse() returns
  *  a transient ParseOutput whose fields get moved here by doc_install_parse(). */
@@ -76,6 +78,7 @@ typedef struct Document {
     _Atomic uint64_t doc_version;   /**< bumped on every text/parse swap */
     int          in_use;
     int          disk_only;
+    int          is_cc_root;        /**< 1 when this doc is named directly in compile_commands.json */
 
     /* Parse-derived state.  All four synthetic roots are non-NULL after a
      * successful parse and NULL before one has happened (use `tasks` as
@@ -99,6 +102,22 @@ typedef struct Document {
     char        *account_prefix;
     char        *report_prefix;
     char        *resource_prefix;
+
+    /* Resolved file:// URIs of every `include` directive in this doc,
+     * recorded by follow_includes() at parse time.  Owned by the
+     * Document; cleared at the top of each follow_includes() run and
+     * freed by doc_free().  Lets rebuild_all_projects() walk the
+     * include graph without re-parsing or threading state through the
+     * load pipeline. */
+    char       **included_uris;
+    int          num_included_uris;
+    int          included_uris_cap;
+
+    /* Project this document belongs to, computed by
+     * rebuild_all_projects() on every notification.  Borrowed pointer;
+     * the projects[] registry owns the Project itself.  NULL between
+     * parse and the next rebuild_all_projects() call. */
+    struct Project *primary_project;
 } Document;
 
 static Document docs[MAX_DOCS];
@@ -125,6 +144,7 @@ static char *normalize_uri(const char *raw_uri);
 static void  load_file_from_disk(const char *path);
 static void  follow_includes(const char *file_path, const ParseOutput *po);
 static void  rebuild_global_trees(void);
+static void  rebuild_all_projects(void);
 static void  reload_compile_commands(void);
 static void  maybe_reload_compile_commands(void);
 
@@ -137,11 +157,40 @@ static void  maybe_reload_compile_commands(void);
  * top-level children at the prefix target inside the global tree.
  *
  * These trees own their children — completely separate memory from the
- * Document-owned trees, which stay immutable after parse. */
+ * Document-owned trees, which stay immutable after parse.
+ *
+ * TODO(projects): these are being superseded by the per-Project trees
+ * built by rebuild_all_projects() below.  Both are built on every
+ * notification today; a follow-up commit will route handlers through
+ * primary_project and delete these. */
 static tj_node g_task_tree;
 static tj_node g_account_tree;
 static tj_node g_report_tree;
 static tj_node g_resource_tree;
+
+/* ── Per-Project tj_node trees ──────────────────────────────────────────── *
+ *
+ * Each compile_commands.json entry becomes one Project; its transitive
+ * include closure (followed via Document.included_uris[]) is deep-copied
+ * into the per-kind trees below with the includer's prefix applied.
+ * Built fresh by rebuild_all_projects() on every notification, in
+ * parallel with the soon-to-be-retired global trees.
+ *
+ * Orphan editor-only files (didOpen for a doc not reached by any
+ * compile_commands entry) are handled by a follow-up commit; until then
+ * they end up with primary_project == NULL. */
+typedef struct Project {
+    char    *id;                 /**< canonical .tjp URI from compile_commands.json */
+    int      is_orphan;          /**< reserved for singleton editor-only projects (commit 3) */
+    tj_node  tasks;              /**< synthetic per-kind roots, owned outright */
+    tj_node  accounts;
+    tj_node  reports;
+    tj_node  resources;
+} Project;
+
+static Project **projects;
+static int       num_projects;
+static int       cap_projects;
 
 /* ── Slot lookup / allocation / free ─────────────────────────────────────── */
 
@@ -240,6 +289,9 @@ static void doc_free(Document *d) {
     free(d->account_prefix);
     free(d->report_prefix);
     free(d->resource_prefix);
+    for (int i = 0; i < d->num_included_uris; i++)
+        free(d->included_uris[i]);
+    free(d->included_uris);
     memset(d, 0, sizeof(*d));
 }
 
@@ -432,6 +484,20 @@ static void replace_string(char **slot, const char *value) {
 }
 
 static void follow_includes(const char *file_path, const ParseOutput *po) {
+    /* Look up the includer Document so we can repopulate its
+     * included_uris[] as we resolve each include below.  follow_includes
+     * runs exactly once per parse, so clear any prior list before the
+     * early-return: a parse that newly removed all includes still needs
+     * to drop the stale URIs. */
+    char *includer_uri = path_to_uri(file_path);
+    Document *includer = includer_uri ? doc_find(includer_uri) : NULL;
+    free(includer_uri);
+    if (includer) {
+        for (int i = 0; i < includer->num_included_uris; i++)
+            free(includer->included_uris[i]);
+        includer->num_included_uris = 0;
+    }
+
     if (!po || !po->num_includes) return;
 
     size_t path_len = strlen(file_path);
@@ -471,13 +537,33 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
          * inserts under a file:// URI, so look it up the same way. */
         char *target_uri = path_to_uri(full_path);
         Document *target = target_uri ? doc_find(target_uri) : NULL;
-        free(target_uri);
         if (target) {
             replace_string(&target->task_prefix,     inc->task_prefix);
             replace_string(&target->resource_prefix, inc->resource_prefix);
             replace_string(&target->account_prefix,  inc->account_prefix);
             replace_string(&target->report_prefix,   inc->report_prefix);
         }
+
+        /* Record this resolved URI on the includer so
+         * rebuild_all_projects() can BFS the include graph.  Ownership
+         * of target_uri transfers to includer->included_uris[]. */
+        if (includer && target_uri) {
+            if (includer->num_included_uris >= includer->included_uris_cap) {
+                int new_cap = includer->included_uris_cap
+                              ? includer->included_uris_cap * 2 : 4;
+                char **tmp = realloc(includer->included_uris,
+                                     (size_t)new_cap * sizeof(char *));
+                if (tmp) {
+                    includer->included_uris     = tmp;
+                    includer->included_uris_cap = new_cap;
+                }
+            }
+            if (includer->num_included_uris < includer->included_uris_cap) {
+                includer->included_uris[includer->num_included_uris++] = target_uri;
+                target_uri = NULL;
+            }
+        }
+        free(target_uri);
 
         free(full_path);
     }
@@ -746,6 +832,142 @@ static void rebuild_global_trees(void) {
     }
 }
 
+/* ── Per-Project tree rebuild ──────────────────────────────────────────── */
+
+static void project_free(Project *p) {
+    if (!p) return;
+    free(p->id);
+    free_global_root_children(&p->tasks);
+    free_global_root_children(&p->accounts);
+    free_global_root_children(&p->reports);
+    free_global_root_children(&p->resources);
+    free(p);
+}
+
+static void projects_clear(void) {
+    for (int i = 0; i < num_projects; i++)
+        project_free(projects[i]);
+    num_projects = 0;
+}
+
+/** Copy each top-level child of @p d's per-kind trees into the matching
+ *  per-kind tree on @p p, applying @p d's prefix.  Mirrors
+ *  copy_document_into_globals but writes into a Project rather than the
+ *  global trees. */
+static void copy_document_into_project(Project *p, Document *d) {
+    struct {
+        tj_node    *project_root;
+        tj_node    *doc_root;
+        const char *prefix;
+    } kinds[] = {
+        { &p->tasks,     d->tasks,     d->task_prefix     },
+        { &p->accounts,  d->accounts,  d->account_prefix  },
+        { &p->reports,   d->reports,   d->report_prefix   },
+        { &p->resources, d->resources, d->resource_prefix },
+    };
+    for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
+        tj_node *target = find_node_by_dotted_path(kinds[k].project_root,
+                                                    kinds[k].prefix);
+        if (!target) continue;
+        copy_top_level(target, kinds[k].doc_root);
+    }
+}
+
+/** Look up @p uri in docs[] (with normalization fallback).  Returns
+ *  NULL if no in-use slot matches. */
+static Document *doc_find_by_uri(const char *uri) {
+    return doc_find(uri);
+}
+
+/** BFS from @p root along included_uris[], deep-copying every reachable
+ *  Document's top-level into @p p with prefixes applied.  Marks each
+ *  visited doc's primary_project to @p p if not already claimed by a
+ *  prior project. */
+static void project_populate_from_root(Project *p, Document *root) {
+    /* Queue holds borrowed Document pointers; visited[] dedupes within
+     * this BFS so a diamond include doesn't double-copy. */
+    Document **queue   = NULL;
+    int        q_len   = 0;
+    int        q_head  = 0;
+    int        q_cap   = 0;
+
+    Document **visited = NULL;
+    int        v_len   = 0;
+    int        v_cap   = 0;
+
+    #define PUSH(arr, len, cap, val) do {                       \
+        if ((len) >= (cap)) {                                   \
+            int _nc = (cap) ? (cap) * 2 : 8;                    \
+            void *_t = realloc((arr), (size_t)_nc * sizeof(*(arr))); \
+            if (!_t) goto cleanup;                              \
+            (arr) = _t;                                         \
+            (cap) = _nc;                                        \
+        }                                                       \
+        (arr)[(len)++] = (val);                                 \
+    } while (0)
+
+    PUSH(queue,   q_len, q_cap, root);
+    PUSH(visited, v_len, v_cap, root);
+
+    /* Anchor the project on the root's own top-level (no prefix). */
+    copy_top_level(&p->tasks,     root->tasks);
+    copy_top_level(&p->accounts,  root->accounts);
+    copy_top_level(&p->reports,   root->reports);
+    copy_top_level(&p->resources, root->resources);
+    if (!root->primary_project) root->primary_project = p;
+
+    while (q_head < q_len) {
+        Document *cur = queue[q_head++];
+        for (int i = 0; i < cur->num_included_uris; i++) {
+            Document *child = doc_find_by_uri(cur->included_uris[i]);
+            if (!child || !child->tasks) continue;
+            int seen = 0;
+            for (int v = 0; v < v_len && !seen; v++)
+                if (visited[v] == child) seen = 1;
+            if (seen) continue;
+            PUSH(visited, v_len, v_cap, child);
+            PUSH(queue,   q_len, q_cap, child);
+            copy_document_into_project(p, child);
+            if (!child->primary_project) child->primary_project = p;
+        }
+    }
+
+cleanup:
+    free(queue);
+    free(visited);
+    #undef PUSH
+}
+
+/** Build one Project per is_cc_root Document.  Runs alongside
+ *  rebuild_global_trees() during the dual-run period; a follow-up
+ *  commit routes handlers through primary_project and retires the
+ *  global trees. */
+static void rebuild_all_projects(void) {
+    projects_clear();
+    for (int i = 0; i < MAX_DOCS; i++)
+        docs[i].primary_project = NULL;
+
+    for (int i = 0; i < MAX_DOCS; i++) {
+        Document *root = &docs[i];
+        if (!root->in_use || !root->is_cc_root || !root->tasks) continue;
+
+        Project *p = calloc(1, sizeof(*p));
+        if (!p) continue;
+        p->id = root->uri ? strdup(root->uri) : NULL;
+
+        if (num_projects >= cap_projects) {
+            int new_cap = cap_projects ? cap_projects * 2 : 4;
+            Project **tmp = realloc(projects, (size_t)new_cap * sizeof(Project *));
+            if (!tmp) { project_free(p); continue; }
+            projects   = tmp;
+            cap_projects = new_cap;
+        }
+        projects[num_projects++] = p;
+
+        project_populate_from_root(p, root);
+    }
+}
+
 /* Republish (now-empty) diagnostics for editor-managed documents after a
  * notification so the client clears stale markers from the pre-refactor
  * diagnostic stream. */
@@ -801,8 +1023,15 @@ static void reload_compile_commands(void) {
     switch (res) {
     case CC_OK:
         for (int i = 0; i < n; i++) {
-            if (entries[i].file_abs)
-                load_file_from_disk(entries[i].file_abs);
+            if (!entries[i].file_abs) continue;
+            load_file_from_disk(entries[i].file_abs);
+            /* Tag the doc that holds this compile_commands entry as a
+             * project root.  rebuild_all_projects() seeds one Project
+             * per is_cc_root doc and BFS-walks its include closure. */
+            char *uri = path_to_uri(entries[i].file_abs);
+            Document *root = uri ? doc_find(uri) : NULL;
+            free(uri);
+            if (root) root->is_cc_root = 1;
         }
         break;
     case CC_NOT_FOUND:
@@ -859,11 +1088,12 @@ static void maybe_reload_compile_commands(void) {
 }
 
 /** Dump the live docs[] slot table to stderr.  One header line followed
- *  by one line per occupied slot: index, flags, URI.  Flags are a
- *  fixed-width string so columns line up:
+ *  by one line per occupied slot: index, flags, project id, URI.  Flags
+ *  are a fixed-width string so columns line up:
  *    D = disk_only (lowercase d = editor-owned)
  *    P = has parse output (tasks tree present)
  *    R = has a project block (canonical root candidate)
+ *    C = compile_commands.json root
  *  Caller must hold docs_mutex. */
 static void dump_docs_to_stderr(const char *trigger) {
     int total = 0, editor = 0, disk = 0;
@@ -873,15 +1103,22 @@ static void dump_docs_to_stderr(const char *trigger) {
         if (docs[i].disk_only) disk++; else editor++;
     }
     fprintf(stderr,
-            "taskjuggler-lsp: docs[] after %s — %d total (%d editor, %d disk)\n",
-            trigger, total, editor, disk);
+            "taskjuggler-lsp: docs[] after %s — %d total (%d editor, %d disk), "
+            "%d projects\n",
+            trigger, total, editor, disk, num_projects);
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
-        fprintf(stderr, "  [%2d] %c%c%c  %s\n",
+        const char *pid = docs[i].primary_project
+                          ? (docs[i].primary_project->id
+                              ? docs[i].primary_project->id : "(no-id)")
+                          : "(none)";
+        fprintf(stderr, "  [%2d] %c%c%c%c  proj=%s  %s\n",
                 i,
-                docs[i].disk_only ? 'D' : 'd',
-                docs[i].tasks     ? 'P' : '-',
-                docs[i].project   ? 'R' : '-',
+                docs[i].disk_only  ? 'D' : 'd',
+                docs[i].tasks      ? 'P' : '-',
+                docs[i].project    ? 'R' : '-',
+                docs[i].is_cc_root ? 'C' : '-',
+                pid,
                 docs[i].uri ? docs[i].uri : "(null)");
     }
     fflush(stderr);
@@ -890,6 +1127,7 @@ static void dump_docs_to_stderr(const char *trigger) {
 static void revalidate_all_docs(void) {
     maybe_reload_compile_commands();
     rebuild_global_trees();
+    rebuild_all_projects();
     republish_all_diagnostics();
     dump_docs_to_stderr("revalidate_all_docs");
 }
