@@ -143,40 +143,20 @@ static int    g_cc_attempted   = 0;
 static char *normalize_uri(const char *raw_uri);
 static void  load_file_from_disk(const char *path);
 static void  follow_includes(const char *file_path, const ParseOutput *po);
-static void  rebuild_global_trees(void);
 static void  rebuild_all_projects(void);
 static void  reload_compile_commands(void);
 static void  maybe_reload_compile_commands(void);
-
-/* ── Global tj_node trees ───────────────────────────────────────────────── *
- *
- * Synthetic per-kind roots holding the merged view of every Document's
- * per-kind tree.  Built fresh by rebuild_global_trees() on every
- * document-state-changing notification: deep-copy the canonical
- * project's children in, then deep-copy every other Document's
- * top-level children at the prefix target inside the global tree.
- *
- * These trees own their children — completely separate memory from the
- * Document-owned trees, which stay immutable after parse.
- *
- * TODO(projects): these are being superseded by the per-Project trees
- * built by rebuild_all_projects() below.  Both are built on every
- * notification today; a follow-up commit will route handlers through
- * primary_project and delete these. */
-static tj_node g_task_tree;
-static tj_node g_account_tree;
-static tj_node g_report_tree;
-static tj_node g_resource_tree;
 
 /* ── Per-Project tj_node trees ──────────────────────────────────────────── *
  *
  * Each compile_commands.json entry becomes one Project; its transitive
  * include closure (followed via Document.included_uris[]) is deep-copied
  * into the per-kind trees below with the includer's prefix applied.
- * Built fresh by rebuild_all_projects() on every notification, in
- * parallel with the soon-to-be-retired global trees.
+ * Built fresh by rebuild_all_projects() on every notification.
  *
- * Orphan editor-only files (didOpen for a doc not reached by any
+ * Each Document has a primary_project pointer set during the rebuild;
+ * handlers route cross-file lookups through that pointer.  Orphan
+ * editor-only files (didOpen for a doc not reached by any
  * compile_commands entry) are handled by a follow-up commit; until then
  * they end up with primary_project == NULL. */
 typedef struct Project {
@@ -658,12 +638,12 @@ static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   Global tj_node tree rebuild
+   tj_node tree-building helpers (shared by per-Project rebuild)
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /** Free every owned child of @p root, leaving @p root itself as an empty
- *  synthetic-root shell.  Used to tear down the global trees before each
- *  rebuild. */
+ *  synthetic-root shell.  Used to tear down a Project's per-kind trees
+ *  before each rebuild. */
 static void free_global_root_children(tj_node *root) {
     if (!root) return;
     for (int i = 0; i < root->num_children; i++)
@@ -674,64 +654,9 @@ static void free_global_root_children(tj_node *root) {
     root->children_cap = 0;
 }
 
-/** Return 1 when @p uri's path component ends in ".tjp" (case-sensitive). */
-static int uri_is_tjp(const char *uri) {
-    if (!uri) return 0;
-    size_t len = strlen(uri);
-    return len >= 4 && strcmp(uri + len - 4, ".tjp") == 0;
-}
-
-/** Pick the canonical project Document for hoisting.
- *
- *  Preference order:
- *    1. The single editor-open .tjp, if exactly one exists.
- *    2. Any editor-open .tjp (warn that the choice is ambiguous).
- *    3. The single loaded .tjp on disk.
- *    4. Any loaded .tjp (warn).
- *    5. NULL — no .tjp loaded; the caller falls back to .tji-only mode.
- *
- *  TODO(canonical-selection): the user-facing spec says the canonical .tjp
- *  is the one that transitively includes the currently-edited file, with
- *  ambiguity raising an error.  This stub uses a simpler heuristic until
- *  diagnostics are reintroduced and we can route a real error to the
- *  client.
- */
-static Document *find_canonical_tjp(void) {
-    Document *editor_pick = NULL;
-    int       editor_count = 0;
-    Document *any_pick = NULL;
-    int       any_count = 0;
-    for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use || !docs[i].tasks) continue;
-        if (!uri_is_tjp(docs[i].uri)) continue;
-        any_count++;
-        if (!any_pick) any_pick = &docs[i];
-        if (!docs[i].disk_only) {
-            editor_count++;
-            if (!editor_pick) editor_pick = &docs[i];
-        }
-    }
-    if (editor_count == 1) return editor_pick;
-    if (editor_count > 1) {
-        fprintf(stderr,
-                "taskjuggler-lsp: %d .tjp files open in editor; picking %s\n",
-                editor_count, editor_pick->uri);
-        return editor_pick;
-    }
-    if (any_count == 1) return any_pick;
-    if (any_count > 1) {
-        fprintf(stderr,
-                "taskjuggler-lsp: %d .tjp files in workspace and none open in editor; picking %s\n",
-                any_count, any_pick->uri);
-        return any_pick;
-    }
-    return NULL;
-}
-
 /** Walk @p start's children along the dot-separated @p path and return
  *  the matched node.  Returns @p start when @p path is NULL or empty.
- *  Operates on the global tree (which owns its children outright), so
- *  there is no separate "included" array to consult. */
+ *  Used to locate an includer's prefix target inside a Project tree. */
 static tj_node *find_node_by_dotted_path(tj_node *start, const char *path) {
     if (!start) return NULL;
     if (!path || !path[0]) return start;
@@ -757,78 +682,6 @@ static void copy_top_level(tj_node *target, tj_node *from_root) {
     for (int i = 0; i < from_root->num_children; i++) {
         tj_node *copy = tj_node_clone(from_root->children[i]);
         tj_node_append_child(target, copy);
-    }
-}
-
-/** For each of the four kinds, find @p d's prefix target inside the
- *  matching global root and deep-copy @p d's top-level entries under
- *  that target.  When a prefix doesn't resolve to a node in the global
- *  tree, this kind's copy is skipped — TODO(global-tree): emit a
- *  diagnostic instead once the diagnostic channel returns.
- *
- *  TODO(nested-includes): when @p d itself includes another .tji whose
- *  prefix target lives only in @p d's tree, the second .tji needs @p d's
- *  copy to have happened first.  Document slot order today follows load
- *  order, which is includer-before-includee for the workspace scan, so
- *  the simple in-order pass below is usually right — but it's not
- *  guaranteed.  A topological pass is the proper fix. */
-static void copy_document_into_globals(Document *d) {
-    struct {
-        tj_node    *global_root;
-        tj_node    *doc_root;
-        const char *prefix;
-    } kinds[] = {
-        { &g_task_tree,     d->tasks,     d->task_prefix     },
-        { &g_account_tree,  d->accounts,  d->account_prefix  },
-        { &g_report_tree,   d->reports,   d->report_prefix   },
-        { &g_resource_tree, d->resources, d->resource_prefix },
-    };
-    for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
-        tj_node *target = find_node_by_dotted_path(kinds[k].global_root,
-                                                    kinds[k].prefix);
-        if (!target) continue;
-        copy_top_level(target, kinds[k].doc_root);
-    }
-}
-
-/** Build the global per-kind trees from the current Document store.
- *
- *  Rebuilds from scratch on every notification: free the prior copy,
- *  deep-copy the canonical project's children in, then deep-copy every
- *  other Document's top-level children at its prefix target. */
-static void rebuild_global_trees(void) {
-    /* 1. Free everything from the previous cycle. */
-    free_global_root_children(&g_task_tree);
-    free_global_root_children(&g_account_tree);
-    free_global_root_children(&g_report_tree);
-    free_global_root_children(&g_resource_tree);
-
-    /* 2. Pick the canonical project. */
-    Document *canon = find_canonical_tjp();
-
-    if (canon) {
-        /* 3a. Anchor the globals on copies of canon's top-level entries. */
-        copy_top_level(&g_task_tree,     canon->tasks);
-        copy_top_level(&g_account_tree,  canon->accounts);
-        copy_top_level(&g_report_tree,   canon->reports);
-        copy_top_level(&g_resource_tree, canon->resources);
-
-        /* 3b. Copy every other loaded Document under its prefix target. */
-        for (int i = 0; i < MAX_DOCS; i++) {
-            if (!docs[i].in_use || !docs[i].tasks) continue;
-            if (&docs[i] == canon) continue;
-            copy_document_into_globals(&docs[i]);
-        }
-    } else {
-        /* 4. .tji-only fallback: copy every loaded document's top-levels
-         *    onto the synthetic root with no prefix. */
-        for (int i = 0; i < MAX_DOCS; i++) {
-            if (!docs[i].in_use || !docs[i].tasks) continue;
-            copy_top_level(&g_task_tree,     docs[i].tasks);
-            copy_top_level(&g_account_tree,  docs[i].accounts);
-            copy_top_level(&g_report_tree,   docs[i].reports);
-            copy_top_level(&g_resource_tree, docs[i].resources);
-        }
     }
 }
 
@@ -1126,7 +979,6 @@ static void dump_docs_to_stderr(const char *trigger) {
 
 static void revalidate_all_docs(void) {
     maybe_reload_compile_commands();
-    rebuild_global_trees();
     rebuild_all_projects();
     republish_all_diagnostics();
     dump_docs_to_stderr("revalidate_all_docs");
@@ -1767,9 +1619,13 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
     if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
-    /* Gather top-level nodes of other editor-managed Documents as extra
-     * pools.  TODO(completion): once the global tj_node tree is built we
-     * can drop the per-doc walk here in favour of the global view. */
+    /* Gather top-level nodes of every other Document in the requester's
+     * project as extra pools.  Skips:
+     *   - the requester itself (its symbols are in `self_top`)
+     *   - docs in a different project (cross-project bleed)
+     *   - docs with no project (handled by the orphan-project commit)
+     * disk_only members ARE included: a .tji pulled in via include is a
+     * legitimate cross-file completion source. */
     tj_node *const *extra_pools[MAX_DOCS];
     int             extra_counts[MAX_DOCS];
     tj_node       **extra_alloc[MAX_DOCS] = {0};
@@ -1777,7 +1633,8 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     for (int i = 0; i < MAX_DOCS && num_extra < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
         if (&docs[i] == d) continue;
-        if (docs[i].disk_only) continue;
+        if (!d->primary_project) continue;
+        if (docs[i].primary_project != d->primary_project) continue;
         int n = 0;
         tj_node **top = flatten_top_nodes(&docs[i], &n);
         if (!top) continue;
@@ -1989,8 +1846,4 @@ void server_process(const char *json_text) {
 void server_init() {
     for (int i = 0; i < MAX_DOCS; i++)
         docs[i].in_use = 0;
-    memset(&g_task_tree,     0, sizeof(g_task_tree));
-    memset(&g_account_tree,  0, sizeof(g_account_tree));
-    memset(&g_report_tree,   0, sizeof(g_report_tree));
-    memset(&g_resource_tree, 0, sizeof(g_resource_tree));
 }

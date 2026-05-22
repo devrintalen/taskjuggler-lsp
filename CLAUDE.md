@@ -120,12 +120,25 @@ cross-file edge.
 ### Cross-file revalidation
 
 After any document-changing notification, `server.c` runs
-`revalidate_all_docs()`. For each document it gathers the
-`doc_symbols[]` of every other open / background document as extra
-symbol pools, calls `clear_cross_file_state()` to drop stale
-cross-file links and diagnostics, then `resolve_cross_file_deps()` to
-rebuild them. Each affected URI then gets a
-`textDocument/publishDiagnostics` notification (`src/diagnostics.c`).
+`revalidate_all_docs()`. This polls `compile_commands.json` for
+on-disk changes, runs `rebuild_all_projects()` to recompute project
+membership and per-`Project` `tj_node` trees from the
+`compile_commands.json` closure, then republishes (currently empty)
+diagnostics on every editor-managed document.
+
+Each `Project` owns four synthetic per-kind `tj_node` roots (`tasks`,
+`accounts`, `reports`, `resources`) populated by deep-copying every
+member document's top-level entries under the includer's prefix
+target. Each `Document.primary_project` points at the project that
+claimed it during BFS. Handlers (`handle_completion` today) scope
+cross-file lookups to other documents sharing the requester's
+`primary_project`, so two unrelated `.tjp`s in the same workspace
+stay independent.
+
+The richer dep-link machinery (`DefinitionLink` / `ReferenceLink` /
+`resolve_cross_file_deps`) was removed in the tj_node refactor and is
+not yet restored; `handle_definition` and `handle_references` return
+`null` until it is.
 
 ### Feature dispatch
 
