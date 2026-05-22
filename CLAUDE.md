@@ -77,10 +77,16 @@ reads `Content-Length`-framed messages and hands each body to
 `src/server.c` owns a static array of `Document` slots (URI + raw text
 + `ParseResult`). Editor content is authoritative while a file is
 open; `didClose` re-reads the file from disk and keeps it as a
-"background" entry so cross-file references stay valid. The initial
-workspace scan and `workspace/didChangeWatchedFiles` populate
-background entries; watcher events are ignored for files the editor
-already has open.
+"background" entry so cross-file references stay valid.
+
+`compile_commands.json` at the workspace root is the sole startup
+populator of `docs[]`: every listed `.tjp` is loaded as `disk_only`,
+and `follow_includes` cascades into the transitive `.tji` closure.
+If the file is missing or malformed the server stays alive but loads
+no documents and surfaces an Error-severity `window/showMessage`.
+After startup, `workspace/didChangeWatchedFiles` events admit
+individual files into background slots; watcher events are ignored
+for files the editor already has open.
 
 ### Parse pipeline
 

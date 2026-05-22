@@ -51,7 +51,6 @@
 
 #include <yyjson.h>
 #include <ctype.h>
-#include <dirent.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -125,7 +124,6 @@ static int    g_cc_attempted   = 0;
 static char *normalize_uri(const char *raw_uri);
 static void  load_file_from_disk(const char *path);
 static void  follow_includes(const char *file_path, const ParseOutput *po);
-static void  load_tj_files_recursive(const char *dir_path);
 static void  rebuild_global_trees(void);
 static void  reload_compile_commands(void);
 static void  maybe_reload_compile_commands(void);
@@ -485,67 +483,6 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
     }
 }
 
-static void load_tj_files_recursive(const char *dir_path) {
-    DIR *dir = opendir(dir_path);
-    if (!dir) return;
-
-    char  **names     = NULL;
-    int     num_names = 0;
-    int     cap_names = 0;
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.') continue;
-        if (num_names >= cap_names) {
-            int nc = cap_names ? cap_names * 2 : 16;
-            char **tmp = realloc(names, (size_t)nc * sizeof(char *));
-            if (!tmp) continue;
-            names = tmp;
-            cap_names = nc;
-        }
-        names[num_names] = strdup(entry->d_name);
-        if (names[num_names]) num_names++;
-    }
-    closedir(dir);
-
-    if (num_names > 1) {
-        for (int i = 1; i < num_names; i++) {
-            char *key = names[i];
-            int j = i - 1;
-            while (j >= 0 && strcmp(names[j], key) > 0) {
-                names[j + 1] = names[j];
-                j--;
-            }
-            names[j + 1] = key;
-        }
-    }
-
-    size_t dir_len = strlen(dir_path);
-    for (int i = 0; i < num_names; i++) {
-        size_t name_len = strlen(names[i]);
-        char *full_path = malloc(dir_len + 1 + name_len + 1);
-        if (!full_path) { free(names[i]); continue; }
-        memcpy(full_path, dir_path, dir_len);
-        full_path[dir_len] = '/';
-        memcpy(full_path + dir_len + 1, names[i], name_len + 1);
-        free(names[i]);
-
-        struct stat st;
-        if (stat(full_path, &st) != 0) { free(full_path); continue; }
-
-        if (S_ISDIR(st.st_mode)) {
-            load_tj_files_recursive(full_path);
-        } else if (S_ISREG(st.st_mode) && name_len >= 4) {
-            const char *ext = full_path + dir_len + 1 + name_len - 4;
-            if (strcmp(ext, ".tji") == 0 || strcmp(ext, ".tjp") == 0)
-                load_file_from_disk(full_path);
-        }
-
-        free(full_path);
-    }
-    free(names);
-}
-
 /* ═══════════════════════════════════════════════════════════════════════════
    JSON helpers
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -826,8 +763,12 @@ static void republish_all_diagnostics(void) {
  *  up in docs[] as disk_only.  Already-loaded files short-circuit
  *  inside load_file_from_disk(), so reloads are idempotent.
  *
- *  Errors surface via window/showMessage; the server stays alive in a
- *  degraded state when the file is missing or malformed.
+ *  compile_commands.json is the only docs[] populator at startup; if
+ *  it is missing or malformed the server has zero docs[] entries and
+ *  every cross-file feature (workspace symbol, definition, references,
+ *  cross-file diagnostics) is inert until the file is fixed.  Errors
+ *  surface via window/showMessage as Error severity to make the
+ *  degradation visible.
  *
  *  Updates the mtime/size cache on every call (even on failure) so
  *  the stat-poll does not re-trigger until the file changes again. */
@@ -835,9 +776,10 @@ static void reload_compile_commands(void) {
     g_cc_attempted = 1;
 
     if (!g_cc_path) {
-        show_message(2,
-            "taskjuggler-lsp: no workspace root; compile_commands.json "
-            "not loaded.  LSP features will be limited.");
+        show_message(1,
+            "taskjuggler-lsp: no workspace root; cannot locate "
+            "compile_commands.json.  No documents will be loaded; "
+            "cross-file LSP features are disabled.");
         return;
     }
 
@@ -866,18 +808,20 @@ static void reload_compile_commands(void) {
     case CC_NOT_FOUND:
         show_message(1,
             "taskjuggler-lsp: compile_commands.json not found at workspace "
-            "root.  LSP features will be limited; create the file to "
-            "enable project-aware behavior.");
+            "root.  No documents will be loaded; create the file (a JSON "
+            "array of { \"file\": \"<path>\" } entries) to enable "
+            "cross-file LSP features.");
         break;
     case CC_PARSE_ERROR:
         show_message(1,
             "taskjuggler-lsp: compile_commands.json is not valid JSON; "
-            "see server stderr for details.");
+            "no documents loaded.  See server stderr for the parse error.");
         break;
     case CC_SCHEMA_ERROR:
         show_message(1,
             "taskjuggler-lsp: compile_commands.json does not match the "
-            "expected schema (array of objects with `file` field).");
+            "expected schema (top-level JSON array of objects with a "
+            "`file` field).  No documents loaded.");
         break;
     case CC_NO_ROOT:
         /* Already handled above by the g_cc_path NULL check. */
@@ -1096,15 +1040,12 @@ static void handle_initialized(void) {
     lsp_send_message(text);
     free(text);
 
-    if (g_workspace_root) {
-        load_tj_files_recursive(g_workspace_root);
-        reload_compile_commands();
-        revalidate_all_docs();
-    } else {
-        /* No rootUri provided: still attempt the load so the user gets
-         * the standard "no workspace root" warning. */
-        reload_compile_commands();
-    }
+    /* compile_commands.json is now the only docs[] populator at startup
+     * (besides editor didOpen events).  follow_includes() inside
+     * load_file_from_disk() still cascades into the .tji closure of each
+     * listed .tjp; nothing else is pulled in from the workspace tree. */
+    reload_compile_commands();
+    if (g_workspace_root) revalidate_all_docs();
 }
 
 static void handle_did_change_watched_files(yyjson_val *params) {
