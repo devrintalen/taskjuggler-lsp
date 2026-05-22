@@ -914,10 +914,40 @@ static void maybe_reload_compile_commands(void) {
     }
 }
 
+/** Dump the live docs[] slot table to stderr.  One header line followed
+ *  by one line per occupied slot: index, flags, URI.  Flags are a
+ *  fixed-width string so columns line up:
+ *    D = disk_only (lowercase d = editor-owned)
+ *    P = has parse output (tasks tree present)
+ *    R = has a project block (canonical root candidate)
+ *  Caller must hold docs_mutex. */
+static void dump_docs_to_stderr(const char *trigger) {
+    int total = 0, editor = 0, disk = 0;
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use) continue;
+        total++;
+        if (docs[i].disk_only) disk++; else editor++;
+    }
+    fprintf(stderr,
+            "taskjuggler-lsp: docs[] after %s — %d total (%d editor, %d disk)\n",
+            trigger, total, editor, disk);
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use) continue;
+        fprintf(stderr, "  [%2d] %c%c%c  %s\n",
+                i,
+                docs[i].disk_only ? 'D' : 'd',
+                docs[i].tasks     ? 'P' : '-',
+                docs[i].project   ? 'R' : '-',
+                docs[i].uri ? docs[i].uri : "(null)");
+    }
+    fflush(stderr);
+}
+
 static void revalidate_all_docs(void) {
     maybe_reload_compile_commands();
     rebuild_global_trees();
     republish_all_diagnostics();
+    dump_docs_to_stderr("revalidate_all_docs");
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
