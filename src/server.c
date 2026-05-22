@@ -791,15 +791,32 @@ cleanup:
     #undef PUSH
 }
 
-/** Build one Project per is_cc_root Document.  Runs alongside
- *  rebuild_global_trees() during the dual-run period; a follow-up
- *  commit routes handlers through primary_project and retires the
- *  global trees. */
+/** Append @p p to projects[], growing the array if needed.  Returns
+ *  1 on success, 0 on OOM (caller must project_free(p) on failure). */
+static int projects_append(Project *p) {
+    if (num_projects >= cap_projects) {
+        int new_cap = cap_projects ? cap_projects * 2 : 4;
+        Project **tmp = realloc(projects, (size_t)new_cap * sizeof(Project *));
+        if (!tmp) return 0;
+        projects   = tmp;
+        cap_projects = new_cap;
+    }
+    projects[num_projects++] = p;
+    return 1;
+}
+
+/** Build one Project per is_cc_root Document, then one singleton
+ *  "orphan" Project for every remaining in-use Document not reached by
+ *  any cc_root's include closure.  Orphans exist so editor-opened
+ *  files outside the compile_commands.json closure still get in-file
+ *  LSP behavior (completion, hover, etc.) without bleeding into other
+ *  projects' cross-file pools. */
 static void rebuild_all_projects(void) {
     projects_clear();
     for (int i = 0; i < MAX_DOCS; i++)
         docs[i].primary_project = NULL;
 
+    /* Pass 1: compile_commands roots + their include closures. */
     for (int i = 0; i < MAX_DOCS; i++) {
         Document *root = &docs[i];
         if (!root->in_use || !root->is_cc_root || !root->tasks) continue;
@@ -807,17 +824,29 @@ static void rebuild_all_projects(void) {
         Project *p = calloc(1, sizeof(*p));
         if (!p) continue;
         p->id = root->uri ? strdup(root->uri) : NULL;
-
-        if (num_projects >= cap_projects) {
-            int new_cap = cap_projects ? cap_projects * 2 : 4;
-            Project **tmp = realloc(projects, (size_t)new_cap * sizeof(Project *));
-            if (!tmp) { project_free(p); continue; }
-            projects   = tmp;
-            cap_projects = new_cap;
-        }
-        projects[num_projects++] = p;
+        if (!projects_append(p)) { project_free(p); continue; }
 
         project_populate_from_root(p, root);
+    }
+
+    /* Pass 2: unclaimed in-use docs each become their own singleton
+     * orphan project.  Anchored on the doc's own top-level with no
+     * prefix; the doc is its sole member. */
+    for (int i = 0; i < MAX_DOCS; i++) {
+        Document *d = &docs[i];
+        if (!d->in_use || !d->tasks || d->primary_project) continue;
+
+        Project *p = calloc(1, sizeof(*p));
+        if (!p) continue;
+        p->id        = d->uri ? strdup(d->uri) : NULL;
+        p->is_orphan = 1;
+        if (!projects_append(p)) { project_free(p); continue; }
+
+        copy_top_level(&p->tasks,     d->tasks);
+        copy_top_level(&p->accounts,  d->accounts);
+        copy_top_level(&p->reports,   d->reports);
+        copy_top_level(&p->resources, d->resources);
+        d->primary_project = p;
     }
 }
 
@@ -1623,9 +1652,10 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
      * project as extra pools.  Skips:
      *   - the requester itself (its symbols are in `self_top`)
      *   - docs in a different project (cross-project bleed)
-     *   - docs with no project (handled by the orphan-project commit)
-     * disk_only members ARE included: a .tji pulled in via include is a
-     * legitimate cross-file completion source. */
+     * Orphans are singleton projects, so the loop naturally yields no
+     * extras for them — correct behavior.  disk_only project members
+     * ARE included: a .tji pulled in via include is a legitimate
+     * cross-file completion source. */
     tj_node *const *extra_pools[MAX_DOCS];
     int             extra_counts[MAX_DOCS];
     tj_node       **extra_alloc[MAX_DOCS] = {0};
