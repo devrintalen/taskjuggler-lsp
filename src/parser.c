@@ -136,11 +136,11 @@ void tj_node_append_child(tj_node *parent, tj_node *child) {
     child->parent_node = parent;
 }
 
-void tj_node_push_dependency(tj_node *task, DepRef dep) {
+void tj_node_push_dependency(tj_node *task, Dependency dep) {
     if (task->num_dependencies >= task->dependencies_cap) {
         int nc = task->dependencies_cap ? task->dependencies_cap * 2 : 4;
-        DepRef *tmp = realloc(task->dependencies,
-                              (size_t)nc * sizeof(DepRef));
+        Dependency *tmp = realloc(task->dependencies,
+                                  (size_t)nc * sizeof(Dependency));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         task->dependencies     = tmp;
         task->dependencies_cap = nc;

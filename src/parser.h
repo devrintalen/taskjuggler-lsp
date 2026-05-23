@@ -116,13 +116,13 @@ typedef enum {
  * and the `dependencies` array.  `resolved_target` is a borrowed
  * pointer into the project's tj_node tree, never owned here.
  */
-typedef struct DepRef {
+typedef struct Dependency {
     DepKind   kind;
     int       bang_count;       /**< number of leading `!` characters */
     char     *path;             /**< dotted identifier path, e.g. "foo.bar" */
     LspRange  source_range;     /**< spans the bang(s) + dotted path in source */
     tj_node  *resolved_target;  /**< NULL until the resolver runs */
-} DepRef;
+} Dependency;
 
 struct tj_node {
     /* ── Identity ── */
@@ -146,9 +146,9 @@ struct tj_node {
      * one entry per dep_ref in source order.  Empty on tasks that
      * declare no dependencies and on every non-task node.  Owned by
      * this node; freed by tj_node_free(). */
-    DepRef    *dependencies;
-    int        num_dependencies;
-    int        dependencies_cap;
+    Dependency *dependencies;
+    int         num_dependencies;
+    int         dependencies_cap;
 
     /* ── Tree links ──
      *
@@ -204,9 +204,9 @@ void tj_node_append_child(tj_node *parent, tj_node *child);
  * `resolved_target` is initialized to NULL.
  *
  * @param task  Task tj_node (caller guarantees keyword == KW_TASK).
- * @param dep   Source-position-bearing DepRef whose `path` is heap-owned.
+ * @param dep   Source-position-bearing Dependency whose `path` is heap-owned.
  */
-void tj_node_push_dependency(tj_node *task, DepRef dep);
+void tj_node_push_dependency(tj_node *task, Dependency dep);
 
 /**
  * Deep-copy a tj_node subtree.  The returned tree owns its own children

@@ -137,7 +137,7 @@ static tj_node *tree_for_keyword(int kw) {
 /* ── Current dep-ref direction ──────────────────────────────────────────── *
  * Set by mid-rule actions on the KW_DEPENDS / KW_PRECEDES attribute
  * branches before dep_ref_list reduces, and consumed by the dep_ref
- * action to label each captured DepRef.  Safe as a file-scope global
+ * action to label each captured Dependency.  Safe as a file-scope global
  * because dep_ref_list never nests (it appears only as a leaf inside
  * the depends/precedes attribute productions). */
 static DepKind g_pending_dep_kind = DEP_KIND_DEPENDS;
@@ -1598,7 +1598,7 @@ dep_ref
 
             tj_node *task = sym_stack_top();
             if (task) {
-                DepRef dep = {
+                Dependency dep = {
                     .kind            = g_pending_dep_kind,
                     .bang_count      = $1.bang_count,
                     .path            = $1.path,   /* transfer ownership */
