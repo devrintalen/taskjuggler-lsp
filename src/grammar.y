@@ -134,6 +134,14 @@ static tj_node *tree_for_keyword(int kw) {
     }
 }
 
+/* ── Current dep-ref direction ──────────────────────────────────────────── *
+ * Set by mid-rule actions on the KW_DEPENDS / KW_PRECEDES attribute
+ * branches before dep_ref_list reduces, and consumed by the dep_ref
+ * action to label each captured DepRef.  Safe as a file-scope global
+ * because dep_ref_list never nests (it appears only as a leaf inside
+ * the depends/precedes attribute productions). */
+static DepKind g_pending_dep_kind = DEP_KIND_DEPENDS;
+
 /* ── Current-symbol stack ───────────────────────────────────────────────── *
  * Tracks the current task being parsed so that the KW_START / KW_END
  * date-attribute actions can store the parsed date on the right node.
@@ -846,11 +854,11 @@ item
     /* Syntax: depends (<ABSOLUTE ID> | <ID> | <RELATIVE ID>) [{ <attrs> }]
      *                 [, ... ]
      * The optional body accepts: gaplength, gapduration                     */
-    | KW_DEPENDS dep_ref_list
+    | KW_DEPENDS { g_pending_dep_kind = DEP_KIND_DEPENDS; } dep_ref_list
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: precedes (<ABSOLUTE ID> | <ID> | <RELATIVE ID>) [{ <attrs> }]
      *                  [, ... ]                                              */
-    | KW_PRECEDES dep_ref_list
+    | KW_PRECEDES { g_pending_dep_kind = DEP_KIND_PRECEDES; } dep_ref_list
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: allocate <resource> [{ <attributes> }] [, <resource> ...]
      * Body attributes: alternative, mandatory, persistent, select,
@@ -1584,11 +1592,25 @@ task_ref
 dep_ref
     : task_ref opt_body
         {
-            /* Cross-reference resolution is intentionally dropped during
-             * the data-structure refactor; restore here once the global
-             * tree is built and dependency tracking is reinstated. */
-            free($1.path);
+            /* Body attributes (gaplength / gapduration) are still
+             * discarded — captured only when a consumer needs them. */
             discard_body(&$2);
+
+            tj_node *task = sym_stack_top();
+            if (task) {
+                DepRef dep = {
+                    .kind            = g_pending_dep_kind,
+                    .bang_count      = $1.bang_count,
+                    .path            = $1.path,   /* transfer ownership */
+                    .source_range    = { $1.start, $1.end },
+                    .resolved_target = NULL,
+                };
+                tj_node_push_dependency(task, dep);
+            } else {
+                /* `depends`/`precedes` outside a task body — syntactically
+                 * possible during error recovery; nothing to attach to. */
+                free($1.path);
+            }
         }
     ;
 

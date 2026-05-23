@@ -98,6 +98,32 @@ void token_free(Token *t);
  */
 typedef struct tj_node tj_node;
 
+/** Direction of a dependency reference. */
+typedef enum {
+    DEP_KIND_DEPENDS,   /**< `depends <ref>` — this task waits for ref */
+    DEP_KIND_PRECEDES   /**< `precedes <ref>` — ref waits for this task */
+} DepKind;
+
+/**
+ * One captured `depends`/`precedes` reference on a task tj_node.
+ *
+ * Populated by the grammar action for `dep_ref` at parse time.  The
+ * resolver (to be reinstated in a follow-up commit) walks each
+ * Project's task tree once per rebuild and fills `resolved_target`
+ * with the matching tj_node; until then it stays NULL.
+ *
+ * Memory ownership: the enclosing tj_node owns `path` (heap-allocated)
+ * and the `dependencies` array.  `resolved_target` is a borrowed
+ * pointer into the project's tj_node tree, never owned here.
+ */
+typedef struct DepRef {
+    DepKind   kind;
+    int       bang_count;       /**< number of leading `!` characters */
+    char     *path;             /**< dotted identifier path, e.g. "foo.bar" */
+    LspRange  source_range;     /**< spans the bang(s) + dotted path in source */
+    tj_node  *resolved_target;  /**< NULL until the resolver runs */
+} DepRef;
+
 struct tj_node {
     /* ── Identity ── */
     int        keyword;        /**< KW_ / TK_ constant from grammar.tab.h; 0 for synthetic per-doc roots */
@@ -113,6 +139,16 @@ struct tj_node {
     time_t     end_date;        /**< explicit `end` date, valid if has_end */
     int        has_start;       /**< 1 when start_date is populated */
     int        has_end;         /**< 1 when end_date is populated */
+
+    /* ── Task-only dependencies (zero on other kinds) ──
+     *
+     * Captured at parse time from `depends` / `precedes` attributes,
+     * one entry per dep_ref in source order.  Empty on tasks that
+     * declare no dependencies and on every non-task node.  Owned by
+     * this node; freed by tj_node_free(). */
+    DepRef    *dependencies;
+    int        num_dependencies;
+    int        dependencies_cap;
 
     /* ── Tree links ──
      *
@@ -161,6 +197,16 @@ void tj_node_free(tj_node *n);
  * @param child   Child to attach (transfer of ownership).
  */
 void tj_node_append_child(tj_node *parent, tj_node *child);
+
+/**
+ * Append a captured dependency reference onto @p task's `dependencies`
+ * array, growing it as needed.  Takes ownership of @p dep.path.
+ * `resolved_target` is initialized to NULL.
+ *
+ * @param task  Task tj_node (caller guarantees keyword == KW_TASK).
+ * @param dep   Source-position-bearing DepRef whose `path` is heap-owned.
+ */
+void tj_node_push_dependency(tj_node *task, DepRef dep);
 
 /**
  * Deep-copy a tj_node subtree.  The returned tree owns its own children

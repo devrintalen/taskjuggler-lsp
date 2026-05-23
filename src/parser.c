@@ -115,6 +115,9 @@ void tj_node_free(tj_node *n) {
     if (!n) return;
     free(n->id);
     free(n->name);
+    for (int i = 0; i < n->num_dependencies; i++)
+        free(n->dependencies[i].path);
+    free(n->dependencies);
     for (int i = 0; i < n->num_children; i++)
         tj_node_free(n->children[i]);
     free(n->children);
@@ -131,6 +134,19 @@ void tj_node_append_child(tj_node *parent, tj_node *child) {
     }
     parent->children[parent->num_children++] = child;
     child->parent_node = parent;
+}
+
+void tj_node_push_dependency(tj_node *task, DepRef dep) {
+    if (task->num_dependencies >= task->dependencies_cap) {
+        int nc = task->dependencies_cap ? task->dependencies_cap * 2 : 4;
+        DepRef *tmp = realloc(task->dependencies,
+                              (size_t)nc * sizeof(DepRef));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        task->dependencies     = tmp;
+        task->dependencies_cap = nc;
+    }
+    dep.resolved_target = NULL;
+    task->dependencies[task->num_dependencies++] = dep;
 }
 
 tj_node *tj_node_clone(const tj_node *src) {
@@ -152,6 +168,12 @@ tj_node *tj_node_clone(const tj_node *src) {
         tj_node *child_copy = tj_node_clone(src->children[i]);
         tj_node_append_child(dst, child_copy);
     }
+    /* `dependencies` is intentionally not cloned: nothing currently
+     * reads it on a hoisted copy, and `resolved_target` would point
+     * into the source document's tree.  When the resolver lands, the
+     * choice will be either to deep-copy paths and re-resolve into the
+     * destination Project, or to keep cross-Document edges off the
+     * cloned trees entirely. */
     return dst;
 }
 

@@ -969,13 +969,24 @@ static void maybe_reload_compile_commands(void) {
     }
 }
 
+/** Recursively sum the `num_dependencies` across @p n and its subtree. */
+static int dependency_count_subtree(const tj_node *n) {
+    if (!n) return 0;
+    int total = n->num_dependencies;
+    for (int i = 0; i < n->num_children; i++)
+        total += dependency_count_subtree(n->children[i]);
+    return total;
+}
+
 /** Dump the live docs[] slot table to stderr.  One header line followed
- *  by one line per occupied slot: index, flags, project id, URI.  Flags
- *  are a fixed-width string so columns line up:
+ *  by one line per occupied slot: index, flags, project id, dep count,
+ *  URI.  Flags are a fixed-width string so columns line up:
  *    D = disk_only (lowercase d = editor-owned)
  *    P = has parse output (tasks tree present)
  *    R = has a project block (canonical root candidate)
  *    C = compile_commands.json root
+ *  `deps=` shows the total number of captured `depends` + `precedes`
+ *  references across every task in the document.
  *  Caller must hold docs_mutex. */
 static void dump_docs_to_stderr(const char *trigger) {
     int total = 0, editor = 0, disk = 0;
@@ -994,13 +1005,15 @@ static void dump_docs_to_stderr(const char *trigger) {
                           ? (docs[i].primary_project->id
                               ? docs[i].primary_project->id : "(no-id)")
                           : "(none)";
-        fprintf(stderr, "  [%2d] %c%c%c%c  proj=%s  %s\n",
+        int deps = dependency_count_subtree(docs[i].tasks);
+        fprintf(stderr, "  [%2d] %c%c%c%c  proj=%s  deps=%d  %s\n",
                 i,
                 docs[i].disk_only  ? 'D' : 'd',
                 docs[i].tasks      ? 'P' : '-',
                 docs[i].project    ? 'R' : '-',
                 docs[i].is_cc_root ? 'C' : '-',
                 pid,
+                deps,
                 docs[i].uri ? docs[i].uri : "(null)");
     }
     fflush(stderr);
