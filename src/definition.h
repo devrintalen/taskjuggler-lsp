@@ -20,28 +20,30 @@
 
 #pragma once
 
-#include "parser.h"
+#include "dependency.h"
 #include <yyjson.h>
 
-/*
- * TODO(definition): textDocument/definition was driven by per-symbol
- * DefinitionLinks computed during dep-ref resolution.  Both have been
- * removed for the tj_node refactor.  build_definition_json() is
- * preserved as a stub that always reports "no definition" so the
- * dispatch path keeps compiling; restore real lookup once the global
- * task tree and dependency resolution are reinstated.
- */
-
 /**
- * Stub: always returns NULL so the LSP response becomes JSON null.
+ * Build the textDocument/definition response for a cursor on a
+ * dependency reference.
  *
- * @param doc         Destination mutable JSON document (unused).
- * @param tokens      Token spans of the current document (unused).
- * @param num_tokens  Length of @p tokens (unused).
- * @param cursor      Cursor position (unused).
- * @param uri         URI placed into the response (unused).
- * @return Always NULL.
+ * Locates the dependency under @p cursor, resolves it on demand against
+ * the requester's project (@p scopes), and returns a single LSP
+ * `Location` pointing at the target task's identifier.  Returns NULL —
+ * serialised as JSON `null` by the caller — when the cursor is not on a
+ * dependency or the reference does not resolve.
+ *
+ * @param doc          Destination mutable JSON document.
+ * @param tokens       Token spans of the document under the cursor.
+ * @param num_tokens   Length of @p tokens.
+ * @param cursor       Cursor position.
+ * @param scopes       Every document in the requester's project.
+ * @param num_scopes   Length of @p scopes.
+ * @param self_index   Index into @p scopes of the requesting document.
+ * @return A `Location` JSON object, or NULL.
  */
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
                                        const TokenSpan *tokens, int num_tokens,
-                                       LspPos cursor, const char *uri);
+                                       LspPos cursor,
+                                       const ProjectScope *scopes,
+                                       int num_scopes, int self_index);

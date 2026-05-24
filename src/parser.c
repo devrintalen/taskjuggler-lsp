@@ -285,32 +285,69 @@ static int compare_node_starts(const void *a, const void *b) {
     return pos_cmp(na->range.start, nb->range.start);
 }
 
+static int range_within(LspRange inner, LspRange outer) {
+    return pos_cmp(inner.start, outer.start) >= 0 &&
+           pos_cmp(inner.end, outer.end) <= 0;
+}
+
 static void assign_token_owners(ParseOutput *po) {
-    /* Gather every top-level node from all four trees plus the optional
-     * project block into a single merged-by-position array. */
-    int merged_cap = po->tasks->num_children + po->accounts->num_children
-                   + po->reports->num_children + po->resources->num_children
-                   + (po->project ? 1 : 0);
-    tj_node **merged = merged_cap
-        ? malloc((size_t)merged_cap * sizeof(tj_node *))
+    /* Gather every hoisted top-level node from the four per-kind trees.
+     * A `project` block's body declarations are hoisted to these trees
+     * (the project node keeps no children), yet the project node's range
+     * still spans them.  For ownership we must restore that nesting: any
+     * hoisted node whose range falls within the project's range becomes a
+     * scope-child of the project, so tokens inside it resolve to the node
+     * rather than dead-ending on the childless project.  Hoisted nodes
+     * outside the project's range (declared after the project block) stay
+     * as true top-level siblings. */
+    int hoisted_n = po->tasks->num_children + po->accounts->num_children
+                  + po->reports->num_children + po->resources->num_children;
+    tj_node **hoisted = hoisted_n
+        ? malloc((size_t)hoisted_n * sizeof(tj_node *))
         : NULL;
-    if (merged_cap && !merged) {
+    if (hoisted_n && !hoisted) {
         fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
     }
-    int merged_n = 0;
-    if (po->project) merged[merged_n++] = po->project;
-    for (int i = 0; i < po->tasks->num_children;     i++) merged[merged_n++] = po->tasks->children[i];
-    for (int i = 0; i < po->accounts->num_children;  i++) merged[merged_n++] = po->accounts->children[i];
-    for (int i = 0; i < po->reports->num_children;   i++) merged[merged_n++] = po->reports->children[i];
-    for (int i = 0; i < po->resources->num_children; i++) merged[merged_n++] = po->resources->children[i];
-    if (merged_n > 1)
-        qsort(merged, (size_t)merged_n, sizeof(tj_node *), compare_node_starts);
+    int h = 0;
+    for (int i = 0; i < po->tasks->num_children;     i++) hoisted[h++] = po->tasks->children[i];
+    for (int i = 0; i < po->accounts->num_children;  i++) hoisted[h++] = po->accounts->children[i];
+    for (int i = 0; i < po->reports->num_children;   i++) hoisted[h++] = po->reports->children[i];
+    for (int i = 0; i < po->resources->num_children; i++) hoisted[h++] = po->resources->children[i];
+
+    /* Top-level scope frame plus the project's synthetic scope-children. */
+    tj_node **top = malloc((size_t)(hoisted_n + 1) * sizeof(tj_node *));
+    if (!top) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    int top_n = 0;
+    tj_node **proj_kids = NULL;
+    int       proj_kids_n = 0;
+
+    if (po->project) {
+        proj_kids = hoisted_n
+            ? malloc((size_t)hoisted_n * sizeof(tj_node *))
+            : NULL;
+        if (hoisted_n && !proj_kids) {
+            fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+        }
+        for (int i = 0; i < hoisted_n; i++) {
+            if (range_within(hoisted[i]->range, po->project->range))
+                proj_kids[proj_kids_n++] = hoisted[i];
+            else
+                top[top_n++] = hoisted[i];
+        }
+        top[top_n++] = po->project;
+        if (proj_kids_n > 1)
+            qsort(proj_kids, (size_t)proj_kids_n, sizeof(tj_node *), compare_node_starts);
+    } else {
+        for (int i = 0; i < hoisted_n; i++) top[top_n++] = hoisted[i];
+    }
+    if (top_n > 1)
+        qsort(top, (size_t)top_n, sizeof(tj_node *), compare_node_starts);
 
     int frame_cap = 64;
     OwnerFrame *stack = malloc((size_t)frame_cap * sizeof(OwnerFrame));
     if (!stack) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     int depth = 1;
-    stack[0] = (OwnerFrame){ merged, merged_n, 0, NULL };
+    stack[0] = (OwnerFrame){ top, top_n, 0, NULL };
 
     for (int t = 0; t < po->num_tok_spans; t++) {
         LspPos pos = po->tok_spans[t].start;
@@ -320,14 +357,14 @@ static void assign_token_owners(ParseOutput *po) {
             depth--;
 
         for (;;) {
-            OwnerFrame *top = &stack[depth - 1];
+            OwnerFrame *top_frame = &stack[depth - 1];
 
-            while (top->idx < top->n &&
-                   pos_cmp(pos, top->children[top->idx]->range.end) >= 0)
-                top->idx++;
-            if (top->idx >= top->n) break;
+            while (top_frame->idx < top_frame->n &&
+                   pos_cmp(pos, top_frame->children[top_frame->idx]->range.end) >= 0)
+                top_frame->idx++;
+            if (top_frame->idx >= top_frame->n) break;
 
-            tj_node *child = top->children[top->idx];
+            tj_node *child = top_frame->children[top_frame->idx];
             if (pos_cmp(pos, child->range.start) < 0)
                 break;
 
@@ -337,16 +374,21 @@ static void assign_token_owners(ParseOutput *po) {
                 if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
                 stack = tmp;
             }
-            stack[depth++] = (OwnerFrame){
-                child->children, child->num_children, 0, child
-            };
+            /* The project node carries its hoisted body decls as
+             * scope-children here even though its own `children` array is
+             * empty. */
+            tj_node **kids = (child == po->project) ? proj_kids : child->children;
+            int       nkids = (child == po->project) ? proj_kids_n : child->num_children;
+            stack[depth++] = (OwnerFrame){ kids, nkids, 0, child };
         }
 
         po->tok_spans[t].owner = (depth > 1) ? stack[depth - 1].scope : NULL;
     }
 
     free(stack);
-    free(merged);
+    free(top);
+    free(proj_kids);
+    free(hoisted);
 }
 
 /* ── Public parse() entry point ──────────────────────────────────────────── */

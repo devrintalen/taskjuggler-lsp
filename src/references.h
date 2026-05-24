@@ -20,29 +20,30 @@
 
 #pragma once
 
-#include "parser.h"
+#include "dependency.h"
 #include <yyjson.h>
 
 /**
- * Build a Location[] JSON array for textDocument/references.
+ * Build the textDocument/references response for a cursor on a task
+ * declaration.
  *
- * Values are allocated in @p doc; caller owns @p doc.
+ * Locates the task identifier under @p cursor, then scans every task in
+ * the requester's project (@p scopes), resolving each dependency on
+ * demand and collecting those that target the cursor's task.  Returns an
+ * LSP `Location[]` of the matching dependency references (empty when the
+ * task has no incoming dependencies), or NULL when the cursor is not on a
+ * task identifier.
  *
- * @param doc         Destination mutable JSON document.
- * @param cursor_uri  URI of the document the cursor is in (used for
- *                    same-document references where source_uri is NULL).
- * @param tokens      Token spans of the cursor document (carry `.owner`
- *                    links that let tj_node_at() locate the declaration
- *                    under cursor).
- * @param num_tokens  Length of @p tokens.
- * @param cursor      Cursor position.
- * @return An array of Location objects (one per dependency reference that
- *         resolves to the task under @p cursor, collected from the
- *         target's ref_links); an empty array when no dependency points
- *         to that task; or NULL when @p cursor is not on a task
- *         declaration identifier.
+ * @param doc          Destination mutable JSON document.
+ * @param tokens       Token spans of the document under the cursor.
+ * @param num_tokens   Length of @p tokens.
+ * @param cursor       Cursor position.
+ * @param scopes       Every document in the requester's project.
+ * @param num_scopes   Length of @p scopes.
+ * @return A `Location[]` JSON array, or NULL.
  */
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
-                                       const char *cursor_uri,
                                        const TokenSpan *tokens, int num_tokens,
-                                       LspPos cursor);
+                                       LspPos cursor,
+                                       const ProjectScope *scopes,
+                                       int num_scopes);

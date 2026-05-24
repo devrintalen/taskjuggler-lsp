@@ -34,6 +34,7 @@
 #include "job_queue.h"
 #include "threadpool.h"
 #include "diagnostics.h"
+#include "dependency.h"
 #include "definition.h"
 #include "references.h"
 #include "document_highlight.h"
@@ -1458,6 +1459,47 @@ static tj_node **flatten_top_nodes(Document *d, int *out_n) {
     return arr;
 }
 
+/* Build the ProjectScope set for a request originating in @p d: every
+ * in-use document sharing @p d's primary_project (including @p d
+ * itself), each with its flattened top-level nodes and URI.  Orphan
+ * documents (primary_project == NULL) yield just themselves.  Returns a
+ * heap array via @p out_scopes (free with free_project_scopes) and the
+ * requester's index via @p out_self_index. */
+static ProjectScope *build_project_scopes(Document *d, int *out_n,
+                                          int *out_self_index) {
+    *out_n          = 0;
+    *out_self_index = -1;
+
+    ProjectScope *scopes = malloc((size_t)MAX_DOCS * sizeof(ProjectScope));
+    if (!scopes) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    int n = 0;
+
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (!docs[i].in_use) continue;
+        int is_self = (&docs[i] == d);
+        if (!is_self) {
+            if (!d->primary_project) continue;
+            if (docs[i].primary_project != d->primary_project) continue;
+        }
+        int tn = 0;
+        tj_node **top = flatten_top_nodes(&docs[i], &tn);
+        scopes[n].top = top;
+        scopes[n].n   = tn;
+        scopes[n].uri = docs[i].uri;
+        if (is_self) *out_self_index = n;
+        n++;
+    }
+
+    *out_n = n;
+    return scopes;
+}
+
+static void free_project_scopes(ProjectScope *scopes, int n) {
+    for (int i = 0; i < n; i++)
+        free((tj_node **)scopes[i].top);
+    free(scopes);
+}
+
 static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
                                              yyjson_val *params, Document *d) {
     (void)params;
@@ -1606,11 +1648,14 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
+    int self_index = -1, num_scopes = 0;
+    ProjectScope *scopes = build_project_scopes(d, &num_scopes, &self_index);
     yyjson_mut_val *result = build_references_json(doc,
-                                                    d->uri,
                                                     d->tok_spans,
                                                     d->num_tok_spans,
-                                                    pos);
+                                                    pos,
+                                                    scopes, num_scopes);
+    free_project_scopes(scopes, num_scopes);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
 }
@@ -1643,10 +1688,15 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
     if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
+    int self_index = -1, num_scopes = 0;
+    ProjectScope *scopes = build_project_scopes(d, &num_scopes, &self_index);
     yyjson_mut_val *result = build_definition_json(doc,
                                                     d->tok_spans,
                                                     d->num_tok_spans,
-                                                    pos, d->uri);
+                                                    pos,
+                                                    scopes, num_scopes,
+                                                    self_index);
+    free_project_scopes(scopes, num_scopes);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
 }
