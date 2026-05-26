@@ -239,6 +239,25 @@ static void discard_body(BodyResult *b) {
     char      *text;  /* heap-allocated string (e.g. joined dotted id) */
 }
 
+/* ── Discarded-symbol destructors ────────────────────────────────────────── *
+ *
+ * On a syntax error bison pops symbols off its stack during error
+ * recovery; without destructors any heap-allocated value still on the
+ * stack leaks.  These free a fully-reduced declaration node (or item
+ * wrapper, or joined identifier string) that recovery discards before a
+ * parent rule consumes it.  They run only on discarded symbols or those
+ * left on the stack at parse end, never on values a successful reduction
+ * already consumed, so they cannot double-free a node that reached the
+ * tree.
+ *
+ * Note: bison does NOT invoke these for mid-rule action values, so a
+ * node allocated in a mid-rule action and then orphaned by a later parse
+ * failure would still leak — which is why symbol_decl allocates the
+ * project node in its final action rather than a mid-rule one. */
+%destructor { tj_node_free($$); }                       <sym>
+%destructor { if ($$.has_sym) tj_node_free($$.sym); }   <item>
+%destructor { free($$); }                               <text>
+
 /* ── Token declarations ──────────────────────────────────────────────────── */
 
 /*
@@ -1114,10 +1133,14 @@ item
  * All id and name fields are optional for leniency (the LSP should still
  * extract the symbol even if the file is syntactically incomplete).        */
 symbol_decl
-    : KW_PROJECT opt_id opt_name
-      { $<sym>$ = alloc_tj_node($1, $2, $3); }
-      opt_version interval2 opt_body
+    : KW_PROJECT opt_id opt_name opt_version interval2 opt_body
         {
+            /* The node is allocated here, in the final action, rather than
+             * in a mid-rule action: nothing between the header and the body
+             * needs it, and a mid-rule allocation would be orphaned (and
+             * leaked, since bison runs no destructor for mid-rule values)
+             * if `interval2` failed to parse. */
+            $$ = alloc_tj_node($1, $2, $3);
             /* A project block is metadata only — its body's task /
              * resource / account / report children are conceptually
              * top-level declarations of the file, so we hoist each body
@@ -1126,13 +1149,12 @@ symbol_decl
              * project block).  The project tj_node itself ends up with
              * no children; document_symbol rendering composes the
              * outline shape on demand. */
-            $$ = $<sym>4;
-            LspPos range_end = $7.end;
+            LspPos range_end = $6.end;
             if (range_end.line == 0 && range_end.character == 0)
                 range_end = $1.end;
             $$->range.end = range_end;
-            for (int i = 0; i < $7.syms.n; i++) {
-                tj_node *child = $7.syms.arr[i];
+            for (int i = 0; i < $6.syms.n; i++) {
+                tj_node *child = $6.syms.arr[i];
                 if (child->keyword == KW_PROJECT) {
                     /* Nested `project` inside a project block is malformed;
                      * drop it rather than corrupt the tree. */
@@ -1141,10 +1163,10 @@ symbol_decl
                 }
                 route_top_level(child);
             }
-            free($7.syms.arr);
+            free($6.syms.arr);
             token_free(&$1);
-            if ($5.text) token_free(&$5); /* discard version string */
-            /* TODO: store interval $6 as the project time range */
+            if ($4.text) token_free(&$4); /* discard version string */
+            /* TODO: store interval $5 as the project time range */
         }
     | sym_kw opt_id opt_name
       { $<sym>$ = alloc_tj_node($1, $2, $3);
