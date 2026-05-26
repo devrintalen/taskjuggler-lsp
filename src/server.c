@@ -1401,44 +1401,19 @@ static void handle_didclose(yyjson_val *params) {
  * snapshot machinery was retired.
  */
 
-static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                               yyjson_val *params, Document *d) {
-    (void)params;
-    if (!d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
-
-    /* For now, render the four per-kind trees concatenated at the top
-     * level (project node first when present).  TODO(document-symbol):
-     * once the project block reliably contains its children in the
-     * hierarchical sense, fold the per-kind entries inside it. */
-    int top_n = 0;
-    if (d->project) top_n++;
-    top_n += d->tasks->num_children;
-    top_n += d->accounts->num_children;
-    top_n += d->reports->num_children;
-    top_n += d->resources->num_children;
-
-    tj_node **top = top_n
-        ? malloc((size_t)top_n * sizeof(tj_node *))
-        : NULL;
-    int w = 0;
-    if (d->project)
-        top[w++] = d->project;
-    for (int i = 0; i < d->tasks->num_children;     i++) top[w++] = d->tasks->children[i];
-    for (int i = 0; i < d->accounts->num_children;  i++) top[w++] = d->accounts->children[i];
-    for (int i = 0; i < d->reports->num_children;   i++) top[w++] = d->reports->children[i];
-    for (int i = 0; i < d->resources->num_children; i++) top[w++] = d->resources->children[i];
-
-    size_t  json_len = 0;
-    char   *json     = build_document_symbols_json(top, w, &json_len);
-    free(top);
-    if (!json) return make_response(doc, id, yyjson_mut_null(doc));
-    yyjson_mut_val *raw = yyjson_mut_rawncpy(doc, json, json_len);
-    free(json);
-    return make_response(doc, id, raw);
-}
-
-/* Reusable: gather every doc's top-level nodes (project + four trees) as
- * a flat array, for handlers that take a tj_node *const * symbols pool. */
+/** Gather @p d's top-level nodes (the project block, when present,
+ *  followed by every child of the four per-kind trees) into one flat
+ *  array, for handlers that want a single tj_node *const * symbols pool
+ *  rather than the Document's five separate roots.
+ *
+ *  The array holds borrowed pointers into nodes @p d still owns: free
+ *  the returned array, never the nodes it points at.  Returns NULL (and
+ *  leaves @p out_n at 0) when @p d has no parse yet or no top-level
+ *  nodes.
+ *
+ *  @param d     document to flatten; may be NULL.
+ *  @param out_n receives the number of entries in the returned array.
+ *  @return malloc'd array of @p out_n borrowed pointers, or NULL. */
 static tj_node **flatten_top_nodes(Document *d, int *out_n) {
     *out_n = 0;
     if (!d || !d->tasks) return NULL;
@@ -1457,6 +1432,27 @@ static tj_node **flatten_top_nodes(Document *d, int *out_n) {
     for (int i = 0; i < d->resources->num_children; i++) arr[w++] = d->resources->children[i];
     *out_n = w;
     return arr;
+}
+
+static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
+                                               yyjson_val *params, Document *d) {
+    (void)params;
+    if (!d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
+
+    /* For now, render the four per-kind trees concatenated at the top
+     * level (project node first when present).  TODO(document-symbol):
+     * once the project block reliably contains its children in the
+     * hierarchical sense, fold the per-kind entries inside it. */
+    int w = 0;
+    tj_node **top = flatten_top_nodes(d, &w);
+
+    size_t  json_len = 0;
+    char   *json     = build_document_symbols_json(top, w, &json_len);
+    free(top);
+    if (!json) return make_response(doc, id, yyjson_mut_null(doc));
+    yyjson_mut_val *raw = yyjson_mut_rawncpy(doc, json, json_len);
+    free(json);
+    return make_response(doc, id, raw);
 }
 
 /* Build the ProjectScope set for a request originating in @p d: every
