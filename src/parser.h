@@ -277,23 +277,18 @@ typedef struct {
  * previous one).  All arrays and tj_node subtrees referenced from here are
  * owned by this struct and freed by parse_output_free().
  *
- * Per-kind synthetic roots (`tasks`, `accounts`, `reports`, `resources`)
- * are always non-NULL.  Their `keyword` is 0; their `children` array holds
- * the top-level declarations of that kind in source order.  These trees
- * are immutable after parse — cross-Document hoisting happens in a
- * separately allocated global tree built by server.c.
- *
- * `project` is the project block's tj_node when the file declared one
- * (only ever set for .tjp files that contain `project ... { ... }`), or
- * NULL otherwise.  Stored separately from the four trees so each tree can
- * keep its uniform "single kind of declaration" semantics.
+ * The synthetic `root` is always non-NULL.  Its `keyword` is 0; its
+ * `children` array holds every top-level declaration of the document —
+ * tasks, accounts, resources/shifts, the report family, and the project
+ * block — in source order.  A `project ... { ... }` block's own body
+ * declarations are hoisted to siblings under `root` (the project node
+ * keeps no children); `assign_token_owners()` restores that nesting for
+ * token ownership only.  The tree is immutable after parse —
+ * cross-Document hoisting happens in a separately allocated global tree
+ * built by server.c.
  */
 typedef struct {
-    tj_node   *tasks;        /**< synthetic root for the document's task tree */
-    tj_node   *accounts;     /**< synthetic root for the document's account tree */
-    tj_node   *reports;      /**< synthetic root for the document's report tree (includes navigator/scenario/etc.) */
-    tj_node   *resources;    /**< synthetic root for the document's resource tree (includes shifts) */
-    tj_node   *project;      /**< project block tj_node when this file declared one, else NULL */
+    tj_node   *root;         /**< synthetic root; children are all top-level declarations in source order */
 
     TokenSpan *tok_spans;
     int        num_tok_spans;

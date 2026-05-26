@@ -187,11 +187,7 @@ static tj_node *alloc_synthetic_root(void) {
 
 void parse_output_free(ParseOutput *po) {
     if (!po) return;
-    tj_node_free(po->tasks);
-    tj_node_free(po->accounts);
-    tj_node_free(po->reports);
-    tj_node_free(po->resources);
-    tj_node_free(po->project);
+    tj_node_free(po->root);
 
     for (int i = 0; i < po->num_tok_spans; i++)
         free(po->tok_spans[i].text);
@@ -268,9 +264,9 @@ static void assign_parent_links(tj_node *parent, tj_node **children, int n,
  * Walk the four per-kind trees in source order and assign each TokenSpan
  * its innermost-enclosing tj_node as `owner`.
  *
- * Strategy: merge-sort by source position across all four trees' top-level
- * children plus the optional project node, then use the standard
- * single-pass scope-stack algorithm to assign owners.
+ * Strategy: take root's top-level children (already in source order),
+ * then use the standard single-pass scope-stack algorithm to assign
+ * owners.
  */
 typedef struct {
     tj_node **children;
@@ -291,17 +287,31 @@ static int range_within(LspRange inner, LspRange outer) {
 }
 
 static void assign_token_owners(ParseOutput *po) {
-    /* Gather every hoisted top-level node from the four per-kind trees.
-     * A `project` block's body declarations are hoisted to these trees
-     * (the project node keeps no children), yet the project node's range
-     * still spans them.  For ownership we must restore that nesting: any
-     * hoisted node whose range falls within the project's range becomes a
-     * scope-child of the project, so tokens inside it resolve to the node
-     * rather than dead-ending on the childless project.  Hoisted nodes
-     * outside the project's range (declared after the project block) stay
-     * as true top-level siblings. */
-    int hoisted_n = po->tasks->num_children + po->accounts->num_children
-                  + po->reports->num_children + po->resources->num_children;
+    tj_node *root = po->root;
+    if (!root) return;
+
+    /* The project block (if any) is a top-level child like the rest, but
+     * its body declarations were hoisted to siblings under root (the
+     * project node keeps no children) while its range still spans them.
+     * For ownership we must restore that nesting: any sibling whose range
+     * falls within the project's range becomes a scope-child of the
+     * project, so tokens inside it resolve to the node rather than
+     * dead-ending on the childless project.  Siblings outside the
+     * project's range (declared after the project block) stay as true
+     * top-level entries. */
+    tj_node *project = NULL;
+    for (int i = 0; i < root->num_children; i++)
+        if (root->children[i]->keyword == KW_PROJECT) {
+            project = root->children[i];
+            break;
+        }
+
+    /* hoisted = every top-level child except the project node itself.
+     * (When a project node is present num_children is at least 1, so this
+     * cannot go negative; the clamp makes that explicit for the size
+     * computations below.) */
+    int hoisted_n = root->num_children - (project ? 1 : 0);
+    if (hoisted_n < 0) hoisted_n = 0;
     tj_node **hoisted = hoisted_n
         ? malloc((size_t)hoisted_n * sizeof(tj_node *))
         : NULL;
@@ -309,10 +319,8 @@ static void assign_token_owners(ParseOutput *po) {
         fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
     }
     int h = 0;
-    for (int i = 0; i < po->tasks->num_children;     i++) hoisted[h++] = po->tasks->children[i];
-    for (int i = 0; i < po->accounts->num_children;  i++) hoisted[h++] = po->accounts->children[i];
-    for (int i = 0; i < po->reports->num_children;   i++) hoisted[h++] = po->reports->children[i];
-    for (int i = 0; i < po->resources->num_children; i++) hoisted[h++] = po->resources->children[i];
+    for (int i = 0; i < root->num_children; i++)
+        if (root->children[i] != project) hoisted[h++] = root->children[i];
 
     /* Top-level scope frame plus the project's synthetic scope-children. */
     tj_node **top = malloc((size_t)(hoisted_n + 1) * sizeof(tj_node *));
@@ -321,7 +329,7 @@ static void assign_token_owners(ParseOutput *po) {
     tj_node **proj_kids = NULL;
     int       proj_kids_n = 0;
 
-    if (po->project) {
+    if (project) {
         proj_kids = hoisted_n
             ? malloc((size_t)hoisted_n * sizeof(tj_node *))
             : NULL;
@@ -329,12 +337,12 @@ static void assign_token_owners(ParseOutput *po) {
             fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
         }
         for (int i = 0; i < hoisted_n; i++) {
-            if (range_within(hoisted[i]->range, po->project->range))
+            if (range_within(hoisted[i]->range, project->range))
                 proj_kids[proj_kids_n++] = hoisted[i];
             else
                 top[top_n++] = hoisted[i];
         }
-        top[top_n++] = po->project;
+        top[top_n++] = project;
         if (proj_kids_n > 1)
             qsort(proj_kids, (size_t)proj_kids_n, sizeof(tj_node *), compare_node_starts);
     } else {
@@ -377,8 +385,8 @@ static void assign_token_owners(ParseOutput *po) {
             /* The project node carries its hoisted body decls as
              * scope-children here even though its own `children` array is
              * empty. */
-            tj_node **kids = (child == po->project) ? proj_kids : child->children;
-            int       nkids = (child == po->project) ? proj_kids_n : child->num_children;
+            tj_node **kids = (child == project) ? proj_kids : child->children;
+            int       nkids = (child == project) ? proj_kids_n : child->num_children;
             stack[depth++] = (OwnerFrame){ kids, nkids, 0, child };
         }
 
@@ -396,10 +404,7 @@ static void assign_token_owners(ParseOutput *po) {
 ParseOutput *parse(const char *src) {
     ParseOutput *po = calloc(1, sizeof(ParseOutput));
     if (!po) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    po->tasks     = alloc_synthetic_root();
-    po->accounts  = alloc_synthetic_root();
-    po->reports   = alloc_synthetic_root();
-    po->resources = alloc_synthetic_root();
+    po->root = alloc_synthetic_root();
 
     /* Set up global state for lexer.l and grammar.y */
     g_output          = po;
@@ -426,17 +431,15 @@ ParseOutput *parse(const char *src) {
     g_tok_span_cap    = 0;
     g_num_sem_entries = 0;
 
-    /* Wire up parent/owner pointers across the four trees + project. */
-    assign_parent_links(po->tasks,     po->tasks->children,     po->tasks->num_children,     po->tasks);
-    assign_parent_links(po->accounts,  po->accounts->children,  po->accounts->num_children,  po->accounts);
-    assign_parent_links(po->reports,   po->reports->children,   po->reports->num_children,   po->reports);
-    assign_parent_links(po->resources, po->resources->children, po->resources->num_children, po->resources);
-    if (po->project) {
-        po->project->parent_node = NULL;
-        po->project->parent_doc  = NULL;
-        assign_parent_links(po->project, po->project->children,
-                            po->project->num_children, NULL);
-    }
+    /* The grammar appends top-level declarations to root as they reduce,
+     * which interleaves a project block's hoisted body children ahead of
+     * the project node itself.  Sort by source position so root->children
+     * is in true source order, then wire parent/owner pointers. */
+    if (po->root->num_children > 1)
+        qsort(po->root->children, (size_t)po->root->num_children,
+              sizeof(tj_node *), compare_node_starts);
+    assign_parent_links(po->root, po->root->children,
+                        po->root->num_children, po->root);
     assign_token_owners(po);
 
     return po;

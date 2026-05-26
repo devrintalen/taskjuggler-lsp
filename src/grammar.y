@@ -103,35 +103,37 @@ void reset_pending_include_state(void) {
     free(g_pending_report_prefix);   g_pending_report_prefix   = NULL;
 }
 
-/* ── Per-kind tree routing ──────────────────────────────────────────────── *
+/* ── Top-level declaration routing ──────────────────────────────────────── *
  *
- * Map a declaration keyword to the per-kind synthetic root on g_output it
- * belongs under.  Returns NULL for keywords that should not enter any
- * tree (e.g. KW_PROJECT, which is stored on g_output->project directly).
+ * Every top-level declaration that produces a tj_node — task, account,
+ * resource/shift, the report family (navigator/scenario/timesheet/
+ * statussheet/tagfile/journalentry included), and the project block —
+ * is appended to g_output->root in source order.  The node's own
+ * `keyword` records its kind, so no per-kind bucketing is needed; later
+ * passes (server.c's per-Project rebuild) route by keyword when they
+ * need the distinction.
  *
- * Tasks, accounts, resources/shifts are obvious.  The "reports" bucket
- * absorbs every other top-level declaration that produces a tj_node:
- * all the report kinds plus navigator/scenario/timesheet/statussheet/
- * tagfile/journalentry.  This keeps the four-tree model uniform while
- * still surfacing those declarations through the per-document state.
+ * At most one project block is kept per file: a second one (malformed
+ * input) is dropped rather than admitted as a top-level sibling.
  */
-static tj_node *tree_for_keyword(int kw) {
-    if (!g_output) return NULL;
-    switch (kw) {
-    case KW_TASK:
-        return g_output->tasks;
-    case KW_ACCOUNT:
-        return g_output->accounts;
-    case KW_RESOURCE:
-    case KW_SHIFT:
-        return g_output->resources;
-    case KW_PROJECT:
-        return NULL; /* stored on g_output->project, not in any tree */
-    default:
-        /* Reports / navigator / scenario / timesheet / statussheet / tagfile /
-         * journalentry — every other top-level declaration kind. */
-        return g_output->reports;
+static int output_has_project(void) {
+    if (!g_output || !g_output->root) return 0;
+    for (int i = 0; i < g_output->root->num_children; i++)
+        if (g_output->root->children[i]->keyword == KW_PROJECT)
+            return 1;
+    return 0;
+}
+
+/* Append @p node to the document root, or free it when it cannot be
+ * admitted (no output, or a duplicate project block). */
+static void route_top_level(tj_node *node) {
+    if (!node) return;
+    if (!g_output || !g_output->root ||
+        (node->keyword == KW_PROJECT && output_has_project())) {
+        tj_node_free(node);
+        return;
     }
+    tj_node_append_child(g_output->root, node);
 }
 
 /* ── Current dep-ref direction ──────────────────────────────────────────── *
@@ -383,24 +385,8 @@ items
     : /* empty */
     | items item
         {
-            if ($2.has_sym) {
-                tj_node *node = $2.sym;
-                if (node->keyword == KW_PROJECT) {
-                    /* At most one project block per file.  If we somehow
-                     * see a second one (malformed input), drop it on the
-                     * floor rather than leak. */
-                    if (g_output && !g_output->project)
-                        g_output->project = node;
-                    else
-                        tj_node_free(node);
-                } else {
-                    tj_node *tree = tree_for_keyword(node->keyword);
-                    if (tree)
-                        tj_node_append_child(tree, node);
-                    else
-                        tj_node_free(node);
-                }
-            }
+            if ($2.has_sym)
+                route_top_level($2.sym);
         }
     ;
 
@@ -1134,12 +1120,12 @@ symbol_decl
         {
             /* A project block is metadata only — its body's task /
              * resource / account / report children are conceptually
-             * top-level declarations of the file, so we route each
-             * body child into the matching per-kind tree on g_output
+             * top-level declarations of the file, so we hoist each body
+             * child to g_output->root as a sibling of the project node
              * (the same destination as items declared outside the
-             * project block).  The project tj_node itself ends up
-             * with no children; document_symbol rendering composes
-             * the outline shape on demand. */
+             * project block).  The project tj_node itself ends up with
+             * no children; document_symbol rendering composes the
+             * outline shape on demand. */
             $$ = $<sym>4;
             LspPos range_end = $7.end;
             if (range_end.line == 0 && range_end.character == 0)
@@ -1153,11 +1139,7 @@ symbol_decl
                     tj_node_free(child);
                     continue;
                 }
-                tj_node *tree = tree_for_keyword(child->keyword);
-                if (tree)
-                    tj_node_append_child(tree, child);
-                else
-                    tj_node_free(child);
+                route_top_level(child);
             }
             free($7.syms.arr);
             token_free(&$1);

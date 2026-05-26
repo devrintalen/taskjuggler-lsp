@@ -31,6 +31,7 @@
 
 #include "server.h"
 #include "parser.h"
+#include "grammar.tab.h"   /* KW_* keyword constants for per-kind routing */
 #include "job_queue.h"
 #include "threadpool.h"
 #include "diagnostics.h"
@@ -81,15 +82,13 @@ typedef struct Document {
     int          disk_only;
     int          is_cc_root;        /**< 1 when this doc is named directly in compile_commands.json */
 
-    /* Parse-derived state.  All four synthetic roots are non-NULL after a
-     * successful parse and NULL before one has happened (use `tasks` as
-     * the "has-parse" sentinel).  Freed and replaced wholesale by
-     * doc_install_parse(); freed by doc_free() on slot release. */
-    tj_node     *tasks;
-    tj_node     *accounts;
-    tj_node     *reports;
-    tj_node     *resources;
-    tj_node     *project;           /**< project block; NULL for .tji or .tjp without one */
+    /* Parse-derived state.  `root` is a synthetic node whose children are
+     * every top-level declaration (tasks, accounts, resources/shifts,
+     * reports, and the project block) in source order.  It is non-NULL
+     * after a successful parse and NULL before one has happened (use
+     * `root` as the "has-parse" sentinel).  Freed and replaced wholesale
+     * by doc_install_parse(); freed by doc_free() on slot release. */
+    tj_node     *root;
     TokenSpan   *tok_spans;
     int          num_tok_spans;
     int          tok_span_cap;
@@ -214,12 +213,8 @@ static Document *doc_alloc(const char *uri) {
 /** Release the parse-derived fields on @p d (per-kind tj_node trees,
  *  tokens, include filenames), zeroing each so the slot is reusable. */
 static void doc_clear_parse_state(Document *d) {
-    tj_node_free(d->tasks);
-    tj_node_free(d->accounts);
-    tj_node_free(d->reports);
-    tj_node_free(d->resources);
-    tj_node_free(d->project);
-    d->tasks = d->accounts = d->reports = d->resources = d->project = NULL;
+    tj_node_free(d->root);
+    d->root = NULL;
 
     for (int i = 0; i < d->num_tok_spans; i++)
         free(d->tok_spans[i].text);
@@ -238,11 +233,7 @@ static void doc_clear_parse_state(Document *d) {
 static void doc_install_parse(Document *d, ParseOutput *po) {
     doc_clear_parse_state(d);
     if (po) {
-        d->tasks               = po->tasks;
-        d->accounts            = po->accounts;
-        d->reports             = po->reports;
-        d->resources           = po->resources;
-        d->project             = po->project;
+        d->root                = po->root;
         d->tok_spans           = po->tok_spans;
         d->num_tok_spans       = po->num_tok_spans;
         d->tok_span_cap        = po->tok_span_cap;
@@ -251,7 +242,7 @@ static void doc_install_parse(Document *d, ParseOutput *po) {
          * what po still owns: the includes array (whose strings live
          * past follow_includes() because replace_string() strdups them)
          * and the struct shell. */
-        po->tasks = po->accounts = po->reports = po->resources = po->project = NULL;
+        po->root            = NULL;
         po->tok_spans       = NULL;
         po->num_tok_spans   = 0;
         po->tok_span_cap    = 0;
@@ -676,16 +667,6 @@ static tj_node *find_node_by_dotted_path(tj_node *start, const char *path) {
     return cur;
 }
 
-/** Deep-copy each top-level child of @p from_root and attach the copies
- *  to @p target. */
-static void copy_top_level(tj_node *target, tj_node *from_root) {
-    if (!target || !from_root) return;
-    for (int i = 0; i < from_root->num_children; i++) {
-        tj_node *copy = tj_node_clone(from_root->children[i]);
-        tj_node_append_child(target, copy);
-    }
-}
-
 /* ── Per-Project tree rebuild ──────────────────────────────────────────── */
 
 static void project_free(Project *p) {
@@ -704,26 +685,32 @@ static void projects_clear(void) {
     num_projects = 0;
 }
 
-/** Copy each top-level child of @p d's per-kind trees into the matching
- *  per-kind tree on @p p, applying @p d's prefix.  Mirrors
- *  copy_document_into_globals but writes into a Project rather than the
- *  global trees. */
+/** Copy each top-level declaration of @p d into the matching per-kind
+ *  tree on @p p, applying @p d's per-kind prefix.  Routes by the node's
+ *  own `keyword` (the per-kind grouping the Document no longer keeps);
+ *  the project block is document-local metadata and is skipped. */
 static void copy_document_into_project(Project *p, Document *d) {
-    struct {
-        tj_node    *project_root;
-        tj_node    *doc_root;
+    if (!d->root) return;
+    for (int i = 0; i < d->root->num_children; i++) {
+        tj_node    *child = d->root->children[i];
+        tj_node    *kind_root;
         const char *prefix;
-    } kinds[] = {
-        { &p->tasks,     d->tasks,     d->task_prefix     },
-        { &p->accounts,  d->accounts,  d->account_prefix  },
-        { &p->reports,   d->reports,   d->report_prefix   },
-        { &p->resources, d->resources, d->resource_prefix },
-    };
-    for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
-        tj_node *target = find_node_by_dotted_path(kinds[k].project_root,
-                                                    kinds[k].prefix);
+        switch (child->keyword) {
+        case KW_TASK:
+            kind_root = &p->tasks;     prefix = d->task_prefix;     break;
+        case KW_ACCOUNT:
+            kind_root = &p->accounts;  prefix = d->account_prefix;  break;
+        case KW_RESOURCE:
+        case KW_SHIFT:
+            kind_root = &p->resources; prefix = d->resource_prefix; break;
+        case KW_PROJECT:
+            continue;   /* project block stays document-local */
+        default:
+            kind_root = &p->reports;   prefix = d->report_prefix;   break;
+        }
+        tj_node *target = find_node_by_dotted_path(kind_root, prefix);
         if (!target) continue;
-        copy_top_level(target, kinds[k].doc_root);
+        tj_node_append_child(target, tj_node_clone(child));
     }
 }
 
@@ -763,18 +750,17 @@ static void project_populate_from_root(Project *p, Document *root) {
     PUSH(queue,   q_len, q_cap, root);
     PUSH(visited, v_len, v_cap, root);
 
-    /* Anchor the project on the root's own top-level (no prefix). */
-    copy_top_level(&p->tasks,     root->tasks);
-    copy_top_level(&p->accounts,  root->accounts);
-    copy_top_level(&p->reports,   root->reports);
-    copy_top_level(&p->resources, root->resources);
+    /* Anchor the project on the root document's own top-level.  Its
+     * prefixes are NULL, so every declaration lands unprefixed in the
+     * matching per-kind tree. */
+    copy_document_into_project(p, root);
     if (!root->primary_project) root->primary_project = p;
 
     while (q_head < q_len) {
         Document *cur = queue[q_head++];
         for (int i = 0; i < cur->num_included_uris; i++) {
             Document *child = doc_find_by_uri(cur->included_uris[i]);
-            if (!child || !child->tasks) continue;
+            if (!child || !child->root) continue;
             int seen = 0;
             for (int v = 0; v < v_len && !seen; v++)
                 if (visited[v] == child) seen = 1;
@@ -820,7 +806,7 @@ static void rebuild_all_projects(void) {
     /* Pass 1: compile_commands roots + their include closures. */
     for (int i = 0; i < MAX_DOCS; i++) {
         Document *root = &docs[i];
-        if (!root->in_use || !root->is_cc_root || !root->tasks) continue;
+        if (!root->in_use || !root->is_cc_root || !root->root) continue;
 
         Project *p = calloc(1, sizeof(*p));
         if (!p) continue;
@@ -835,7 +821,7 @@ static void rebuild_all_projects(void) {
      * prefix; the doc is its sole member. */
     for (int i = 0; i < MAX_DOCS; i++) {
         Document *d = &docs[i];
-        if (!d->in_use || !d->tasks || d->primary_project) continue;
+        if (!d->in_use || !d->root || d->primary_project) continue;
 
         Project *p = calloc(1, sizeof(*p));
         if (!p) continue;
@@ -843,10 +829,7 @@ static void rebuild_all_projects(void) {
         p->is_orphan = 1;
         if (!projects_append(p)) { project_free(p); continue; }
 
-        copy_top_level(&p->tasks,     d->tasks);
-        copy_top_level(&p->accounts,  d->accounts);
-        copy_top_level(&p->reports,   d->reports);
-        copy_top_level(&p->resources, d->resources);
+        copy_document_into_project(p, d);
         d->primary_project = p;
     }
 }
@@ -979,11 +962,20 @@ static int dependency_count_subtree(const tj_node *n) {
     return total;
 }
 
+/** True when @p d declares a project block (scans root's top-level
+ *  children for a KW_PROJECT node). */
+static int doc_has_project_block(const Document *d) {
+    if (!d->root) return 0;
+    for (int i = 0; i < d->root->num_children; i++)
+        if (d->root->children[i]->keyword == KW_PROJECT) return 1;
+    return 0;
+}
+
 /** Dump the live docs[] slot table to stderr.  One header line followed
  *  by one line per occupied slot: index, flags, project id, dep count,
  *  URI.  Flags are a fixed-width string so columns line up:
  *    D = disk_only (lowercase d = editor-owned)
- *    P = has parse output (tasks tree present)
+ *    P = has parse output (root tree present)
  *    R = has a project block (canonical root candidate)
  *    C = compile_commands.json root
  *  `deps=` shows the total number of captured `depends` + `precedes`
@@ -1006,13 +998,13 @@ static void dump_docs_to_stderr(const char *trigger) {
                           ? (docs[i].primary_project->id
                               ? docs[i].primary_project->id : "(no-id)")
                           : "(none)";
-        int deps = dependency_count_subtree(docs[i].tasks);
+        int deps = dependency_count_subtree(docs[i].root);
         fprintf(stderr, "  [%2d] %c%c%c%c  proj=%s  deps=%d  %s\n",
                 i,
-                docs[i].disk_only  ? 'D' : 'd',
-                docs[i].tasks      ? 'P' : '-',
-                docs[i].project    ? 'R' : '-',
-                docs[i].is_cc_root ? 'C' : '-',
+                docs[i].disk_only          ? 'D' : 'd',
+                docs[i].root               ? 'P' : '-',
+                doc_has_project_block(&docs[i]) ? 'R' : '-',
+                docs[i].is_cc_root         ? 'C' : '-',
                 pid,
                 deps,
                 docs[i].uri ? docs[i].uri : "(null)");
@@ -1401,54 +1393,33 @@ static void handle_didclose(yyjson_val *params) {
  * snapshot machinery was retired.
  */
 
-/** Gather @p d's top-level nodes (the project block, when present,
- *  followed by every child of the four per-kind trees) into one flat
- *  array, for handlers that want a single tj_node *const * symbols pool
- *  rather than the Document's five separate roots.
- *
- *  The array holds borrowed pointers into nodes @p d still owns: free
- *  the returned array, never the nodes it points at.  Returns NULL (and
- *  leaves @p out_n at 0) when @p d has no parse yet or no top-level
- *  nodes.
- *
- *  @param d     document to flatten; may be NULL.
- *  @param out_n receives the number of entries in the returned array.
- *  @return malloc'd array of @p out_n borrowed pointers, or NULL. */
-static tj_node **flatten_top_nodes(Document *d, int *out_n) {
-    *out_n = 0;
-    if (!d || !d->tasks) return NULL;
-    int n = (d->project ? 1 : 0)
-          + d->tasks->num_children
-          + d->accounts->num_children
-          + d->reports->num_children
-          + d->resources->num_children;
-    if (!n) return NULL;
-    tj_node **arr = malloc((size_t)n * sizeof(tj_node *));
-    int w = 0;
-    if (d->project) arr[w++] = d->project;
-    for (int i = 0; i < d->tasks->num_children;     i++) arr[w++] = d->tasks->children[i];
-    for (int i = 0; i < d->accounts->num_children;  i++) arr[w++] = d->accounts->children[i];
-    for (int i = 0; i < d->reports->num_children;   i++) arr[w++] = d->reports->children[i];
-    for (int i = 0; i < d->resources->num_children; i++) arr[w++] = d->resources->children[i];
-    *out_n = w;
-    return arr;
+/** A document's top-level symbol pool: the children of its synthetic
+ *  `root`, in source order, or an empty pool when @p d has no parse.
+ *  The pointers are borrowed from @p d — never freed by the caller. */
+static void doc_symbol_pool(const Document *d, tj_node *const **out_top, int *out_n) {
+    if (d && d->root) {
+        *out_top = (tj_node *const *)d->root->children;
+        *out_n   = d->root->num_children;
+    } else {
+        *out_top = NULL;
+        *out_n   = 0;
+    }
 }
 
 static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
                                                yyjson_val *params, Document *d) {
     (void)params;
-    if (!d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
-    /* For now, render the four per-kind trees concatenated at the top
-     * level (project node first when present).  TODO(document-symbol):
-     * once the project block reliably contains its children in the
-     * hierarchical sense, fold the per-kind entries inside it. */
-    int w = 0;
-    tj_node **top = flatten_top_nodes(d, &w);
+    /* root->children are already every top-level declaration in source
+     * order (project block included).  TODO(document-symbol): once the
+     * project block reliably contains its children in the hierarchical
+     * sense, nest the in-project entries under it. */
+    tj_node *const *top = (tj_node *const *)d->root->children;
+    int             w   = d->root->num_children;
 
     size_t  json_len = 0;
     char   *json     = build_document_symbols_json(top, w, &json_len);
-    free(top);
     if (!json) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_mut_val *raw = yyjson_mut_rawncpy(doc, json, json_len);
     free(json);
@@ -1457,10 +1428,11 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
 
 /* Build the ProjectScope set for a request originating in @p d: every
  * in-use document sharing @p d's primary_project (including @p d
- * itself), each with its flattened top-level nodes and URI.  Orphan
- * documents (primary_project == NULL) yield just themselves.  Returns a
- * heap array via @p out_scopes (free with free_project_scopes) and the
- * requester's index via @p out_self_index. */
+ * itself), each with its top-level node pool and URI.  Orphan documents
+ * (primary_project == NULL) yield just themselves.  The pools are
+ * borrowed from each Document's root; free_project_scopes releases only
+ * the scopes array.  Returns a heap array (free with free_project_scopes)
+ * and the requester's index via @p out_self_index. */
 static ProjectScope *build_project_scopes(Document *d, int *out_n,
                                           int *out_self_index) {
     *out_n          = 0;
@@ -1477,10 +1449,7 @@ static ProjectScope *build_project_scopes(Document *d, int *out_n,
             if (!d->primary_project) continue;
             if (docs[i].primary_project != d->primary_project) continue;
         }
-        int tn = 0;
-        tj_node **top = flatten_top_nodes(&docs[i], &tn);
-        scopes[n].top = top;
-        scopes[n].n   = tn;
+        doc_symbol_pool(&docs[i], &scopes[n].top, &scopes[n].n);
         scopes[n].uri = docs[i].uri;
         if (is_self) *out_self_index = n;
         n++;
@@ -1491,38 +1460,35 @@ static ProjectScope *build_project_scopes(Document *d, int *out_n,
 }
 
 static void free_project_scopes(ProjectScope *scopes, int n) {
-    for (int i = 0; i < n; i++)
-        free((tj_node **)scopes[i].top);
+    (void)n;   /* scope pools are borrowed from each Document's root */
     free(scopes);
 }
 
 static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
                                              yyjson_val *params, Document *d) {
     (void)params;
-    if (!d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
-    int n = 0;
-    tj_node **top = flatten_top_nodes(d, &n);
+    tj_node *const *top; int n;
+    doc_symbol_pool(d, &top, &n);
     yyjson_mut_val *arr = build_folding_ranges_json(doc,
                                                      d->tok_spans,
                                                      d->num_tok_spans,
                                                      top, n);
-    free(top);
     return make_response(doc, id, arr);
 }
 
 static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
                                          yyjson_val *params, Document *d) {
     (void)params;
-    if (!d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
-    int n = 0;
-    tj_node **top = flatten_top_nodes(d, &n);
+    tj_node *const *top; int n;
+    doc_symbol_pool(d, &top, &n);
     yyjson_mut_val *arr = build_code_lens_json(doc,
                                                 d->tok_spans,
                                                 d->num_tok_spans,
                                                 top, n);
-    free(top);
     return make_response(doc, id, arr);
 }
 
@@ -1535,7 +1501,7 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
 
@@ -1570,7 +1536,7 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
 
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
     ActiveContext ac = active_context(d->tok_spans,
@@ -1594,7 +1560,7 @@ static char *mint_sem_tokens_result_id(Document *d) {
 static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
                                                     yyjson_val *params, Document *d) {
     (void)params;
-    if (!d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     uint32_t *buf = NULL;
     size_t    count = 0;
@@ -1612,7 +1578,7 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
 static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yyjson_val *id,
                                                           yyjson_val *params, Document *d) {
     const char *previous_result_id = params ? json_str(params, "previousResultId") : NULL;
-    if (!d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     uint32_t *new_buf = NULL;
     size_t    new_count = 0;
@@ -1641,7 +1607,7 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
     int self_index = -1, num_scopes = 0;
@@ -1661,10 +1627,10 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
                                                   yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
-    int n = 0;
-    tj_node **top = flatten_top_nodes(d, &n);
+    tj_node *const *top; int n;
+    doc_symbol_pool(d, &top, &n);
 
     LspPos pos = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_document_highlight_json(doc,
@@ -1672,7 +1638,6 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
                                                             d->tok_spans,
                                                             d->num_tok_spans,
                                                             pos);
-    free(top);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
 }
@@ -1681,7 +1646,7 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
     int self_index = -1, num_scopes = 0;
@@ -1705,7 +1670,7 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
 
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->tasks) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     /* Gather top-level nodes of every other Document in the requester's
      * project as extra pools.  Skips:
@@ -1717,24 +1682,22 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
      * cross-file completion source. */
     tj_node *const *extra_pools[MAX_DOCS];
     int             extra_counts[MAX_DOCS];
-    tj_node       **extra_alloc[MAX_DOCS] = {0};
     int             num_extra = 0;
     for (int i = 0; i < MAX_DOCS && num_extra < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
         if (&docs[i] == d) continue;
         if (!d->primary_project) continue;
         if (docs[i].primary_project != d->primary_project) continue;
-        int n = 0;
-        tj_node **top = flatten_top_nodes(&docs[i], &n);
+        tj_node *const *top; int n;
+        doc_symbol_pool(&docs[i], &top, &n);
         if (!top) continue;
-        extra_alloc[num_extra]  = top;
         extra_pools[num_extra]  = top;
         extra_counts[num_extra] = n;
         num_extra++;
     }
 
-    int self_n = 0;
-    tj_node **self_top = flatten_top_nodes(d, &self_n);
+    tj_node *const *self_top; int self_n;
+    doc_symbol_pool(d, &self_top, &self_n);
 
     LspPos pos             = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_completions_json(doc,
@@ -1746,8 +1709,6 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
                                                      extra_counts,
                                                      num_extra,
                                                      d->text);
-    free(self_top);
-    for (int i = 0; i < num_extra; i++) free(extra_alloc[i]);
     return make_response(doc, id, result);
 }
 
@@ -1758,12 +1719,11 @@ static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use || !docs[i].tasks) continue;
-        int n = 0;
-        tj_node **top = flatten_top_nodes(&docs[i], &n);
+        if (!docs[i].in_use || !docs[i].root) continue;
+        tj_node *const *top; int n;
+        doc_symbol_pool(&docs[i], &top, &n);
         if (!top) continue;
         collect_workspace_symbols(doc, query, top, n, docs[i].uri, arr);
-        free(top);
     }
     return make_response(doc, id, arr);
 }

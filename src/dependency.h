@@ -35,7 +35,7 @@
 
 /**
  * One document's contribution to a project's resolution scope: its
- * top-level tj_nodes (as produced by the server's flatten_top_nodes)
+ * top-level tj_nodes (the children of the document's synthetic root)
  * plus the URI used to build Locations that point into it.  All
  * pointers are borrowed for the duration of a single request.
  */
