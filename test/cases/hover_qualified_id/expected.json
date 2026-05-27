@@ -101,6 +101,14 @@
   },
   {
     "jsonrpc": "2.0",
+    "method": "window/showMessage",
+    "params": {
+      "type": 1,
+      "message": "taskjuggler-lsp: no workspace root; cannot locate compile_commands.json.  No documents will be loaded; cross-file LSP features are disabled."
+    }
+  },
+  {
+    "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file:///test/project.tjp",

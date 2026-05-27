@@ -1532,9 +1532,33 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
     LspPos pos = json_to_pos(pos_obj);
 
-    /* TODO(hover): the previous design checked dep-link hover targets
-     * first.  With link resolution offline, fall through directly to
-     * keyword documentation. */
+    /* A cursor on a dependency reference resolves to its target task; show
+     * the target's qualified id and name.  Falls through to keyword docs
+     * when the cursor is not on a dependency or the reference is unresolved. */
+    tj_node          *owner = NULL;
+    const Dependency *dep   = NULL;
+    if (dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
+                             &owner, &dep)) {
+        int self_index = -1, num_scopes = 0;
+        ProjectScope *scopes = build_project_scopes(d, &num_scopes, &self_index);
+        tj_node *target = resolve_dependency(dep, owner, scopes, num_scopes,
+                                             self_index, NULL);
+        free_project_scopes(scopes, num_scopes);
+        if (target) {
+            char *value = hover_node_markdown(target);
+            yyjson_mut_val *contents = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_str(doc, contents, "kind", "markdown");
+            yyjson_mut_obj_add_strcpy(doc, contents, "value", value);
+            free(value);
+
+            yyjson_mut_val *hover = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_val(doc, hover, "contents", contents);
+            yyjson_mut_obj_add_val(doc, hover, "range",
+                                   range_json(doc, dep->source_range));
+            return make_response(doc, id, hover);
+        }
+    }
+
     ActiveKeyword ak = active_keyword_at(d->tok_spans,
                                           d->num_tok_spans, pos);
     if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));

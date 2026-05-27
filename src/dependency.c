@@ -74,6 +74,9 @@ static tj_node *find_task(tj_node *const *syms, int n,
 
 /* ── Public API ─────────────────────────────────────────────────────────── */
 
+/* TODO: only task targets are resolved today.  Valid reference targets
+ * could also be accounts, reports, and resources; extend resolution (and
+ * the matching in find_task) to those node kinds. */
 tj_node *resolve_dependency(const Dependency *dep, tj_node *owner_task,
                             const ProjectScope *scopes, int num_scopes,
                             int owner_index, const char **out_uri) {
