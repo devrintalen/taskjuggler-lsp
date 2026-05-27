@@ -104,10 +104,10 @@
     "id": 2,
     "result": [
       {
-        "name": "\"Deepest\"",
+        "name": "\"Top\"",
         "kind": 12,
         "location": {
-          "uri": "file://${CASE_DIR}/workspace/sub/deeper/deepest.tji",
+          "uri": "file://${CASE_DIR}/workspace/top.tjp",
           "range": {
             "start": {
               "line": 0,
@@ -115,7 +115,7 @@
             },
             "end": {
               "line": 0,
-              "character": 12
+              "character": 8
             }
           }
         }
@@ -138,10 +138,10 @@
         }
       },
       {
-        "name": "\"Top\"",
+        "name": "\"Deepest\"",
         "kind": 12,
         "location": {
-          "uri": "file://${CASE_DIR}/workspace/top.tjp",
+          "uri": "file://${CASE_DIR}/workspace/sub/deeper/deepest.tji",
           "range": {
             "start": {
               "line": 0,
@@ -149,7 +149,7 @@
             },
             "end": {
               "line": 0,
-              "character": 8
+              "character": 12
             }
           }
         }
