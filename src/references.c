@@ -18,53 +18,46 @@
 
 /** @file */
 
-/* See doc/modules/references.rst for the module overview. */
-
 #include "references.h"
-#include "document_symbol.h"
-#include "grammar.tab.h"
-#include <string.h>
+#include "document_symbol.h"  /* range_json */
 
-/**
- * Test whether @p p falls within range @p r (endpoints inclusive).
- *
- * @param p  Position to test.
- * @param r  Range.
- * @return 1 when @p p is inside @p r, 0 otherwise.
- */
-static int pos_in_range(LspPos p, LspRange r) {
-    int after  = (p.line > r.start.line)
-              || (p.line == r.start.line && p.character >= r.start.character);
-    int before = (p.line < r.end.line)
-              || (p.line == r.end.line && p.character <= r.end.character);
-    return after && before;
+/* Resolve every dependency declared in @p node's subtree against the
+ * project and append a Location for each one that targets @p wanted. */
+static void collect_refs_in_subtree(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                                     tj_node *node, const tj_node *wanted,
+                                     const ProjectScope *scopes,
+                                     int num_scopes, int owner_index,
+                                     const char *owner_uri) {
+    if (!node) return;
+    for (int i = 0; i < node->num_dependencies; i++) {
+        const Dependency *dep = &node->dependencies[i];
+        tj_node *target = resolve_dependency(dep, node, scopes, num_scopes,
+                                             owner_index, NULL);
+        if (target != wanted) continue;
+        yyjson_mut_val *location = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc, location, "uri", owner_uri);
+        yyjson_mut_obj_add_val(doc, location, "range",
+                               range_json(doc, dep->source_range));
+        yyjson_mut_arr_add_val(arr, location);
+    }
+    for (int i = 0; i < node->num_children; i++)
+        collect_refs_in_subtree(doc, arr, node->children[i], wanted,
+                                scopes, num_scopes, owner_index, owner_uri);
 }
 
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
-                                       const char *cursor_uri,
                                        const TokenSpan *tokens, int num_tokens,
-                                       LspPos cursor) {
-    const DocSymbol *task = NULL;
-    for (DocSymbol *sym = symbol_at(tokens, num_tokens, cursor);
-         sym != NULL; sym = sym->parent) {
-        if (sym->keyword == KW_TASK
-                && pos_in_range(cursor, sym->selection_range)) {
-            task = sym;
-            break;
-        }
-    }
+                                       LspPos cursor,
+                                       const ProjectScope *scopes,
+                                       int num_scopes) {
+    tj_node *task = task_decl_at_cursor(tokens, num_tokens, cursor);
     if (!task) return NULL;
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    for (int i = 0; i < task->num_ref_links; i++) {
-        const ReferenceLink *ref = &task->ref_links[i];
-        const char *uri = ref->source_uri ? ref->source_uri : cursor_uri;
-
-        yyjson_mut_val *location = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_str(doc, location, "uri", uri);
-        yyjson_mut_obj_add_val(doc, location, "range",
-                               range_json(doc, ref->source));
-        yyjson_mut_arr_add_val(arr, location);
+    for (int p = 0; p < num_scopes; p++) {
+        for (int i = 0; i < scopes[p].n; i++)
+            collect_refs_in_subtree(doc, arr, scopes[p].top[i], task,
+                                    scopes, num_scopes, p, scopes[p].uri);
     }
     return arr;
 }

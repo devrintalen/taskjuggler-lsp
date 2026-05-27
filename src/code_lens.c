@@ -19,6 +19,7 @@
 /** @file */
 
 #include "code_lens.h"
+#include "document_symbol.h"
 #include "grammar.tab.h"
 
 #include <ctype.h>
@@ -230,7 +231,7 @@ static void push_lens(yyjson_mut_doc *doc, yyjson_mut_val *arr,
  *
  * Single linear scan of tok_spans[]: for each `length` / `duration`
  * keyword whose owning task has an explicit `start` or `end` date
- * (precomputed during parse and stored on the DocSymbol), compute the
+ * (precomputed during parse and stored on the tj_node), compute the
  * complementary endpoint and emit a lens.
  *
  * The `symbols` / `num_symbols` parameters are unused — endpoint data
@@ -239,7 +240,7 @@ static void push_lens(yyjson_mut_doc *doc, yyjson_mut_val *arr,
  */
 yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
                                      const TokenSpan *spans, int num_spans,
-                                     DocSymbol *const *symbols,
+                                     tj_node *const *symbols,
                                      int num_symbols) {
     (void)symbols;
     (void)num_symbols;
@@ -250,7 +251,7 @@ yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
     for (int i = 0; i < num_spans; i++) {
         const TokenSpan *t = &spans[i];
         if (t->token_kind != KW_LENGTH && t->token_kind != KW_DURATION) continue;
-        DocSymbol *owner = t->owner;
+        tj_node *owner = t->owner;
         if (!owner || owner->keyword != KW_TASK) continue;
         if (!owner->has_start && !owner->has_end) continue;
 

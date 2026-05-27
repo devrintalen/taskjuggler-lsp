@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include "job_queue.h"
+
 #include <yyjson.h>
 
 /**
@@ -31,10 +33,11 @@ void server_init();
 
 /**
  * Process one JSON-RPC request or notification arriving on the reader
- * thread.  Parses the envelope, classifies the method as a mutation
- * or a read-only query, and enqueues a Job onto the appropriate
- * thread-pool queue.  The `exit` notification is special-cased: the
- * thread pool is drained and the process terminates immediately.
+ * thread.  Parses the envelope, classifies the method as an LSP
+ * notification or a request (LSP request → query path), and enqueues a
+ * Job onto the appropriate thread-pool queue.  The `exit` notification
+ * is special-cased: the thread pool is drained and the process
+ * terminates immediately.
  *
  * @param json_text  The raw JSON message body (without the
  *                   Content-Length framing).  Owned by the caller.
@@ -42,33 +45,35 @@ void server_init();
 void server_process(const char *json_text);
 
 /**
- * Run a mutation / lifecycle JSON-RPC message under the doc-store
- * write lock.  Called only by the threadpool's mutation worker.
- * Builds and emits any response or notification via lsp_send_message().
+ * Apply an LSP notification: parse / clone / resolve as the message
+ * requires, then commit the result under the docs-store mutex.  Runs
+ * inline on the coordinator thread so subsequent queries observe any
+ * state change.  Builds and emits any outgoing notifications via
+ * lsp_send_message().
  *
- * @param request_doc  Parsed JSON-RPC envelope.  Not freed by this
- *                     function; the worker frees it after return.
+ * @param job  Pending notification job.  Coordinator frees it after
+ *             return.
  */
-void server_dispatch_mutation(yyjson_doc *request_doc);
+void server_dispatch_notification(Job *job);
 
 /**
- * Run a read-only query JSON-RPC message under the doc-store read
- * lock.  Called by any threadpool query worker.  Builds and emits
- * the response via lsp_send_message().
+ * Run the query handler for @p job and send the response.  Runs on a
+ * query worker thread; acquires docs_mutex for the duration of the
+ * handler because the previous snapshot machinery was retired during
+ * the tj_node refactor — see job_queue.h.
  *
- * @param request_doc  Parsed JSON-RPC envelope.  Not freed by this
- *                     function; the worker frees it after return.
+ * @param job  Pending query job.  Worker frees it after return.
  */
-void server_dispatch_query(yyjson_doc *request_doc);
+void server_dispatch_query(Job *job);
 
 /**
- * Respond to @p request_doc with a JSON-RPC `RequestCancelled` (-32800)
- * error without running the handler.  Called by the query worker when
- * the Job was marked is_cancelled by a $/cancelRequest that arrived
- * while the Job was still queued.  No-op for notifications (no id to
- * reply to).
+ * Respond to @p job's request with a JSON-RPC `RequestCancelled`
+ * (-32800) error without running the handler.  Called by the query
+ * worker when the Job was marked is_cancelled by a $/cancelRequest
+ * that arrived while the Job was still queued.  No-op for
+ * notifications (no id to reply to).
  */
-void server_dispatch_cancelled(yyjson_doc *request_doc);
+void server_dispatch_cancelled(Job *job);
 
 /**
  * Write one LSP-framed message to stdout, prepending the required

@@ -19,85 +19,11 @@
 /** @file */
 
 #include "parser.h"
-#include "diagnostics.h"
-#include "grammar.tab.h"  /* yyparse() */
+#include "grammar.tab.h"  /* yyparse(), KW_* constants */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* ── Raw dependency reference accumulator ──────────────────────────────── *
- *
- * grammar.y calls push_dep_ref() for each dependency reference encountered
- * during parsing.  These are stored in a file-local buffer until parse()
- * calls resolve_dep_refs(), which resolves them in place and populates
- * def_links/ref_links on the target DocSymbols.  The RawDepRef type is
- * declared in parser.h so that references that failed in-file resolution
- * can be stashed on ParseResult.cross_file_deps[] for later re-resolution.
- */
-
-/** Backing storage for the transient dep-ref accumulator. */
-static RawDepRef *g_dep_refs     = NULL;
-/** Number of entries currently held in #g_dep_refs. */
-static int        g_num_dep_refs = 0;
-/** Allocated capacity of #g_dep_refs in entries. */
-static int        g_dep_ref_cap  = 0;
-
-/** Release the accumulator's storage and reset its bookkeeping. */
-static void free_dep_refs(void) {
-    for (int i = 0; i < g_num_dep_refs; i++)
-        free(g_dep_refs[i].path);
-    free(g_dep_refs);
-    g_dep_refs     = NULL;
-    g_num_dep_refs = 0;
-    g_dep_ref_cap  = 0;
-}
-
-void dep_refs_reset(void) {
-    free_dep_refs();
-}
-
-void push_dep_ref(int bang_count, const char *path,
-                  DocSymbol *owner, LspPos start, LspPos end) {
-    if (g_dep_ref_cap <= g_num_dep_refs) {
-        g_dep_ref_cap = g_dep_ref_cap ? g_dep_ref_cap * 2 : 8;
-        RawDepRef *tmp = realloc(g_dep_refs,
-                                 (size_t)g_dep_ref_cap * sizeof(RawDepRef));
-        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        g_dep_refs = tmp;
-    }
-    RawDepRef *dr = &g_dep_refs[g_num_dep_refs++];
-    dr->bang_count = bang_count;
-    dr->path       = path && path[0] ? strdup(path) : NULL;
-    dr->owner      = owner;
-    dr->range      = (LspRange){ start, end };
-}
-
-/**
- * Split a dot-separated path string into a heap-allocated array of segments.
- *
- * @param path      Dot-separated reference path (e.g. `"foo.bar.baz"`).
- * @param out_segs  Receives a heap-allocated array of heap-allocated
- *                  segment strings.  Caller must free each segment and
- *                  the array.
- * @param out_nseg  Receives the segment count.
- */
-static void split_path(const char *path, char ***out_segs, int *out_nseg) {
-    *out_nseg = 0;
-    *out_segs = NULL;
-    if (!path || !path[0]) return;
-    int cap = 1;
-    for (const char *p = path; *p; p++) if (*p == '.') cap++;
-    *out_segs = malloc((size_t)cap * sizeof(char *));
-    char *tmp = strdup(path);
-    char *tok = strtok(tmp, ".");
-    while (tok) {
-        (*out_segs)[(*out_nseg)++] = strdup(tok);
-        tok = strtok(NULL, ".");
-    }
-    free(tmp);
-}
-
 
 /* ── flex scanner interface ──────────────────────────────────────────────── *
  *
@@ -105,45 +31,31 @@ static void split_path(const char *path, char ***out_segs, int *out_nseg) {
  * YY_BUFFER_STATE to avoid pulling in the full flex header.
  */
 
-/** Opaque flex input-buffer handle. */
 typedef void *YY_BUFFER_STATE;
-/**
- * Flex entry point: scan @p str as the next input buffer.
- *
- * @param str  NUL-terminated input to scan.
- * @return Handle to the new buffer; release with yy_delete_buffer().
- */
 extern YY_BUFFER_STATE yy_scan_string(const char *str);
-/**
- * Flex entry point: release a buffer returned by yy_scan_string().
- *
- * @param buf  Buffer handle to release.
- */
 extern void            yy_delete_buffer(YY_BUFFER_STATE buf);
-/** Column tracker defined in lexer.l. */
 extern int             yycolumn;
-/** Line counter managed by flex `%option yylineno`. */
 extern int             yylineno;
 
 /* ── Shared globals (used by lexer.l and grammar.y via extern) ───────────── */
 
-/** Currently-being-built ParseResult; lexer/grammar populate this directly. */
-ParseResult *g_result          = NULL;
+/** Currently-being-built ParseOutput; lexer/grammar populate this directly. */
+/* Defined in grammar.y.  Called at the start of every parse() so that a
+ * partial include-body parse from a previous run cannot leak its pending
+ * prefix strings into the next parse. */
+extern void reset_pending_include_state(void);
+
+ParseOutput *g_output         = NULL;
 /** Backing storage for the token-span array under construction. */
-TokenSpan   *g_tok_spans       = NULL;
-/** Number of entries currently held in #g_tok_spans. */
-int          g_num_tok_spans   = 0;
-/** Allocated capacity of #g_tok_spans in entries. */
-int          g_tok_span_cap    = 0;
+TokenSpan   *g_tok_spans      = NULL;
+int          g_num_tok_spans  = 0;
+int          g_tok_span_cap   = 0;
 /** Running upper bound on emitted semantic-token entries (one per source line covered). */
 int          g_num_sem_entries = 0;
 
 /**
  * Test whether a token of @p kind is emitted as a semantic token.
  * Mirrors the skip set in classify() in semantic_tokens.c.
- *
- * @param kind  Token kind (TK_* / KW_*) to test.
- * @return 1 when the token contributes a semantic-tokens entry, 0 otherwise.
  */
 static int is_sem_highlighted(int kind) {
     return kind != TK_LBRACE && kind != TK_RBRACE &&
@@ -153,13 +65,6 @@ static int is_sem_highlighted(int kind) {
 /**
  * Append one TokenSpan to the global accumulator.  Called from lexer.l for
  * every token that callers may need to inspect.
- *
- * @param kind  TK_* / KW_* token kind from grammar.tab.h.
- * @param sl    Start line.
- * @param sc    Start column.
- * @param el    End line.
- * @param ec    End column (exclusive).
- * @param text  Token lexeme; copied with strdup() (may be NULL).
  */
 void g_push_tok_span(int kind,
                      uint32_t sl, uint32_t sc,
@@ -177,6 +82,7 @@ void g_push_tok_span(int kind,
         .start      = { sl, sc },
         .end        = { el, ec },
         .text       = text ? strdup(text) : NULL,
+        .owner      = NULL,
     };
     if (is_sem_highlighted(kind))
         g_num_sem_entries += (int)(el - sl + 1);
@@ -203,600 +109,338 @@ int parse_tjp_date(const char *text, time_t *out) {
     return 1;
 }
 
-/* ── DocSymbol helpers ───────────────────────────────────────────────────── */
+/* ── tj_node helpers ─────────────────────────────────────────────────────── */
 
-void doc_symbol_free(DocSymbol *s) {
-    free(s->name);
-    free(s->id);
-    for (int i = 0; i < s->num_children; i++) {
-        doc_symbol_free(s->children[i]);
-        free(s->children[i]);
-    }
-    free(s->children);
-    for (int i = 0; i < s->num_def_links; i++)
-        free(s->def_links[i].target_uri);
-    free(s->def_links);
-    for (int i = 0; i < s->num_ref_links; i++)
-        free(s->ref_links[i].source_uri);
-    free(s->ref_links);
+void tj_node_free(tj_node *n) {
+    if (!n) return;
+    free(n->id);
+    free(n->name);
+    for (int i = 0; i < n->num_dependencies; i++)
+        free(n->dependencies[i].path);
+    free(n->dependencies);
+    for (int i = 0; i < n->num_children; i++)
+        tj_node_free(n->children[i]);
+    free(n->children);
+    free(n);
 }
 
-/* ── ParseResult helpers ─────────────────────────────────────────────────── */
-
-void parse_result_free(ParseResult *r) {
-    for (int i = 0; i < r->num_diagnostics; i++)
-        free(r->diagnostics[i].message);
-    free(r->diagnostics);
-    for (int i = 0; i < r->num_doc_symbols; i++) {
-        doc_symbol_free(r->doc_symbols[i]);
-        free(r->doc_symbols[i]);
-    }
-    free(r->doc_symbols);
-
-    for (int i = 0; i < r->num_tok_spans; i++)
-        free(r->tok_spans[i].text);
-    free(r->tok_spans);
-
-    /* g_dep_refs is freed at the end of resolve_dep_refs(); nothing to do
-     * here.  cross_file_deps holds deferred refs that survive parse() and
-     * is freed below. */
-
-    for (int i = 0; i < r->num_included_files; i++)
-        free(r->included_files[i]);
-    free(r->included_files);
-
-    for (int i = 0; i < r->num_cross_file_deps; i++)
-        free(r->cross_file_deps[i].path);
-    free(r->cross_file_deps);
-
-    memset(r, 0, sizeof(*r));
-}
-
-ParseResult *parse_result_acquire(ParseResult *r) {
-    atomic_fetch_add(&r->refcount, 1);
-    return r;
-}
-
-void parse_result_release(ParseResult *r) {
-    if (!r) return;
-    if (atomic_fetch_sub(&r->refcount, 1) == 1) {
-        parse_result_free(r);
-        free(r);
-    }
-}
-
-/**
- * Append @p s to @p r's `doc_symbols` pointer array, growing it if needed.
- *
- * @param r  ParseResult being populated.
- * @param s  Symbol to append (transfer of ownership).
- */
-void push_doc_symbol(ParseResult *r, DocSymbol *s) {
-    if (r->num_doc_symbols >= r->doc_sym_cap) {
-        int nc = r->doc_sym_cap ? r->doc_sym_cap * 2 : 4;
-        DocSymbol **tmp = realloc(r->doc_symbols, (size_t)nc * sizeof(DocSymbol *));
+void tj_node_append_child(tj_node *parent, tj_node *child) {
+    if (parent->num_children >= parent->children_cap) {
+        int nc = parent->children_cap ? parent->children_cap * 2 : 4;
+        tj_node **tmp = realloc(parent->children, (size_t)nc * sizeof(tj_node *));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        r->doc_symbols = tmp;
-        r->doc_sym_cap = nc;
+        parent->children     = tmp;
+        parent->children_cap = nc;
     }
-    r->doc_symbols[r->num_doc_symbols++] = s;
+    parent->children[parent->num_children++] = child;
+    child->parent_node = parent;
 }
 
-void push_included_file(ParseResult *r, const char *quoted_text) {
+void tj_node_push_dependency(tj_node *task, Dependency dep) {
+    if (task->num_dependencies >= task->dependencies_cap) {
+        int nc = task->dependencies_cap ? task->dependencies_cap * 2 : 4;
+        Dependency *tmp = realloc(task->dependencies,
+                                  (size_t)nc * sizeof(Dependency));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        task->dependencies     = tmp;
+        task->dependencies_cap = nc;
+    }
+    dep.resolved_target = NULL;
+    task->dependencies[task->num_dependencies++] = dep;
+}
+
+tj_node *tj_node_clone(const tj_node *src) {
+    if (!src) return NULL;
+    tj_node *dst = calloc(1, sizeof(tj_node));
+    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    dst->keyword         = src->keyword;
+    dst->id              = src->id   ? strdup(src->id)   : NULL;
+    dst->name            = src->name ? strdup(src->name) : NULL;
+    dst->range           = src->range;
+    dst->selection_range = src->selection_range;
+    dst->start_date      = src->start_date;
+    dst->end_date        = src->end_date;
+    dst->has_start       = src->has_start;
+    dst->has_end         = src->has_end;
+    /* parent_node / parent_doc deliberately NULL on the root; recursive
+     * children below get their parent_node set via tj_node_append_child. */
+    for (int i = 0; i < src->num_children; i++) {
+        tj_node *child_copy = tj_node_clone(src->children[i]);
+        tj_node_append_child(dst, child_copy);
+    }
+    /* `dependencies` is intentionally not cloned: nothing currently
+     * reads it on a hoisted copy, and `resolved_target` would point
+     * into the source document's tree.  When the resolver lands, the
+     * choice will be either to deep-copy paths and re-resolve into the
+     * destination Project, or to keep cross-Document edges off the
+     * cloned trees entirely. */
+    return dst;
+}
+
+/* ── ParseOutput helpers ─────────────────────────────────────────────────── */
+
+static tj_node *alloc_synthetic_root(void) {
+    tj_node *n = calloc(1, sizeof(tj_node));
+    if (!n) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    return n;
+}
+
+void parse_output_free(ParseOutput *po) {
+    if (!po) return;
+    tj_node_free(po->root);
+
+    for (int i = 0; i < po->num_tok_spans; i++)
+        free(po->tok_spans[i].text);
+    free(po->tok_spans);
+
+    for (int i = 0; i < po->num_includes; i++) {
+        free(po->includes[i].filename);
+        free(po->includes[i].task_prefix);
+        free(po->includes[i].resource_prefix);
+        free(po->includes[i].account_prefix);
+        free(po->includes[i].report_prefix);
+    }
+    free(po->includes);
+
+    free(po);
+}
+
+void push_include(ParseOutput *po, const char *quoted_text,
+                  const char *task_prefix,
+                  const char *resource_prefix,
+                  const char *account_prefix,
+                  const char *report_prefix) {
     if (!quoted_text) return;
     size_t len = strlen(quoted_text);
-    /* Strip surrounding quotes if present */
     const char *inner = quoted_text;
     size_t inner_len  = len;
     if (len >= 2 && (quoted_text[0] == '"' || quoted_text[0] == '\'')) {
         inner     = quoted_text + 1;
         inner_len = len - 2;
     }
-    char *copy = malloc(inner_len + 1);
-    if (!copy) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    memcpy(copy, inner, inner_len);
-    copy[inner_len] = '\0';
+    char *filename = malloc(inner_len + 1);
+    if (!filename) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    memcpy(filename, inner, inner_len);
+    filename[inner_len] = '\0';
 
-    if (r->num_included_files >= r->included_files_cap) {
-        int nc = r->included_files_cap ? r->included_files_cap * 2 : 4;
-        char **tmp = realloc(r->included_files, (size_t)nc * sizeof(char *));
+    if (po->num_includes >= po->includes_cap) {
+        int nc = po->includes_cap ? po->includes_cap * 2 : 4;
+        IncludeRef *tmp = realloc(po->includes, (size_t)nc * sizeof(IncludeRef));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        r->included_files     = tmp;
-        r->included_files_cap = nc;
+        po->includes     = tmp;
+        po->includes_cap = nc;
     }
-    r->included_files[r->num_included_files++] = copy;
+    IncludeRef *e = &po->includes[po->num_includes++];
+    e->filename        = filename;
+    e->task_prefix     = task_prefix     ? strdup(task_prefix)     : NULL;
+    e->resource_prefix = resource_prefix ? strdup(resource_prefix) : NULL;
+    e->account_prefix  = account_prefix  ? strdup(account_prefix)  : NULL;
+    e->report_prefix   = report_prefix   ? strdup(report_prefix)   : NULL;
 }
 
-/* ── DocSymbol tree navigation ───────────────────────────────────────────── */
-
-/* Navigate the symbol tree following the path segments path[0..plen-1] and
- * return the children array at that node.  Transparently descends into
- * KW_PROJECT nodes when matching path segments against tasks.
+/* ── tj_node tree linkage ────────────────────────────────────────────────── *
  *
- * syms  — root-level symbols to start from
- * n     — number of entries in syms
- * path  — array of identifier strings to follow (task IDs)
- * plen  — number of segments in path; 0 returns (syms, n) immediately
- * out_n — set to the number of children at the matched node on success, 0 on failure
- *
- * Returns the children array at the matched node, or NULL if not found.
+ * After the grammar finishes building the trees, we walk each per-kind
+ * root to set parent_node / parent_doc pointers consistently, and to
+ * assign owners to every TokenSpan.
  */
-DocSymbol *const *doc_symbol_find_path(DocSymbol *const *syms, int n,
-                                       const char **path, int plen,
-                                       int *out_n) {
-    if (plen == 0) { *out_n = n; return syms; }
+
+/** Recursively set parent_node and parent_doc fields across one subtree. */
+static void assign_parent_links(tj_node *parent, tj_node **children, int n,
+                                tj_node *doc_root) {
+    /* doc_root is non-NULL only for the top-level frame (children directly
+     * under a per-kind synthetic root).  Once we recurse into a real child,
+     * deeper descendants live INSIDE that child, so their parent_doc must
+     * be NULL — they are no longer top-level entries. */
     for (int i = 0; i < n; i++) {
-        if (syms[i]->keyword == KW_TASK && syms[i]->id &&
-                strcmp(syms[i]->id, path[0]) == 0)
-            return doc_symbol_find_path(syms[i]->children, syms[i]->num_children,
-                                        path + 1, plen - 1, out_n);
-        /* Transparently traverse project containers so that task scope paths
-         * rooted inside a project body resolve correctly. */
-        if (syms[i]->keyword == KW_PROJECT) {
-            DocSymbol *const *found = doc_symbol_find_path(
-                syms[i]->children, syms[i]->num_children, path, plen, out_n);
-            if (found) return found;
+        children[i]->parent_node = parent;
+        children[i]->parent_doc  = doc_root;
+        assign_parent_links(children[i], children[i]->children,
+                            children[i]->num_children, NULL);
+    }
+}
+
+/**
+ * Walk the four per-kind trees in source order and assign each TokenSpan
+ * its innermost-enclosing tj_node as `owner`.
+ *
+ * Strategy: take root's top-level children (already in source order),
+ * then use the standard single-pass scope-stack algorithm to assign
+ * owners.
+ */
+typedef struct {
+    tj_node **children;
+    int       n;
+    int       idx;
+    tj_node  *scope;
+} OwnerFrame;
+
+static int compare_node_starts(const void *a, const void *b) {
+    const tj_node *na = *(const tj_node *const *)a;
+    const tj_node *nb = *(const tj_node *const *)b;
+    return pos_cmp(na->range.start, nb->range.start);
+}
+
+static int range_within(LspRange inner, LspRange outer) {
+    return pos_cmp(inner.start, outer.start) >= 0 &&
+           pos_cmp(inner.end, outer.end) <= 0;
+}
+
+static void assign_token_owners(ParseOutput *po) {
+    tj_node *root = po->root;
+    if (!root) return;
+
+    /* The project block (if any) is a top-level child like the rest, but
+     * its body declarations were hoisted to siblings under root (the
+     * project node keeps no children) while its range still spans them.
+     * For ownership we must restore that nesting: any sibling whose range
+     * falls within the project's range becomes a scope-child of the
+     * project, so tokens inside it resolve to the node rather than
+     * dead-ending on the childless project.  Siblings outside the
+     * project's range (declared after the project block) stay as true
+     * top-level entries. */
+    tj_node *project = NULL;
+    for (int i = 0; i < root->num_children; i++)
+        if (root->children[i]->keyword == KW_PROJECT) {
+            project = root->children[i];
+            break;
         }
+
+    /* hoisted = every top-level child except the project node itself.
+     * (When a project node is present num_children is at least 1, so this
+     * cannot go negative; the clamp makes that explicit for the size
+     * computations below.) */
+    int hoisted_n = root->num_children - (project ? 1 : 0);
+    if (hoisted_n < 0) hoisted_n = 0;
+    tj_node **hoisted = hoisted_n
+        ? malloc((size_t)hoisted_n * sizeof(tj_node *))
+        : NULL;
+    if (hoisted_n && !hoisted) {
+        fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
     }
-    *out_n = 0;
-    return NULL;
-}
+    int h = 0;
+    for (int i = 0; i < root->num_children; i++)
+        if (root->children[i] != project) hoisted[h++] = root->children[i];
 
-/* ── DocSymbol tree linkage ─────────────────────────────────────────────── */
+    /* Top-level scope frame plus the project's synthetic scope-children. */
+    tj_node **top = malloc((size_t)(hoisted_n + 1) * sizeof(tj_node *));
+    if (!top) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    int top_n = 0;
+    tj_node **proj_kids = NULL;
+    int       proj_kids_n = 0;
 
-/**
- * Recursively set parent pointers for all children in the symbol tree.
- *
- * @param syms    Array of sibling symbols whose parent is @p parent.
- * @param n       Length of @p syms.
- * @param parent  Parent pointer to assign; NULL for top-level symbols.
- */
-static void assign_parents(DocSymbol **syms, int n, DocSymbol *parent) {
-    for (int i = 0; i < n; i++) {
-        syms[i]->parent = parent;
-        assign_parents(syms[i]->children, syms[i]->num_children, syms[i]);
+    if (project) {
+        proj_kids = hoisted_n
+            ? malloc((size_t)hoisted_n * sizeof(tj_node *))
+            : NULL;
+        if (hoisted_n && !proj_kids) {
+            fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+        }
+        for (int i = 0; i < hoisted_n; i++) {
+            if (range_within(hoisted[i]->range, project->range))
+                proj_kids[proj_kids_n++] = hoisted[i];
+            else
+                top[top_n++] = hoisted[i];
+        }
+        top[top_n++] = project;
+        if (proj_kids_n > 1)
+            qsort(proj_kids, (size_t)proj_kids_n, sizeof(tj_node *), compare_node_starts);
+    } else {
+        for (int i = 0; i < hoisted_n; i++) top[top_n++] = hoisted[i];
     }
-}
-
-/* ── Token-to-symbol cross-referencing ──────────────────────────────────── */
-
-/**
- * Assign each token span's owner to the innermost enclosing DocSymbol
- * using a single linear sweep.  Both tok_spans[] and symbol ranges are in
- * document order, so we walk them in lockstep with a stack of open symbol
- * scopes.
- *
- * Each stack frame holds a children array, the next-child index at that
- * level, and a pointer to the scope symbol we descended into (NULL for the
- * root frame, which has no enclosing scope).  The owner of a token is the
- * scope of the deepest currently-open frame.
- *
- * Runs in O(T + S) where T is `num_tok_spans` and S is the total number
- * of DocSymbols.
- *
- * @param r  ParseResult whose tok_spans get `.owner` populated.
- */
-static void assign_token_owners(ParseResult *r) {
-    typedef struct {
-        DocSymbol **children;
-        int         n;
-        int         idx;
-        DocSymbol  *scope;  /* symbol we descended into; NULL at root */
-    } Frame;
+    if (top_n > 1)
+        qsort(top, (size_t)top_n, sizeof(tj_node *), compare_node_starts);
 
     int frame_cap = 64;
-    Frame *stack = malloc((size_t)frame_cap * sizeof(Frame));
+    OwnerFrame *stack = malloc((size_t)frame_cap * sizeof(OwnerFrame));
     if (!stack) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     int depth = 1;
-    stack[0] = (Frame){ r->doc_symbols, r->num_doc_symbols, 0, NULL };
+    stack[0] = (OwnerFrame){ top, top_n, 0, NULL };
 
-    for (int t = 0; t < r->num_tok_spans; t++) {
-        LspPos pos = r->tok_spans[t].start;
+    for (int t = 0; t < po->num_tok_spans; t++) {
+        LspPos pos = po->tok_spans[t].start;
 
-        /* Pop scopes whose range has ended. */
         while (depth > 1 &&
                pos_cmp(pos, stack[depth - 1].scope->range.end) >= 0)
             depth--;
 
-        /* Descend as long as the next child at the top frame contains pos. */
         for (;;) {
-            Frame *top = &stack[depth - 1];
+            OwnerFrame *top_frame = &stack[depth - 1];
 
-            /* Advance past siblings that ended before this token */
-            while (top->idx < top->n &&
-                   pos_cmp(pos, top->children[top->idx]->range.end) >= 0)
-                top->idx++;
-            if (top->idx >= top->n) break;
+            while (top_frame->idx < top_frame->n &&
+                   pos_cmp(pos, top_frame->children[top_frame->idx]->range.end) >= 0)
+                top_frame->idx++;
+            if (top_frame->idx >= top_frame->n) break;
 
-            DocSymbol *child = top->children[top->idx];
+            tj_node *child = top_frame->children[top_frame->idx];
             if (pos_cmp(pos, child->range.start) < 0)
-                break;  /* cursor sits before the next sibling */
+                break;
 
             if (depth >= frame_cap) {
                 frame_cap *= 2;
-                Frame *tmp = realloc(stack, (size_t)frame_cap * sizeof(Frame));
+                OwnerFrame *tmp = realloc(stack, (size_t)frame_cap * sizeof(OwnerFrame));
                 if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
                 stack = tmp;
             }
-            stack[depth++] = (Frame){
-                child->children, child->num_children, 0, child
-            };
+            /* The project node carries its hoisted body decls as
+             * scope-children here even though its own `children` array is
+             * empty. */
+            tj_node **kids = (child == project) ? proj_kids : child->children;
+            int       nkids = (child == project) ? proj_kids_n : child->num_children;
+            stack[depth++] = (OwnerFrame){ kids, nkids, 0, child };
         }
 
-        r->tok_spans[t].owner = (depth > 1) ? stack[depth - 1].scope : NULL;
+        po->tok_spans[t].owner = (depth > 1) ? stack[depth - 1].scope : NULL;
     }
 
     free(stack);
-}
-
-DocSymbol *symbol_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
-    int lo = 0, hi = num_tokens - 1, found = -1;
-    while (lo <= hi) {
-        int mid = lo + (hi - lo) / 2;
-        if (tokens[mid].token_kind == TK_EOF) { hi = mid - 1; continue; }
-        if (pos_cmp(tokens[mid].start, pos) <= 0) {
-            found = mid;
-            lo = mid + 1;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    if (found < 0) return NULL;
-    DocSymbol *s = tokens[found].owner;
-    while (s && pos_cmp(pos, s->range.end) >= 0)
-        s = s->parent;
-    return s;
-}
-
-/* ── Dependency edge resolution ────────────────────────────────────────── */
-
-/**
- * Append a DefinitionLink to a DocSymbol's def_links array, growing it
- * if needed.
- *
- * @param sym   Target symbol that owns the outgoing reference.
- * @param link  Resolved link to append (transfer of ownership for any
- *              heap-allocated fields).
- */
-static void push_def_link(DocSymbol *sym, DefinitionLink link) {
-    if (sym->num_def_links >= sym->def_links_cap) {
-        int nc = sym->def_links_cap ? sym->def_links_cap * 2 : 4;
-        DefinitionLink *tmp = realloc(sym->def_links,
-                                      (size_t)nc * sizeof(DefinitionLink));
-        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        sym->def_links = tmp;
-        sym->def_links_cap = nc;
-    }
-    sym->def_links[sym->num_def_links++] = link;
-}
-
-/**
- * Append a ReferenceLink to a DocSymbol's ref_links array, growing it
- * if needed.
- *
- * @param sym   Target symbol that the reference points to.
- * @param link  Incoming link to append (transfer of ownership for any
- *              heap-allocated fields).
- */
-static void push_ref_link(DocSymbol *sym, ReferenceLink link) {
-    if (sym->num_ref_links >= sym->ref_links_cap) {
-        int nc = sym->ref_links_cap ? sym->ref_links_cap * 2 : 4;
-        ReferenceLink *tmp = realloc(sym->ref_links,
-                                     (size_t)nc * sizeof(ReferenceLink));
-        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        sym->ref_links = tmp;
-        sym->ref_links_cap = nc;
-    }
-    sym->ref_links[sym->num_ref_links++] = link;
-}
-
-/**
- * Find a task DocSymbol by navigating to the parent scope via
- * doc_symbol_find_path(), then scanning for the final segment.
- * Only KW_TASK nodes are matched at the leaf level.
- *
- * @param syms  Top-level symbols to search.
- * @param n     Length of @p syms.
- * @param segs  Path segments (e.g. `["spec", "gui"]`).
- * @param nseg  Length of @p segs.
- * @return The matched task, or NULL when any segment is not found.
- */
-static DocSymbol *find_task(DocSymbol **syms, int n,
-                            char **segs, int nseg) {
-    if (nseg == 0 || !segs) return NULL;
-    int parent_n = 0;
-    DocSymbol *const *parent = doc_symbol_find_path(
-        syms, n, (const char **)segs, nseg - 1, &parent_n);
-    if (!parent) return NULL;
-    for (int i = 0; i < parent_n; i++) {
-        if (parent[i]->keyword == KW_TASK && parent[i]->id &&
-                strcmp(parent[i]->id, segs[nseg - 1]) == 0)
-            return parent[i];
-        if (parent[i]->keyword == KW_PROJECT) {
-            DocSymbol *found = find_task(parent[i]->children,
-                                         parent[i]->num_children,
-                                         segs + (nseg - 1), 1);
-            if (found) return found;
-        }
-    }
-    return NULL;
-}
-
-/**
- * Build an `"unresolved dependency: a.b.c"` message from @p segs and push
- * it onto @p r->diagnostics at @p range.
- *
- * @param r      ParseResult to append the diagnostic to.
- * @param range  Source range to mark.
- * @param segs   Path segments that failed to resolve.
- * @param nseg   Length of @p segs.
- */
-static void emit_unresolved_dep_diag(ParseResult *r, LspRange range,
-                                     char *const *segs, int nseg) {
-    size_t msg_len = 32; /* "unresolved dependency: " prefix */
-    for (int j = 0; j < nseg; j++) msg_len += strlen(segs[j]) + 1;
-    char *msg = malloc(msg_len);
-    if (!msg) return;
-    strcpy(msg, "unresolved dependency: ");
-    for (int j = 0; j < nseg; j++) {
-        if (j > 0) strcat(msg, ".");
-        strcat(msg, segs[j]);
-    }
-    push_diagnostic(r, range, DIAG_ERROR, msg);
-    free(msg);
-}
-
-/**
- * Append a RawDepRef onto @p r->cross_file_deps[], taking ownership of
- * the heap-allocated `path` field.
- *
- * @param r    ParseResult being populated.
- * @param ref  Reference to stash.  Its `path` is moved into the new entry;
- *             do not free it after the call.
- */
-static void stash_cross_file_dep(ParseResult *r, const RawDepRef *ref) {
-    if (r->num_cross_file_deps >= r->cross_file_deps_cap) {
-        int nc = r->cross_file_deps_cap ? r->cross_file_deps_cap * 2 : 4;
-        RawDepRef *tmp = realloc(r->cross_file_deps,
-                                 (size_t)nc * sizeof(RawDepRef));
-        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        r->cross_file_deps     = tmp;
-        r->cross_file_deps_cap = nc;
-    }
-    RawDepRef *dst = &r->cross_file_deps[r->num_cross_file_deps++];
-    *dst       = *ref;
-    dst->path  = ref->path ? strdup(ref->path) : NULL;
-}
-
-/**
- * Resolve dep refs accumulated by the grammar.
- *
- * For each entry in the global accumulator: split the path, resolve the
- * target in-file, and populate def_links/ref_links on success.  For
- * 0-bang refs that fail in-file lookup, stash them on
- * @p r->cross_file_deps[] for the server to retry against other open
- * documents — no diagnostic is emitted yet.  Bang refs (which are
- * strictly in-file) produce an unresolved-dependency diagnostic on
- * failure.  The global accumulator is freed at the end.
- *
- * @param r  ParseResult whose dep refs are being resolved.
- */
-static void resolve_dep_refs(ParseResult *r) {
-    for (int i = 0; i < g_num_dep_refs; i++) {
-        RawDepRef *ref = &g_dep_refs[i];
-
-        if (!ref->owner) continue;
-
-        char **segs = NULL;
-        int    nseg = 0;
-        split_path(ref->path, &segs, &nseg);
-
-        /* Determine the search root based on bang_count:
-         *   0 bangs  → absolute lookup from root
-         *   n bangs  → walk up n levels from owner, search that ancestor's children
-         *   too many → invalid (more bangs than nesting depth) */
-        DocSymbol  *resolved   = NULL;
-        DocSymbol **search_syms = NULL;
-        int         search_n    = 0;
-
-        int escaped = 0;
-        if (ref->bang_count == 0) {
-            search_syms = r->doc_symbols;
-            search_n    = r->num_doc_symbols;
-        } else {
-            DocSymbol *ancestor = ref->owner;
-            for (int b = 0; b < ref->bang_count; b++) {
-                if (!ancestor->parent) {
-                    /* Too many bangs — can't go higher than root */
-                    escaped = 1;
-                    break;
-                }
-                ancestor = ancestor->parent;
-            }
-            if (!escaped) {
-                search_syms = ancestor->children;
-                search_n    = ancestor->num_children;
-            }
-        }
-
-        if (!escaped && search_syms && nseg > 0)
-            resolved = find_task(search_syms, search_n, segs, nseg);
-
-        if (escaped) {
-            char *msg = strdup("dependency reference escapes beyond project root");
-            if (msg) {
-                push_diagnostic(r, ref->range, DIAG_WARNING, msg);
-                free(msg);
-            }
-            for (int j = 0; j < nseg; j++) free(segs[j]);
-            free(segs);
-            continue;
-        }
-
-        if (!resolved) {
-            /* 0-bang refs may still resolve across files; defer to the
-             * server's cross-file pass.  Bang refs are strictly in-file, so
-             * a miss is a hard error now. */
-            if (ref->bang_count == 0)
-                stash_cross_file_dep(r, ref);
-            else
-                emit_unresolved_dep_diag(r, ref->range, segs, nseg);
-            for (int j = 0; j < nseg; j++) free(segs[j]);
-            free(segs);
-            continue;
-        }
-
-        /* Outgoing link on the owner (go-to-definition) */
-        push_def_link(ref->owner, (DefinitionLink){
-            .source     = ref->range,
-            .target     = resolved,
-            .target_uri = NULL,
-        });
-
-        /* Incoming link on the target (find-references) */
-        push_ref_link(resolved, (ReferenceLink){
-            .source     = ref->range,
-            .origin     = ref->owner,
-            .source_uri = NULL,
-        });
-
-        for (int j = 0; j < nseg; j++) free(segs[j]);
-        free(segs);
-    }
-
-    /* Free the global accumulator — fully consumed */
-    free_dep_refs();
-}
-
-/**
- * Walk @p s and its descendants, compacting link arrays in place by
- * dropping any entry that carries a cross-document URI.  Frees the URI
- * strings of dropped entries.
- *
- * @param s  Root of the subtree to clean.
- */
-static void strip_cross_file_links(DocSymbol *s) {
-    int keep = 0;
-    for (int i = 0; i < s->num_def_links; i++) {
-        if (s->def_links[i].target_uri) {
-            free(s->def_links[i].target_uri);
-        } else {
-            if (keep != i) s->def_links[keep] = s->def_links[i];
-            keep++;
-        }
-    }
-    s->num_def_links = keep;
-
-    keep = 0;
-    for (int i = 0; i < s->num_ref_links; i++) {
-        if (s->ref_links[i].source_uri) {
-            free(s->ref_links[i].source_uri);
-        } else {
-            if (keep != i) s->ref_links[keep] = s->ref_links[i];
-            keep++;
-        }
-    }
-    s->num_ref_links = keep;
-
-    for (int i = 0; i < s->num_children; i++)
-        strip_cross_file_links(s->children[i]);
-}
-
-void clear_cross_file_state(ParseResult *r) {
-    for (int i = r->dep_diag_start; i < r->num_diagnostics; i++)
-        free(r->diagnostics[i].message);
-    r->num_diagnostics = r->dep_diag_start;
-
-    for (int i = 0; i < r->num_doc_symbols; i++)
-        strip_cross_file_links(r->doc_symbols[i]);
-}
-
-void resolve_cross_file_deps(ParseResult *r,
-                             DocSymbol *const *const *extra_roots,
-                             const int *extra_counts,
-                             const char *const *extra_uris,
-                             int num_extra,
-                             const char *self_uri) {
-    for (int i = 0; i < r->num_cross_file_deps; i++) {
-        RawDepRef *ref = &r->cross_file_deps[i];
-        if (!ref->owner) continue;
-
-        char **segs = NULL;
-        int    nseg = 0;
-        split_path(ref->path, &segs, &nseg);
-        if (nseg == 0) { free(segs); continue; }
-
-        DocSymbol *resolved = NULL;
-        const char *target_uri = NULL;
-        for (int p = 0; p < num_extra; p++) {
-            resolved = find_task((DocSymbol **)extra_roots[p],
-                                 extra_counts[p], segs, nseg);
-            if (resolved) { target_uri = extra_uris[p]; break; }
-        }
-
-        if (!resolved) {
-            emit_unresolved_dep_diag(r, ref->range, segs, nseg);
-        } else {
-            push_def_link(ref->owner, (DefinitionLink){
-                .source     = ref->range,
-                .target     = resolved,
-                .target_uri = strdup(target_uri),
-            });
-            push_ref_link(resolved, (ReferenceLink){
-                .source     = ref->range,
-                .origin     = ref->owner,
-                .source_uri = self_uri ? strdup(self_uri) : NULL,
-            });
-        }
-
-        for (int j = 0; j < nseg; j++) free(segs[j]);
-        free(segs);
-    }
+    free(top);
+    free(proj_kids);
+    free(hoisted);
 }
 
 /* ── Public parse() entry point ──────────────────────────────────────────── */
 
-ParseResult *parse(const char *src) {
-    ParseResult *result = calloc(1, sizeof(ParseResult));
-    if (!result) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    atomic_store(&result->refcount, 1);
+ParseOutput *parse(const char *src) {
+    ParseOutput *po = calloc(1, sizeof(ParseOutput));
+    if (!po) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    po->root = alloc_synthetic_root();
 
     /* Set up global state for lexer.l and grammar.y */
-    g_result          = result;
+    g_output          = po;
     g_tok_spans       = NULL;
     g_num_tok_spans   = 0;
     g_tok_span_cap    = 0;
     g_num_sem_entries = 0;
-    dep_refs_reset();
-    yycolumn        = 0;
-    yylineno        = 1;
+    yycolumn          = 0;
+    yylineno          = 1;
+    reset_pending_include_state();
 
-    /* Feed source to flex and run the bison parser */
     YY_BUFFER_STATE buf = yy_scan_string(src);
     yyparse();
     yy_delete_buffer(buf);
 
-    /* Transfer tok_spans array ownership to the ParseResult */
-    result->tok_spans       = g_tok_spans;
-    result->num_tok_spans   = g_num_tok_spans;
-    result->num_sem_entries = g_num_sem_entries;
+    po->tok_spans       = g_tok_spans;
+    po->num_tok_spans   = g_num_tok_spans;
+    po->tok_span_cap    = g_tok_span_cap;
+    po->num_sem_entries = g_num_sem_entries;
 
-    /* Clear globals */
-    g_result          = NULL;
+    g_output          = NULL;
     g_tok_spans       = NULL;
     g_num_tok_spans   = 0;
     g_tok_span_cap    = 0;
     g_num_sem_entries = 0;
 
-    /* Build cross-references between tokens, symbols, and dep edges */
-    assign_parents(result->doc_symbols, result->num_doc_symbols, NULL);
-    assign_token_owners(result);
-    resolve_dep_refs(result);
+    /* The grammar appends top-level declarations to root as they reduce,
+     * which interleaves a project block's hoisted body children ahead of
+     * the project node itself.  Sort by source position so root->children
+     * is in true source order, then wire parent/owner pointers. */
+    if (po->root->num_children > 1)
+        qsort(po->root->children, (size_t)po->root->num_children,
+              sizeof(tj_node *), compare_node_starts);
+    assign_parent_links(po->root, po->root->children,
+                        po->root->num_children, po->root);
+    assign_token_owners(po);
 
-    /* Everything up to here is permanent: syntax errors plus in-file dep
-     * diagnostics.  Cross-file diagnostics added later by the server's
-     * revalidation pass start at this index and are truncated each cycle. */
-    result->dep_diag_start = result->num_diagnostics;
-
-    return result;
+    return po;
 }

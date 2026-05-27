@@ -19,6 +19,7 @@
 /** @file */
 
 #include "hover.h"
+#include "document_symbol.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -150,14 +151,14 @@ ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos 
 
 /* ── sym_qualified_id ────────────────────────────────────────────────────── */
 
-char *sym_qualified_id(const DocSymbol *sym) {
+char *sym_qualified_id(const tj_node *sym) {
     if (!sym || !sym->id) return strdup("");
 
-    const DocSymbol *chain[64];
+    const tj_node *chain[64];
     int depth = 0;
-    for (const DocSymbol *s = sym;
+    for (const tj_node *s = sym;
          s != NULL && depth < (int)(sizeof(chain) / sizeof(chain[0]));
-         s = s->parent) {
+         s = s->parent_node) {
         if (s->keyword == sym->keyword && s->id && s->id[0])
             chain[depth++] = s;
     }

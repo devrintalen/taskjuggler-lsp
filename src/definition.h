@@ -20,41 +20,30 @@
 
 #pragma once
 
-#include "parser.h"
+#include "dependency.h"
 #include <yyjson.h>
 
 /**
- * Build a Location JSON object for textDocument/definition.
+ * Build the textDocument/definition response for a cursor on a
+ * dependency reference.
  *
- * Locates a DefinitionLink whose source range contains @p cursor via
- * symbol_at() + parent-chain walk.  When found, returns a JSON object
- * of the form `{ "uri": "<uri>", "range": <target selection_range> }`.
+ * Locates the dependency under @p cursor, resolves it on demand against
+ * the requester's project (@p scopes), and returns a single LSP
+ * `Location` pointing at the target task's identifier.  Returns NULL —
+ * serialised as JSON `null` by the caller — when the cursor is not on a
+ * dependency or the reference does not resolve.
  *
- * Values are allocated in @p doc; caller owns @p doc.
- *
- * @param doc         Destination mutable JSON document.
- * @param tokens      Token spans of the current document.
- * @param num_tokens  Length of @p tokens.
- * @param cursor      Cursor position.
- * @param uri         URI placed into the response's `uri` field when the
- *                    target lives in the same document as the source.
- * @return The Location JSON object, or NULL when no definition link
- *         covers @p cursor.
+ * @param doc          Destination mutable JSON document.
+ * @param tokens       Token spans of the document under the cursor.
+ * @param num_tokens   Length of @p tokens.
+ * @param cursor       Cursor position.
+ * @param scopes       Every document in the requester's project.
+ * @param num_scopes   Length of @p scopes.
+ * @param self_index   Index into @p scopes of the requesting document.
+ * @return A `Location` JSON object, or NULL.
  */
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
                                        const TokenSpan *tokens, int num_tokens,
-                                       LspPos cursor, const char *uri);
-
-/**
- * Find a DefinitionLink whose source range contains the cursor.
- *
- * Uses symbol_at() to locate the innermost enclosing DocSymbol and scans its
- * def_links, walking parents on miss.
- *
- * @param tokens      Token spans of the current document.
- * @param num_tokens  Length of @p tokens.
- * @param cursor      Cursor position.
- * @return Pointer to the matching link, or NULL when none covers the cursor.
- */
-const DefinitionLink *find_def_link_at(const TokenSpan *tokens, int num_tokens,
-                                       LspPos cursor);
+                                       LspPos cursor,
+                                       const ProjectScope *scopes,
+                                       int num_scopes, int self_index);

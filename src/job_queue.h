@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <yyjson.h>
 
@@ -30,27 +31,27 @@
  * `request_doc` owns the parsed JSON-RPC envelope.  The worker is
  * responsible for freeing it after dispatch.
  *
- * `is_mutation` is set by the reader when classifying the message;
- * the coordinator pops in arrival order and uses it to choose between
- * synchronous dispatch (mutations) and handing the job off to a query
- * worker (read-only queries).
+ * `is_notification` is set by the reader when classifying the message;
+ * it determines which queue the Job lands on (the notification path runs
+ * on a single worker; the query path feeds a pool).  Only true LSP
+ * notifications (no `id`) ride the notification path; LSP requests —
+ * including state-mutating lifecycle ones like initialize/shutdown —
+ * are queries.
  *
- * `id` / `has_id` carry the JSON-RPC request id as a first-class field on
- * the Job, making it the primary key for any per-job operation.  The first
- * such operation is $/cancelRequest: the reader walks both queues looking
- * for a matching id and sets `is_cancelled`, so cancellation is
- * deterministic for any Job still resident in a queue when the cancel
- * arrives.  Notifications and string/null ids leave `has_id = 0` and are
- * therefore not cancellable by id (matching the existing int-only policy
- * in server.c).
+ * TODO(workspace-snapshot): The previous design captured a refcounted
+ * WorkspaceSnapshot at dispatch time so query workers could run lock-
+ * free.  The snapshot model was tied to per-Document ParseResult
+ * refcounts and was retired during the tj_node refactor.  Until a
+ * replacement snapshotting strategy lands, server_dispatch_query()
+ * serialises every handler under docs_mutex.
  *
- * `is_cancelled` is set in-place by job_queue_mark_cancelled_by_id when a
- * matching $/cancelRequest is processed.  The worker checks it before
- * dispatching the handler and returns RequestCancelled instead.
+ * `id` / `has_id` carry the JSON-RPC request id as a first-class field
+ * on the Job so $/cancelRequest can mark queued Jobs.  Notifications
+ * and string/null ids leave `has_id = 0`.
  */
 typedef struct Job {
     yyjson_doc *request_doc;
-    int         is_mutation;
+    int         is_notification;
     int         is_cancelled;
     int         has_id;
     int64_t     id;
@@ -101,12 +102,11 @@ void      job_queue_close(JobQueue *q);
 void      job_free(Job *job);
 
 /**
- * Walk @p q under its mutex, setting is_cancelled=1 on every read-only
- * Job whose has_id is set and whose id equals @p id.  Mutation jobs are
- * skipped — the coordinator dispatches them inline and never consults
- * is_cancelled, and lifecycle methods aren't cancelled in practice.
- * Called by the reader when a $/cancelRequest arrives.  The worker
- * checks is_cancelled before dispatching the handler and returns
- * RequestCancelled in its place.
+ * Walk @p q under its mutex, setting is_cancelled=1 on every Job whose
+ * has_id is set and whose id equals @p id.  Notification jobs have no
+ * id (LSP notifications never carry one) so are skipped implicitly by
+ * the has_id check.  Called by the reader when a $/cancelRequest
+ * arrives.  The worker checks is_cancelled before dispatching the
+ * handler and returns RequestCancelled in its place.
  */
 void      job_queue_mark_cancelled_by_id(JobQueue *q, int64_t id);

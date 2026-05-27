@@ -19,6 +19,7 @@
 /** @file */
 
 #include "folding_range.h"
+#include "document_symbol.h"
 #include "grammar.tab.h"
 
 /** Maximum nesting depth for bracket matching. */
@@ -45,7 +46,7 @@ static void push_range(yyjson_mut_doc *doc, yyjson_mut_val *arr,
 }
 
 /**
- * Recursively emit `"region"` folding ranges from the DocSymbol tree.
+ * Recursively emit `"region"` folding ranges from the tj_node tree.
  *
  * @param doc   Destination mutable JSON document.
  * @param arr   FoldingRange[] array.
@@ -53,7 +54,7 @@ static void push_range(yyjson_mut_doc *doc, yyjson_mut_val *arr,
  * @param n     Length of @p syms.
  */
 static void emit_symbol_ranges(yyjson_mut_doc *doc, yyjson_mut_val *arr,
-                                DocSymbol *const *syms, int n) {
+                                tj_node *const *syms, int n) {
     for (int i = 0; i < n; i++) {
         if (syms[i]->range.end.line > syms[i]->range.start.line)
             push_range(doc, arr,
@@ -65,7 +66,7 @@ static void emit_symbol_ranges(yyjson_mut_doc *doc, yyjson_mut_val *arr,
 
 /**
  * Scan tokens for bracket pairs and block comments that are not
- * represented in the DocSymbol tree, emitting one entry per pair.
+ * represented in the tj_node tree, emitting one entry per pair.
  *
  * @param doc        Destination mutable JSON document.
  * @param arr        FoldingRange[] array.
@@ -108,12 +109,12 @@ static void emit_token_ranges(yyjson_mut_doc *doc, yyjson_mut_val *arr,
 
 /* Build the JSON array for a textDocument/foldingRange response.
  * Emits folding ranges from two sources:
- *   — DocSymbol tree ranges for brace-delimited blocks ({ ... })
+ *   — tj_node tree ranges for brace-delimited blocks ({ ... })
  *   — Token scan for bracket pairs ([ ... ]) and multi-line block comments
  */
 yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
                                            const TokenSpan *spans, int num_spans,
-                                           DocSymbol *const *symbols,
+                                           tj_node *const *symbols,
                                            int num_symbols) {
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     emit_symbol_ranges(doc, arr, symbols, num_symbols);

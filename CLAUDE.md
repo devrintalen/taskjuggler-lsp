@@ -77,10 +77,16 @@ reads `Content-Length`-framed messages and hands each body to
 `src/server.c` owns a static array of `Document` slots (URI + raw text
 + `ParseResult`). Editor content is authoritative while a file is
 open; `didClose` re-reads the file from disk and keeps it as a
-"background" entry so cross-file references stay valid. The initial
-workspace scan and `workspace/didChangeWatchedFiles` populate
-background entries; watcher events are ignored for files the editor
-already has open.
+"background" entry so cross-file references stay valid.
+
+`compile_commands.json` at the workspace root is the sole startup
+populator of `docs[]`: every listed `.tjp` is loaded as `disk_only`,
+and `follow_includes` cascades into the transitive `.tji` closure.
+If the file is missing or malformed the server stays alive but loads
+no documents and surfaces an Error-severity `window/showMessage`.
+After startup, `workspace/didChangeWatchedFiles` events admit
+individual files into background slots; watcher events are ignored
+for files the editor already has open.
 
 ### Parse pipeline
 
@@ -113,13 +119,26 @@ cross-file edge.
 
 ### Cross-file revalidation
 
-After any document mutation, `server.c` runs
-`revalidate_all_docs()`. For each document it gathers the
-`doc_symbols[]` of every other open / background document as extra
-symbol pools, calls `clear_cross_file_state()` to drop stale
-cross-file links and diagnostics, then `resolve_cross_file_deps()` to
-rebuild them. Each affected URI then gets a
-`textDocument/publishDiagnostics` notification (`src/diagnostics.c`).
+After any document-changing notification, `server.c` runs
+`revalidate_all_docs()`. This polls `compile_commands.json` for
+on-disk changes, runs `rebuild_all_projects()` to recompute project
+membership and per-`Project` `tj_node` trees from the
+`compile_commands.json` closure, then republishes (currently empty)
+diagnostics on every editor-managed document.
+
+Each `Project` owns four synthetic per-kind `tj_node` roots (`tasks`,
+`accounts`, `reports`, `resources`) populated by deep-copying every
+member document's top-level entries under the includer's prefix
+target. Each `Document.primary_project` points at the project that
+claimed it during BFS. Handlers (`handle_completion` today) scope
+cross-file lookups to other documents sharing the requester's
+`primary_project`, so two unrelated `.tjp`s in the same workspace
+stay independent.
+
+The richer dep-link machinery (`DefinitionLink` / `ReferenceLink` /
+`resolve_cross_file_deps`) was removed in the tj_node refactor and is
+not yet restored; `handle_definition` and `handle_references` return
+`null` until it is.
 
 ### Feature dispatch
 

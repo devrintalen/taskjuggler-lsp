@@ -75,6 +75,38 @@ extern const char * const semantic_token_modifier_names[];
 extern const int          num_semantic_token_modifiers;
 
 /**
+ * Last semantic-tokens response sent to the client for a single
+ * document, plus the counter used to mint future resultIds.  Retained
+ * across revalidations so semanticTokens/full/delta requests can diff
+ * against exactly what the client is holding.  `data` / `result_id` are
+ * NULL until the client makes its first semanticTokens request;
+ * `next_result_id` starts at 1.  Synchronization is the caller's
+ * responsibility (the document store holds these under its mutex).
+ */
+typedef struct SemanticTokenResult {
+    uint32_t *data;            /**< flat uint32 buffer last sent (NULL until first response) */
+    size_t    count;           /**< entries in data (multiple of 5) */
+    char     *result_id;       /**< resultId returned alongside data */
+    uint64_t  next_result_id;  /**< monotonic counter for minting fresh resultIds */
+} SemanticTokenResult;
+
+/**
+ * Free `data` and `result_id` and zero them out.  `next_result_id` is
+ * left intact so a subsequent response continues the id sequence.
+ * NULL-safe.
+ */
+void semantic_token_result_release(SemanticTokenResult *r);
+
+/**
+ * Replace the cached payload in @p r with @p new_data / @p new_count /
+ * @p new_result_id, freeing whatever was there before.  Ownership of
+ * both pointers transfers to @p r.  Leaves `next_result_id` untouched.
+ */
+void semantic_token_result_replace(SemanticTokenResult *r,
+                                    uint32_t *new_data, size_t new_count,
+                                    char *new_result_id);
+
+/**
  * Compute the LSP-encoded semantic-tokens data array for the given token
  * spans.  The output uses the standard five-integer delta encoding per
  * token: [deltaLine, deltaStartChar, length, tokenType, tokenModifiers].
