@@ -101,6 +101,14 @@
   },
   {
     "jsonrpc": "2.0",
+    "method": "window/showMessage",
+    "params": {
+      "type": 1,
+      "message": "taskjuggler-lsp: no workspace root; cannot locate compile_commands.json.  No documents will be loaded; cross-file LSP features are disabled."
+    }
+  },
+  {
+    "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file:///test/sample.tjp",
@@ -134,86 +142,84 @@
             "line": 0,
             "character": 11
           }
+        }
+      },
+      {
+        "name": "\"Task One\"",
+        "detail": "t1",
+        "kind": 12,
+        "range": {
+          "start": {
+            "line": 1,
+            "character": 2
+          },
+          "end": {
+            "line": 4,
+            "character": 3
+          }
+        },
+        "selectionRange": {
+          "start": {
+            "line": 1,
+            "character": 7
+          },
+          "end": {
+            "line": 1,
+            "character": 9
+          }
         },
         "children": [
           {
-            "name": "\"Task One\"",
-            "detail": "t1",
+            "name": "\"Task Two\"",
+            "detail": "t2",
             "kind": 12,
             "range": {
               "start": {
-                "line": 1,
-                "character": 2
+                "line": 2,
+                "character": 4
               },
               "end": {
-                "line": 4,
-                "character": 3
+                "line": 3,
+                "character": 5
               }
             },
             "selectionRange": {
               "start": {
-                "line": 1,
-                "character": 7
-              },
-              "end": {
-                "line": 1,
+                "line": 2,
                 "character": 9
-              }
-            },
-            "children": [
-              {
-                "name": "\"Task Two\"",
-                "detail": "t2",
-                "kind": 12,
-                "range": {
-                  "start": {
-                    "line": 2,
-                    "character": 4
-                  },
-                  "end": {
-                    "line": 3,
-                    "character": 5
-                  }
-                },
-                "selectionRange": {
-                  "start": {
-                    "line": 2,
-                    "character": 9
-                  },
-                  "end": {
-                    "line": 2,
-                    "character": 11
-                  }
-                }
-              }
-            ]
-          },
-          {
-            "name": "\"Developer\"",
-            "detail": "r1",
-            "kind": 19,
-            "range": {
-              "start": {
-                "line": 5,
-                "character": 2
               },
               "end": {
-                "line": 6,
-                "character": 3
-              }
-            },
-            "selectionRange": {
-              "start": {
-                "line": 5,
+                "line": 2,
                 "character": 11
-              },
-              "end": {
-                "line": 5,
-                "character": 13
               }
             }
           }
         ]
+      },
+      {
+        "name": "\"Developer\"",
+        "detail": "r1",
+        "kind": 19,
+        "range": {
+          "start": {
+            "line": 5,
+            "character": 2
+          },
+          "end": {
+            "line": 6,
+            "character": 3
+          }
+        },
+        "selectionRange": {
+          "start": {
+            "line": 5,
+            "character": 11
+          },
+          "end": {
+            "line": 5,
+            "character": 13
+          }
+        }
       }
     ]
   },
