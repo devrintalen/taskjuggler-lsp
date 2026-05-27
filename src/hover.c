@@ -21,6 +21,7 @@
 #include "hover.h"
 #include "document_symbol.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -180,6 +181,21 @@ char *sym_qualified_id(const tj_node *sym) {
         if (i > 0) *p++ = '.';
     }
     *p = '\0';
+    return out;
+}
+
+/* ── hover_node_markdown ─────────────────────────────────────────────────── */
+
+char *hover_node_markdown(const tj_node *sym) {
+    char *qid = sym_qualified_id(sym);
+    /* sym->name retains its surrounding quotes from the source token. */
+    const char *name = sym->name ? sym->name : "";
+    /* \xe2\x80\x94 is the UTF-8 em-dash. */
+    const char *fmt = "**Task `%s`** \xe2\x80\x94 %s";
+    int len = snprintf(NULL, 0, fmt, qid, name);
+    char *out = len >= 0 ? malloc((size_t)len + 1) : NULL;
+    if (out) snprintf(out, (size_t)len + 1, fmt, qid, name);
+    free(qid);
     return out;
 }
 

@@ -93,6 +93,16 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
 char *sym_qualified_id(const tj_node *sym);
 
 /**
+ * Build the hover Markdown for a resolved declaration node, of the form
+ * `**Task `<qualified-id>`** — "<name>"`.  Used when hovering over a
+ * dependency reference that resolves to its target task.
+ *
+ * @param sym  Resolved target node.  Must be non-NULL with a valid id.
+ * @return Heap-allocated Markdown string.  Caller must free.
+ */
+char *hover_node_markdown(const tj_node *sym);
+
+/**
  * Return Markdown documentation for a TJP keyword, or NULL if unknown.
  *
  * @param kw  Keyword text (e.g. `"task"`, `"depends"`).
