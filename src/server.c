@@ -147,12 +147,15 @@ static void  rebuild_all_projects(void);
 static void  reload_compile_commands(void);
 static void  maybe_reload_compile_commands(void);
 
-/* ── Per-Project tj_node trees ──────────────────────────────────────────── *
+/* ── Per-Project tj_node tree ───────────────────────────────────────────── *
  *
  * Each compile_commands.json entry becomes one Project; its transitive
  * include closure (followed via Document.included_uris[]) is deep-copied
- * into the per-kind trees below with the includer's prefix applied.
- * Built fresh by rebuild_all_projects() on every notification.
+ * into the single tree below with the includer's per-kind prefix applied.
+ * Built fresh by rebuild_all_projects() on every notification.  Nodes of
+ * every kind share one root: a node's `keyword` identifies its kind, so
+ * walkers must filter on it to respect TaskJuggler's separate task /
+ * account / resource / report id namespaces.
  *
  * Each Document has a primary_project pointer set during the rebuild;
  * handlers route cross-file lookups through that pointer.  Orphan
@@ -162,10 +165,7 @@ static void  maybe_reload_compile_commands(void);
 typedef struct Project {
     char    *id;                 /**< canonical .tjp URI from compile_commands.json */
     int      is_orphan;          /**< reserved for singleton editor-only projects (commit 3) */
-    tj_node  tasks;              /**< synthetic per-kind roots, owned outright */
-    tj_node  accounts;
-    tj_node  reports;
-    tj_node  resources;
+    tj_node  root;               /**< synthetic root over all kinds, owned outright */
 } Project;
 
 static Project **projects;
@@ -634,8 +634,8 @@ static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /** Free every owned child of @p root, leaving @p root itself as an empty
- *  synthetic-root shell.  Used to tear down a Project's per-kind trees
- *  before each rebuild. */
+ *  synthetic-root shell.  Used to tear down a Project's tree before each
+ *  rebuild. */
 static void free_global_root_children(tj_node *root) {
     if (!root) return;
     for (int i = 0; i < root->num_children; i++)
@@ -646,10 +646,36 @@ static void free_global_root_children(tj_node *root) {
     root->children_cap = 0;
 }
 
+/* Coarse kind bucket for a node, collapsing the keyword set into the four
+ * id namespaces TaskJuggler keeps separate.  KW_PROJECT maps to NODE_KIND_OTHER
+ * but is never inserted into a Project tree (it stays document-local). */
+typedef enum {
+    NODE_KIND_TASK,
+    NODE_KIND_ACCOUNT,
+    NODE_KIND_RESOURCE,
+    NODE_KIND_REPORT,
+    NODE_KIND_OTHER
+} NodeKind;
+
+static NodeKind node_kind_of(int keyword) {
+    switch (keyword) {
+    case KW_TASK:     return NODE_KIND_TASK;
+    case KW_ACCOUNT:  return NODE_KIND_ACCOUNT;
+    case KW_RESOURCE:
+    case KW_SHIFT:    return NODE_KIND_RESOURCE;
+    case KW_PROJECT:  return NODE_KIND_OTHER;
+    default:          return NODE_KIND_REPORT;
+    }
+}
+
 /** Walk @p start's children along the dot-separated @p path and return
- *  the matched node.  Returns @p start when @p path is NULL or empty.
- *  Used to locate an includer's prefix target inside a Project tree. */
-static tj_node *find_node_by_dotted_path(tj_node *start, const char *path) {
+ *  the matched node, considering only children whose kind matches @p kind.
+ *  Returns @p start when @p path is NULL or empty.  Used to locate an
+ *  includer's prefix target inside a Project tree; the kind filter keeps
+ *  same-named declarations in different namespaces from colliding now that
+ *  all kinds share one root. */
+static tj_node *find_node_by_dotted_path(tj_node *start, const char *path,
+                                         NodeKind kind) {
     if (!start) return NULL;
     if (!path || !path[0]) return start;
 
@@ -658,9 +684,12 @@ static tj_node *find_node_by_dotted_path(tj_node *start, const char *path) {
     tj_node *cur = start;
     for (char *seg = strtok(copy, "."); seg && cur; seg = strtok(NULL, ".")) {
         tj_node *next = NULL;
-        for (int i = 0; i < cur->num_children && !next; i++)
-            if (cur->children[i]->id && strcmp(cur->children[i]->id, seg) == 0)
-                next = cur->children[i];
+        for (int i = 0; i < cur->num_children && !next; i++) {
+            tj_node *child = cur->children[i];
+            if (node_kind_of(child->keyword) == kind &&
+                child->id && strcmp(child->id, seg) == 0)
+                next = child;
+        }
         cur = next;
     }
     free(copy);
@@ -672,10 +701,7 @@ static tj_node *find_node_by_dotted_path(tj_node *start, const char *path) {
 static void project_free(Project *p) {
     if (!p) return;
     free(p->id);
-    free_global_root_children(&p->tasks);
-    free_global_root_children(&p->accounts);
-    free_global_root_children(&p->reports);
-    free_global_root_children(&p->resources);
+    free_global_root_children(&p->root);
     free(p);
 }
 
@@ -685,30 +711,31 @@ static void projects_clear(void) {
     num_projects = 0;
 }
 
-/** Copy each top-level declaration of @p d into the matching per-kind
- *  tree on @p p, applying @p d's per-kind prefix.  Routes by the node's
- *  own `keyword` (the per-kind grouping the Document no longer keeps);
- *  the project block is document-local metadata and is skipped. */
+/** Copy each top-level declaration of @p d into @p p's tree, applying @p d's
+ *  matching per-kind prefix.  Routes by the node's own `keyword` (the
+ *  per-kind grouping the Document no longer keeps) to pick both the prefix
+ *  and the namespace the prefix path is resolved within; the project block
+ *  is document-local metadata and is skipped. */
 static void copy_document_into_project(Project *p, Document *d) {
     if (!d->root) return;
     for (int i = 0; i < d->root->num_children; i++) {
         tj_node    *child = d->root->children[i];
-        tj_node    *kind_root;
         const char *prefix;
+        NodeKind    kind = node_kind_of(child->keyword);
         switch (child->keyword) {
         case KW_TASK:
-            kind_root = &p->tasks;     prefix = d->task_prefix;     break;
+            prefix = d->task_prefix;     break;
         case KW_ACCOUNT:
-            kind_root = &p->accounts;  prefix = d->account_prefix;  break;
+            prefix = d->account_prefix;  break;
         case KW_RESOURCE:
         case KW_SHIFT:
-            kind_root = &p->resources; prefix = d->resource_prefix; break;
+            prefix = d->resource_prefix; break;
         case KW_PROJECT:
             continue;   /* project block stays document-local */
         default:
-            kind_root = &p->reports;   prefix = d->report_prefix;   break;
+            prefix = d->report_prefix;   break;
         }
-        tj_node *target = find_node_by_dotted_path(kind_root, prefix);
+        tj_node *target = find_node_by_dotted_path(&p->root, prefix, kind);
         if (!target) continue;
         tj_node_append_child(target, tj_node_clone(child));
     }
