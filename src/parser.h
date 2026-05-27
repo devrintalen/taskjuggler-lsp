@@ -207,19 +207,6 @@ void tj_node_append_child(tj_node *parent, tj_node *child);
  */
 void tj_node_push_dependency(tj_node *task, Dependency dep);
 
-/**
- * Deep-copy a tj_node subtree.  The returned tree owns its own children
- * (recursively) and carries copies of @p src's id/name strings.
- * `parent_node` on the returned tree is set internally so the copy is
- * self-consistent; the root's `parent_node` and `parent_doc` are NULL
- * (the caller wires the root in wherever it belongs).
- *
- * @param src  Source node.  NULL is returned as NULL.
- * @return Newly allocated independent subtree.
- */
-tj_node *tj_node_clone(const tj_node *src);
-
-
 /** Forward declaration; the full struct is defined in diagnostics.h. */
 typedef struct Diagnostic Diagnostic;
 

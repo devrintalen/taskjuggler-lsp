@@ -21,6 +21,7 @@
 #pragma once
 
 #include "parser.h"
+#include "project_tree.h"
 #include "grammar.tab.h"
 
 /**
@@ -101,6 +102,16 @@ char *sym_qualified_id(const tj_node *sym);
  * @return Heap-allocated Markdown string.  Caller must free.
  */
 char *hover_node_markdown(const tj_node *sym);
+
+/**
+ * Like hover_node_markdown(), but for a resolved node in an assembled
+ * Project tree.  The qualified id reflects the node's position in that
+ * tree (so include prefixes are included).
+ *
+ * @param node  Resolved target ProjectNode.  Must be non-NULL with a valid id.
+ * @return Heap-allocated Markdown string.  Caller must free.
+ */
+char *project_node_hover_markdown(const ProjectNode *node);
 
 /**
  * Return Markdown documentation for a TJP keyword, or NULL if unknown.
