@@ -158,14 +158,13 @@ struct tj_node {
      *                  this Document point at the prefix-target node
      *                  in the includer's Document.  In-document
      *                  parents stay within the same Document.
-     *                  NULL on the document's per-kind synthetic root.
+     *                  NULL on the document's synthetic root.
      *
      * parent_doc     — when this node is a top-level entry in its
      *                  Document (i.e. declared at file scope, not
      *                  nested inside another declaration), points to
-     *                  the Document's per-kind synthetic root (which
-     *                  is what Document.tasks / .accounts / .reports
-     *                  / .resources stores).  NULL otherwise.  Walk
+     *                  the Document's synthetic root (which is what
+     *                  Document.root stores).  NULL otherwise.  Walk
      *                  parent_node upward until you hit a node with
      *                  non-NULL parent_doc to find the owning
      *                  Document.
