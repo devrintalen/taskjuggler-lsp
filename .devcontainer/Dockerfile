@@ -17,9 +17,10 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
         git \
     && rm -rf /var/lib/apt/lists/*
 
-# Build and install yyjson from source (matches CI; no apt package is used so
-# the version is pinned to upstream main). Installs to /usr/local.
-RUN git clone --depth 1 https://github.com/ibireme/yyjson.git /tmp/yyjson \
+# Build and install yyjson from source (no apt package is used). Pinned to the
+# latest stable release for reproducibility. Installs to /usr/local.
+ARG YYJSON_VERSION=0.12.0
+RUN git clone --depth 1 --branch "${YYJSON_VERSION}" https://github.com/ibireme/yyjson.git /tmp/yyjson \
     && cmake -S /tmp/yyjson -B /tmp/yyjson/build \
     && cmake --build /tmp/yyjson/build --target install \
     && ldconfig \
