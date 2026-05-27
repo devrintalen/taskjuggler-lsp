@@ -103,7 +103,7 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file:///test/project.tjp",
+      "uri": "file://${CASE_DIR}/workspace/project.tjp",
       "diagnostics": []
     }
   },
@@ -111,7 +111,7 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file:///test/project.tjp",
+      "uri": "file://${CASE_DIR}/workspace/project.tjp",
       "diagnostics": []
     }
   },
@@ -119,7 +119,7 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file:///test/tasks.tji",
+      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
       "diagnostics": []
     }
   },
@@ -127,7 +127,7 @@
     "jsonrpc": "2.0",
     "id": 2,
     "result": {
-      "uri": "file:///test/project.tjp",
+      "uri": "file://${CASE_DIR}/workspace/project.tjp",
       "range": {
         "start": {
           "line": 2,
@@ -144,7 +144,7 @@
     "jsonrpc": "2.0",
     "id": 3,
     "result": {
-      "uri": "file:///test/project.tjp",
+      "uri": "file://${CASE_DIR}/workspace/project.tjp",
       "range": {
         "start": {
           "line": 2,
