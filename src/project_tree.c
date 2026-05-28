@@ -133,7 +133,13 @@ static ProjectNode *child_task(ProjectNode *parent, const char *id) {
 
 /** Navigate a dotted task path beginning among @p children.  The assembled
  *  tree holds no project containers (they stay document-local), so this is
- *  a straight id-by-id descent over KW_TASK nodes. */
+ *  a straight id-by-id descent over KW_TASK nodes.
+ *
+ *  TODO: only task targets are resolved today.  Valid reference targets
+ *  could also be accounts, resources, and reports; extending support means
+ *  capturing those references at parse time (grammar.y currently records
+ *  only depends/precedes via tj_node_push_dependency) and relaxing this
+ *  KW_TASK filter. */
 static ProjectNode *find_task(ProjectNode *const *children, int n,
                               char *const *segs, int nseg) {
     if (nseg == 0 || !segs) return NULL;
