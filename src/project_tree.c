@@ -148,8 +148,9 @@ static ProjectNode *find_task(ProjectNode *const *children, int n,
     return cur;
 }
 
-ProjectNode *project_dep_resolve(ProjectDep *dep, ProjectNode *owner_task,
+ProjectNode *project_dep_resolve(ProjectNode *owner_task, int dep_index,
                                  ProjectNode *project_root) {
+    ProjectDep *dep = &owner_task->dependencies[dep_index];
     if (dep->state != DEP_UNRESOLVED) return dep->resolved_target;
 
     char **segs = NULL;

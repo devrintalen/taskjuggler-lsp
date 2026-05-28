@@ -26,17 +26,17 @@
 /**
  * Build the textDocument/definition response for a dependency reference.
  *
- * Resolves @p dep against @p project_root (memoizing in-node) and returns
- * a single LSP `Location` pointing at the target task's identifier.
- * Returns NULL — serialised as JSON `null` by the caller — when the
- * reference does not resolve.
+ * Resolves @p owner's dependency at @p dep_index against @p project_root
+ * (memoizing in-node) and returns a single LSP `Location` pointing at the
+ * target task's identifier.  Returns NULL — serialised as JSON `null` by
+ * the caller — when the reference does not resolve.
  *
  * @param doc           Destination mutable JSON document.
- * @param dep           The assembled-tree dependency under the cursor.
- * @param owner         The ProjectNode task that declares @p dep.
+ * @param owner         The ProjectNode task whose dependency is under the cursor.
+ * @param dep_index     Index of the dependency within @p owner.
  * @param project_root  The requester's Project synthetic root.
  * @return A `Location` JSON object, or NULL.
  */
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
-                                       ProjectDep *dep, ProjectNode *owner,
+                                       ProjectNode *owner, int dep_index,
                                        ProjectNode *project_root);

@@ -124,7 +124,13 @@ void project_node_free(ProjectNode *node);
 void project_node_free_children(ProjectNode *root);
 
 /**
- * Resolve @p dep against @p project_root, memoizing the result in-node.
+ * Resolve @p owner_task's dependency at @p dep_index against
+ * @p project_root, memoizing the result in-node.
+ *
+ * A dependency is always owned by the task it is declared on, so the
+ * dependency is addressed by (owner_task, dep_index) rather than passed
+ * as a bare pointer — that keeps the resolved edge and the bang-climb
+ * anchor consistent by construction.
  *
  * Absolute (zero-bang) references are looked up in the project's single
  * prefix-applied task namespace.  Relative (bang) references climb
@@ -132,15 +138,16 @@ void project_node_free_children(ProjectNode *root);
  * synthetic root.  On a second call the memoized result is returned
  * without recomputing.
  *
- * Concurrency: this mutates @p dep on first call.  Safe today because the
- * server holds docs_mutex for the full duration of every notification and
- * every query (single query worker).  The TODO(workspace-snapshot)
- * lock-free model must synchronize this memo.
+ * Concurrency: this mutates the dependency on first call.  Safe today
+ * because the server holds docs_mutex for the full duration of every
+ * notification and every query (single query worker).  The
+ * TODO(workspace-snapshot) lock-free model must synchronize this memo.
  *
- * @param dep           Dependency to resolve (mutated in place).
- * @param owner_task    The ProjectNode task that declares @p dep.
+ * @param owner_task    The ProjectNode task declaring the dependency.
+ * @param dep_index     Index into @p owner_task's `dependencies` array;
+ *                      the caller guarantees 0 <= dep_index < num_dependencies.
  * @param project_root  The Project's synthetic root.
  * @return The resolved target ProjectNode, or NULL on a miss.
  */
-ProjectNode *project_dep_resolve(ProjectDep *dep, ProjectNode *owner_task,
+ProjectNode *project_dep_resolve(ProjectNode *owner_task, int dep_index,
                                  ProjectNode *project_root);

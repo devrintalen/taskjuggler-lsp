@@ -1537,9 +1537,8 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
         if (merged_owner) {
             int ordinal = (int)(dep - owner->dependencies);
             if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
-                target = project_dep_resolve(
-                    &merged_owner->dependencies[ordinal], merged_owner,
-                    &d->primary_project->root);
+                target = project_dep_resolve(merged_owner, ordinal,
+                                             &d->primary_project->root);
         }
         if (target) {
             char *value = project_node_hover_markdown(target);
@@ -1707,9 +1706,8 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
         if (merged_owner) {
             int ordinal = (int)(dep - owner->dependencies);
             if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
-                result = build_definition_json(
-                    doc, &merged_owner->dependencies[ordinal], merged_owner,
-                    &d->primary_project->root);
+                result = build_definition_json(doc, merged_owner, ordinal,
+                                               &d->primary_project->root);
         }
     }
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));

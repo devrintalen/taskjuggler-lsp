@@ -22,15 +22,18 @@
 #include "document_symbol.h"  /* range_json */
 
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
-                                       ProjectDep *dep, ProjectNode *owner,
+                                       ProjectNode *owner, int dep_index,
                                        ProjectNode *project_root) {
-    if (!dep || !owner || !project_root) return NULL;
+    if (!owner || !project_root ||
+        dep_index < 0 || dep_index >= owner->num_dependencies)
+        return NULL;
 
-    ProjectNode *target = project_dep_resolve(dep, owner, project_root);
+    ProjectNode *target = project_dep_resolve(owner, dep_index, project_root);
     if (!target) return NULL;
 
     yyjson_mut_val *location = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, location, "uri", dep->target_uri);
+    yyjson_mut_obj_add_str(doc, location, "uri",
+                           owner->dependencies[dep_index].target_uri);
     yyjson_mut_obj_add_val(doc, location, "range",
                            range_json(doc, target->selection_range));
     return location;
