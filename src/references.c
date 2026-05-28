@@ -21,8 +21,26 @@
 #include "references.h"
 #include "document_symbol.h"  /* range_json */
 
-/* Resolve every dependency declared in @p node's subtree (memoizing
- * in-node) and append a Location for each one that targets @p wanted. */
+/**
+ * Recursively collect incoming references to @p wanted within a Project
+ * tree, appending one LSP `Location` per matching dependency to @p arr.
+ *
+ * @param node          The current node in the depth-first walk.  This is
+ *                      the traversal cursor — it starts at the project root
+ *                      and descends through `children` on each recursive
+ *                      call, so it differs from @p project_root on every
+ *                      call but the first.  Each task `node` may declare
+ *                      dependencies; those resolving to @p wanted produce a
+ *                      reference Location anchored at `node`'s source URI.
+ * @param wanted        The target task whose incoming references we want.
+ *                      A dependency is a match when it resolves to exactly
+ *                      this node.
+ * @param project_root  The Project's synthetic root, held constant across
+ *                      the recursion and forwarded to project_dep_resolve()
+ *                      as the resolution context: absolute paths resolve in
+ *                      the project's single prefix-applied namespace, and
+ *                      bang-relative climbs are bounded by it.
+ */
 static void collect_refs_in_subtree(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                                      ProjectNode *node, const ProjectNode *wanted,
                                      ProjectNode *project_root) {
