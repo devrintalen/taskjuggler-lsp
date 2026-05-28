@@ -184,10 +184,17 @@ char *sym_qualified_id(const tj_node *sym) {
     return out;
 }
 
-/* ── hover_node_markdown ─────────────────────────────────────────────────── */
+/* ── task hover markdown ─────────────────────────────────────────────────── */
 
-/* Format the task hover Markdown from an already-qualified id and name.
- * @p name retains any surrounding quotes from the source token. */
+/**
+ * Format the task hover Markdown from an already-qualified id and name.
+ *
+ * @param qid   Fully qualified, dot-separated task id.
+ * @param name  Display name; retains any surrounding quotes from the
+ *              source token.  May be the empty string.
+ * @return Heap-allocated Markdown of the form ``**Task `<qid>`** — <name>``,
+ *         or NULL on allocation failure.  Caller must free.
+ */
 static char *task_markdown(const char *qid, const char *name) {
     /* \xe2\x80\x94 is the UTF-8 em-dash. */
     const char *fmt = "**Task `%s`** \xe2\x80\x94 %s";
@@ -197,13 +204,16 @@ static char *task_markdown(const char *qid, const char *name) {
     return out;
 }
 
-char *hover_node_markdown(const tj_node *sym) {
-    char *qid = sym_qualified_id(sym);
-    char *out = task_markdown(qid, sym->name ? sym->name : "");
-    free(qid);
-    return out;
-}
-
+/**
+ * Build the hover Markdown for a resolved declaration node in an assembled
+ * Project tree, of the form ``**Task `<qualified-id>`** — <name>``.  Used when
+ * hovering over a dependency reference that resolves to its target task; the
+ * qualified id reflects the node's position in the tree (so include prefixes
+ * are included).
+ *
+ * @param node  Resolved target ProjectNode.  Must be non-NULL with a valid id.
+ * @return Heap-allocated Markdown string.  Caller must free.
+ */
 char *project_node_hover_markdown(const ProjectNode *node) {
     if (!node || !node->id) return task_markdown("", node && node->name ? node->name : "");
 

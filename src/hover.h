@@ -93,24 +93,8 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
  */
 char *sym_qualified_id(const tj_node *sym);
 
-/**
- * Build the hover Markdown for a resolved declaration node, of the form
- * `**Task `<qualified-id>`** — "<name>"`.  Used when hovering over a
- * dependency reference that resolves to its target task.
- *
- * @param sym  Resolved target node.  Must be non-NULL with a valid id.
- * @return Heap-allocated Markdown string.  Caller must free.
- */
-char *hover_node_markdown(const tj_node *sym);
-
-/**
- * Like hover_node_markdown(), but for a resolved node in an assembled
- * Project tree.  The qualified id reflects the node's position in that
- * tree (so include prefixes are included).
- *
- * @param node  Resolved target ProjectNode.  Must be non-NULL with a valid id.
- * @return Heap-allocated Markdown string.  Caller must free.
- */
+/** @brief Build the hover Markdown for a resolved task node in an assembled
+ *  Project tree (full documentation at the definition in hover.c). */
 char *project_node_hover_markdown(const ProjectNode *node);
 
 /**
