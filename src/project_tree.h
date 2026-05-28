@@ -124,6 +124,23 @@ void project_node_free(ProjectNode *node);
 void project_node_free_children(ProjectNode *root);
 
 /**
+ * Deep-copy a heap-allocated ProjectNode subtree into a new, independent
+ * tree.  All strings (id, name, source_uri, ProjectDep.path) are
+ * strdup'd.  Internal parent_node pointers are re-wired to point within
+ * the copy.  Dependency resolution state (resolved_target, target_uri,
+ * state) is cleared to DEP_UNRESOLVED so callers resolve lazily against
+ * their own project root.
+ *
+ * The returned node's own parent_node is NULL (it is the root of the
+ * copy).  When inserting into a parent tree, call
+ * project_node_append_child() to set parent_node correctly.
+ *
+ * @param src  Root of the subtree to copy.  NULL returns NULL.
+ * @return Heap-allocated independent copy.  Free with project_node_free().
+ */
+ProjectNode *project_node_copy(const ProjectNode *src);
+
+/**
  * Resolve @p owner_task's dependency at @p dep_index against
  * @p project_root, memoizing the result in-node.
  *

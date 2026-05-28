@@ -24,6 +24,10 @@
 #include <stdint.h>
 #include <yyjson.h>
 
+/* Forward declaration to avoid a circular dependency with
+ * workspace_snapshot.h (which includes parser.h / project_tree.h). */
+typedef struct WorkspaceSnapshot WorkspaceSnapshot;
+
 /**
  * One pending unit of work parsed off stdin by the reader thread and
  * waiting in a queue for a worker to consume.
@@ -50,12 +54,17 @@
  * and string/null ids leave `has_id = 0`.
  */
 typedef struct Job {
-    yyjson_doc *request_doc;
-    int         is_notification;
-    int         is_cancelled;
-    int         has_id;
-    int64_t     id;
-    struct Job *next;
+    yyjson_doc        *request_doc;
+    /** Frozen workspace state for this query.  NULL for notifications.
+     *  Populated by workspace_snapshot_build() in server.c before the Job
+     *  is handed to a query worker.  Freed by job_free() via
+     *  workspace_snapshot_free(). */
+    WorkspaceSnapshot *snapshot;
+    int                is_notification;
+    int                is_cancelled;
+    int                has_id;
+    int64_t            id;
+    struct Job        *next;
 } Job;
 
 /** Opaque thread-safe FIFO of Job pointers. */

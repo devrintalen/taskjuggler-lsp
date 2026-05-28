@@ -325,6 +325,46 @@ void push_include(ParseOutput *po, const char *quoted_text,
                   const char *report_prefix);
 
 /**
+ * Deep-copy a tj_node subtree into a new, independent tree.  All strings
+ * (id, name, Dependency.path) are strdup'd.  Internal parent_node and
+ * parent_doc pointers are re-wired to point within the copy rather than
+ * the original.  Dependency.resolved_target is cleared (set to NULL) in
+ * the copy because resolution is lazy and callers will re-resolve as
+ * needed.
+ *
+ * @param src  Root of the subtree to copy.  NULL returns NULL.
+ * @return Heap-allocated independent copy.  Free with tj_node_free().
+ */
+tj_node *tj_node_copy(const tj_node *src);
+
+/**
+ * Deep-copy an array of @p n TokenSpan entries.  Each .text field is
+ * strdup'd.  Each .owner pointer is remapped from the original tj_node
+ * tree (@p old_root) to the structurally-identical copy (@p new_root)
+ * via a parallel depth-first walk; owners that cannot be remapped (e.g.
+ * when @p old_root is NULL) are set to NULL.
+ *
+ * @param tok_spans  Source array; may be NULL when @p n is 0.
+ * @param n          Number of entries in @p tok_spans.
+ * @param old_root   Root of the original tj_node tree.
+ * @param new_root   Root of the deep-copied tj_node tree.
+ * @return Heap-allocated copy of @p n TokenSpan entries.  Free with
+ *         tok_spans_free(result, n).  Returns NULL when @p n is 0.
+ */
+TokenSpan *tok_spans_copy(const TokenSpan *tok_spans, int n,
+                           const tj_node *old_root, tj_node *new_root);
+
+/**
+ * Free a heap-allocated TokenSpan array produced by tok_spans_copy(),
+ * releasing each .text string and the array itself.
+ * NULL-safe.
+ *
+ * @param tok_spans  Array to free.
+ * @param n          Number of entries.
+ */
+void tok_spans_free(TokenSpan *tok_spans, int n);
+
+/**
  * Parse a `YYYY-MM-DD` date prefix from a TaskJuggler `TK_DATE` token's
  * text into a UTC `time_t`.  Trailing time and timezone components
  * (e.g. `-09:00`, `+0100`) are accepted but ignored.

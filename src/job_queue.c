@@ -19,6 +19,7 @@
 /** @file */
 
 #include "job_queue.h"
+#include "workspace_snapshot.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -80,6 +81,7 @@ void job_queue_close(JobQueue *q) {
 void job_free(Job *job) {
     if (!job) return;
     yyjson_doc_free(job->request_doc);
+    workspace_snapshot_free(job->snapshot);
     free(job);
 }
 
