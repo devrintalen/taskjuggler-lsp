@@ -31,6 +31,7 @@
 
 #include "server.h"
 #include "parser.h"
+#include "project_tree.h"
 #include "grammar.tab.h"   /* KW_* keyword constants for per-kind routing */
 #include "job_queue.h"
 #include "threadpool.h"
@@ -147,15 +148,23 @@ static void  rebuild_all_projects(void);
 static void  reload_compile_commands(void);
 static void  maybe_reload_compile_commands(void);
 
-/* ── Per-Project tj_node tree ───────────────────────────────────────────── *
+/* ── Per-Project ProjectNode tree ───────────────────────────────────────── *
  *
  * Each compile_commands.json entry becomes one Project; its transitive
  * include closure (followed via Document.included_uris[]) is deep-copied
- * into the single tree below with the includer's per-kind prefix applied.
- * Built fresh by rebuild_all_projects() on every notification.  Nodes of
- * every kind share one root: a node's `keyword` identifies its kind, so
- * walkers must filter on it to respect TaskJuggler's separate task /
- * account / resource / report id namespaces.
+ * into the single ProjectNode tree below with the includer's per-kind
+ * prefix applied (see project_tree.h).  Built fresh by
+ * rebuild_all_projects() on every notification.  Nodes of every kind
+ * share one root: a node's `keyword` identifies its kind, so walkers
+ * must filter on it to respect TaskJuggler's separate task / account /
+ * resource / report id namespaces.
+ *
+ * This tree is the authoritative cross-file resolution surface: it is
+ * prefix-applied (so dependency paths resolve against real qualified
+ * ids) and each task node owns the dependency edges declared on it.
+ * handle_definition / handle_references / handle_hover bridge the
+ * per-document task under the cursor to its clone here (via
+ * project_node_for_doc_task) and resolve against this tree.
  *
  * Each Document has a primary_project pointer set during the rebuild;
  * handlers route cross-file lookups through that pointer.  Orphan
@@ -163,9 +172,9 @@ static void  maybe_reload_compile_commands(void);
  * compile_commands entry) are handled by a follow-up commit; until then
  * they end up with primary_project == NULL. */
 typedef struct Project {
-    char    *id;                 /**< canonical .tjp URI from compile_commands.json */
-    int      is_orphan;          /**< reserved for singleton editor-only projects (commit 3) */
-    tj_node  root;               /**< synthetic root over all kinds, owned outright */
+    char        *id;             /**< canonical .tjp URI from compile_commands.json */
+    int          is_orphan;      /**< reserved for singleton editor-only projects (commit 3) */
+    ProjectNode  root;           /**< synthetic root over all kinds, owned outright */
 } Project;
 
 static Project **projects;
@@ -633,19 +642,6 @@ static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
    tj_node tree-building helpers (shared by per-Project rebuild)
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/** Free every owned child of @p root, leaving @p root itself as an empty
- *  synthetic-root shell.  Used to tear down a Project's tree before each
- *  rebuild. */
-static void free_global_root_children(tj_node *root) {
-    if (!root) return;
-    for (int i = 0; i < root->num_children; i++)
-        tj_node_free(root->children[i]);
-    free(root->children);
-    root->children     = NULL;
-    root->num_children = 0;
-    root->children_cap = 0;
-}
-
 /* Coarse kind bucket for a node, collapsing the keyword set into the four
  * id namespaces TaskJuggler keeps separate.  KW_PROJECT maps to NODE_KIND_OTHER
  * but is never inserted into a Project tree (it stays document-local). */
@@ -674,18 +670,18 @@ static NodeKind node_kind_of(int keyword) {
  *  includer's prefix target inside a Project tree; the kind filter keeps
  *  same-named declarations in different namespaces from colliding now that
  *  all kinds share one root. */
-static tj_node *find_node_by_dotted_path(tj_node *start, const char *path,
-                                         NodeKind kind) {
+static ProjectNode *find_node_by_dotted_path(ProjectNode *start, const char *path,
+                                             NodeKind kind) {
     if (!start) return NULL;
     if (!path || !path[0]) return start;
 
     char *copy = strdup(path);
     if (!copy) return NULL;
-    tj_node *cur = start;
+    ProjectNode *cur = start;
     for (char *seg = strtok(copy, "."); seg && cur; seg = strtok(NULL, ".")) {
-        tj_node *next = NULL;
+        ProjectNode *next = NULL;
         for (int i = 0; i < cur->num_children && !next; i++) {
-            tj_node *child = cur->children[i];
+            ProjectNode *child = cur->children[i];
             if (node_kind_of(child->keyword) == kind &&
                 child->id && strcmp(child->id, seg) == 0)
                 next = child;
@@ -701,7 +697,7 @@ static tj_node *find_node_by_dotted_path(tj_node *start, const char *path,
 static void project_free(Project *p) {
     if (!p) return;
     free(p->id);
-    free_global_root_children(&p->root);
+    project_node_free_children(&p->root);
     free(p);
 }
 
@@ -735,9 +731,10 @@ static void copy_document_into_project(Project *p, Document *d) {
         default:
             prefix = d->report_prefix;   break;
         }
-        tj_node *target = find_node_by_dotted_path(&p->root, prefix, kind);
+        ProjectNode *target = find_node_by_dotted_path(&p->root, prefix, kind);
         if (!target) continue;
-        tj_node_append_child(target, tj_node_clone(child));
+        project_node_append_child(target,
+                                  project_node_from_tj(child, d->uri));
     }
 }
 
@@ -1453,42 +1450,37 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
     return make_response(doc, id, raw);
 }
 
-/* Build the ProjectScope set for a request originating in @p d: every
- * in-use document sharing @p d's primary_project (including @p d
- * itself), each with its top-level node pool and URI.  Orphan documents
- * (primary_project == NULL) yield just themselves.  The pools are
- * borrowed from each Document's root; free_project_scopes releases only
- * the scopes array.  Returns a heap array (free with free_project_scopes)
- * and the requester's index via @p out_self_index. */
-static ProjectScope *build_project_scopes(Document *d, int *out_n,
-                                          int *out_self_index) {
-    *out_n          = 0;
-    *out_self_index = -1;
+/* Map a per-document task tj_node to its clone in @p d's assembled
+ * Project tree.  Cursor lookups (dependency_at_cursor / task_decl_at_cursor)
+ * return per-document nodes, but cross-file resolution lives in the
+ * ProjectNode tree, so callers bridge through here first.
+ *
+ * The per-document task's unprefixed dotted id (its in-file ancestry) is
+ * appended to @p d's task prefix target inside the Project tree.  Returns
+ * NULL when @p d has no project, the prefix target is missing, or the path
+ * does not resolve. */
+static ProjectNode *project_node_for_doc_task(const Document *d,
+                                              const tj_node *per_doc_task) {
+    if (!d || !d->primary_project || !per_doc_task) return NULL;
+    Project *p = d->primary_project;
 
-    ProjectScope *scopes = malloc((size_t)MAX_DOCS * sizeof(ProjectScope));
-    if (!scopes) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    int n = 0;
+    char *qid = sym_qualified_id(per_doc_task);   /* unprefixed in-file path */
+    if (!qid || !qid[0]) { free(qid); return NULL; }
 
-    for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use) continue;
-        int is_self = (&docs[i] == d);
-        if (!is_self) {
-            if (!d->primary_project) continue;
-            if (docs[i].primary_project != d->primary_project) continue;
+    ProjectNode *cur = find_node_by_dotted_path(&p->root, d->task_prefix,
+                                                NODE_KIND_TASK);
+    for (char *seg = strtok(qid, "."); seg && cur; seg = strtok(NULL, ".")) {
+        ProjectNode *next = NULL;
+        for (int i = 0; i < cur->num_children && !next; i++) {
+            ProjectNode *child = cur->children[i];
+            if (child->keyword == KW_TASK && child->id &&
+                strcmp(child->id, seg) == 0)
+                next = child;
         }
-        doc_symbol_pool(&docs[i], &scopes[n].top, &scopes[n].n);
-        scopes[n].uri = docs[i].uri;
-        if (is_self) *out_self_index = n;
-        n++;
+        cur = next;
     }
-
-    *out_n = n;
-    return scopes;
-}
-
-static void free_project_scopes(ProjectScope *scopes, int n) {
-    (void)n;   /* scope pools are borrowed from each Document's root */
-    free(scopes);
+    free(qid);
+    return cur;
 }
 
 static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
@@ -1537,15 +1529,19 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
      * when the cursor is not on a dependency or the reference is unresolved. */
     tj_node          *owner = NULL;
     const Dependency *dep   = NULL;
-    if (dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
+    if (d->primary_project &&
+        dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
                              &owner, &dep)) {
-        int self_index = -1, num_scopes = 0;
-        ProjectScope *scopes = build_project_scopes(d, &num_scopes, &self_index);
-        tj_node *target = resolve_dependency(dep, owner, scopes, num_scopes,
-                                             self_index, NULL);
-        free_project_scopes(scopes, num_scopes);
+        ProjectNode *merged_owner = project_node_for_doc_task(d, owner);
+        ProjectNode *target = NULL;
+        if (merged_owner) {
+            int ordinal = (int)(dep - owner->dependencies);
+            if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
+                target = project_dep_resolve(merged_owner, ordinal,
+                                             &d->primary_project->root);
+        }
         if (target) {
-            char *value = hover_node_markdown(target);
+            char *value = project_node_hover_markdown(target);
             yyjson_mut_val *contents = yyjson_mut_obj(doc);
             yyjson_mut_obj_add_str(doc, contents, "kind", "markdown");
             yyjson_mut_obj_add_strcpy(doc, contents, "value", value);
@@ -1661,14 +1657,13 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
     if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-    int self_index = -1, num_scopes = 0;
-    ProjectScope *scopes = build_project_scopes(d, &num_scopes, &self_index);
+    if (!d->primary_project) return make_response(doc, id, yyjson_mut_null(doc));
+
+    tj_node *task = task_decl_at_cursor(d->tok_spans, d->num_tok_spans, pos);
+    ProjectNode *wanted = project_node_for_doc_task(d, task);
     yyjson_mut_val *result = build_references_json(doc,
-                                                    d->tok_spans,
-                                                    d->num_tok_spans,
-                                                    pos,
-                                                    scopes, num_scopes);
-    free_project_scopes(scopes, num_scopes);
+                                                    &d->primary_project->root,
+                                                    wanted);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
 }
@@ -1700,15 +1695,21 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
     if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-    int self_index = -1, num_scopes = 0;
-    ProjectScope *scopes = build_project_scopes(d, &num_scopes, &self_index);
-    yyjson_mut_val *result = build_definition_json(doc,
-                                                    d->tok_spans,
-                                                    d->num_tok_spans,
-                                                    pos,
-                                                    scopes, num_scopes,
-                                                    self_index);
-    free_project_scopes(scopes, num_scopes);
+    if (!d->primary_project) return make_response(doc, id, yyjson_mut_null(doc));
+
+    tj_node          *owner = NULL;
+    const Dependency *dep   = NULL;
+    yyjson_mut_val   *result = NULL;
+    if (dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
+                             &owner, &dep)) {
+        ProjectNode *merged_owner = project_node_for_doc_task(d, owner);
+        if (merged_owner) {
+            int ordinal = (int)(dep - owner->dependencies);
+            if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
+                result = build_definition_json(doc, merged_owner, ordinal,
+                                               &d->primary_project->root);
+        }
+    }
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
 }

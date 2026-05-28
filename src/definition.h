@@ -20,30 +20,23 @@
 
 #pragma once
 
-#include "dependency.h"
+#include "project_tree.h"
 #include <yyjson.h>
 
 /**
- * Build the textDocument/definition response for a cursor on a
- * dependency reference.
+ * Build the textDocument/definition response for a dependency reference.
  *
- * Locates the dependency under @p cursor, resolves it on demand against
- * the requester's project (@p scopes), and returns a single LSP
- * `Location` pointing at the target task's identifier.  Returns NULL —
- * serialised as JSON `null` by the caller — when the cursor is not on a
- * dependency or the reference does not resolve.
+ * Resolves @p owner's dependency at @p dep_index against @p project_root
+ * (memoizing in-node) and returns a single LSP `Location` pointing at the
+ * target task's identifier.  Returns NULL — serialised as JSON `null` by
+ * the caller — when the reference does not resolve.
  *
- * @param doc          Destination mutable JSON document.
- * @param tokens       Token spans of the document under the cursor.
- * @param num_tokens   Length of @p tokens.
- * @param cursor       Cursor position.
- * @param scopes       Every document in the requester's project.
- * @param num_scopes   Length of @p scopes.
- * @param self_index   Index into @p scopes of the requesting document.
+ * @param doc           Destination mutable JSON document.
+ * @param owner         The ProjectNode task whose dependency is under the cursor.
+ * @param dep_index     Index of the dependency within @p owner.
+ * @param project_root  The requester's Project synthetic root.
  * @return A `Location` JSON object, or NULL.
  */
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
-                                       const TokenSpan *tokens, int num_tokens,
-                                       LspPos cursor,
-                                       const ProjectScope *scopes,
-                                       int num_scopes, int self_index);
+                                       ProjectNode *owner, int dep_index,
+                                       ProjectNode *project_root);

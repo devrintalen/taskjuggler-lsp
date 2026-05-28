@@ -20,30 +20,23 @@
 
 #pragma once
 
-#include "dependency.h"
+#include "project_tree.h"
 #include <yyjson.h>
 
 /**
- * Build the textDocument/references response for a cursor on a task
- * declaration.
+ * Build the textDocument/references response for a task declaration.
  *
- * Locates the task identifier under @p cursor, then scans every task in
- * the requester's project (@p scopes), resolving each dependency on
- * demand and collecting those that target the cursor's task.  Returns an
- * LSP `Location[]` of the matching dependency references (empty when the
- * task has no incoming dependencies), or NULL when the cursor is not on a
- * task identifier.
+ * Walks @p project_root's task tree, resolving each dependency
+ * (memoizing in-node) and collecting those that target @p wanted.
+ * Returns an LSP `Location[]` of the matching dependency references
+ * (empty when @p wanted has no incoming dependencies), or NULL when
+ * @p wanted is NULL.
  *
- * @param doc          Destination mutable JSON document.
- * @param tokens       Token spans of the document under the cursor.
- * @param num_tokens   Length of @p tokens.
- * @param cursor       Cursor position.
- * @param scopes       Every document in the requester's project.
- * @param num_scopes   Length of @p scopes.
+ * @param doc           Destination mutable JSON document.
+ * @param project_root  The requester's Project synthetic root.
+ * @param wanted        The assembled-tree task the references point at.
  * @return A `Location[]` JSON array, or NULL.
  */
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
-                                       const TokenSpan *tokens, int num_tokens,
-                                       LspPos cursor,
-                                       const ProjectScope *scopes,
-                                       int num_scopes);
+                                       ProjectNode *project_root,
+                                       const ProjectNode *wanted);

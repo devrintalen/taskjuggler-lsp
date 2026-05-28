@@ -149,34 +149,6 @@ void tj_node_push_dependency(tj_node *task, Dependency dep) {
     task->dependencies[task->num_dependencies++] = dep;
 }
 
-tj_node *tj_node_clone(const tj_node *src) {
-    if (!src) return NULL;
-    tj_node *dst = calloc(1, sizeof(tj_node));
-    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    dst->keyword         = src->keyword;
-    dst->id              = src->id   ? strdup(src->id)   : NULL;
-    dst->name            = src->name ? strdup(src->name) : NULL;
-    dst->range           = src->range;
-    dst->selection_range = src->selection_range;
-    dst->start_date      = src->start_date;
-    dst->end_date        = src->end_date;
-    dst->has_start       = src->has_start;
-    dst->has_end         = src->has_end;
-    /* parent_node / parent_doc deliberately NULL on the root; recursive
-     * children below get their parent_node set via tj_node_append_child. */
-    for (int i = 0; i < src->num_children; i++) {
-        tj_node *child_copy = tj_node_clone(src->children[i]);
-        tj_node_append_child(dst, child_copy);
-    }
-    /* `dependencies` is intentionally not cloned: nothing currently
-     * reads it on a hoisted copy, and `resolved_target` would point
-     * into the source document's tree.  When the resolver lands, the
-     * choice will be either to deep-copy paths and re-resolve into the
-     * destination Project, or to keep cross-Document edges off the
-     * cloned trees entirely. */
-    return dst;
-}
-
 /* ── ParseOutput helpers ─────────────────────────────────────────────────── */
 
 static tj_node *alloc_synthetic_root(void) {

@@ -21,43 +21,50 @@
 #include "references.h"
 #include "document_symbol.h"  /* range_json */
 
-/* Resolve every dependency declared in @p node's subtree against the
- * project and append a Location for each one that targets @p wanted. */
+/**
+ * Recursively collect incoming references to @p wanted within a Project
+ * tree, appending one LSP `Location` per matching dependency to @p arr.
+ *
+ * @param node          The current node in the depth-first walk.  This is
+ *                      the traversal cursor — it starts at the project root
+ *                      and descends through `children` on each recursive
+ *                      call, so it differs from @p project_root on every
+ *                      call but the first.  Each task `node` may declare
+ *                      dependencies; those resolving to @p wanted produce a
+ *                      reference Location anchored at `node`'s source URI.
+ * @param wanted        The target task whose incoming references we want.
+ *                      A dependency is a match when it resolves to exactly
+ *                      this node.
+ * @param project_root  The Project's synthetic root, held constant across
+ *                      the recursion and forwarded to project_dep_resolve()
+ *                      as the resolution context: absolute paths resolve in
+ *                      the project's single prefix-applied namespace, and
+ *                      bang-relative climbs are bounded by it.
+ */
 static void collect_refs_in_subtree(yyjson_mut_doc *doc, yyjson_mut_val *arr,
-                                     tj_node *node, const tj_node *wanted,
-                                     const ProjectScope *scopes,
-                                     int num_scopes, int owner_index,
-                                     const char *owner_uri) {
+                                     ProjectNode *node, const ProjectNode *wanted,
+                                     ProjectNode *project_root) {
     if (!node) return;
     for (int i = 0; i < node->num_dependencies; i++) {
-        const Dependency *dep = &node->dependencies[i];
-        tj_node *target = resolve_dependency(dep, node, scopes, num_scopes,
-                                             owner_index, NULL);
+        ProjectNode *target = project_dep_resolve(node, i, project_root);
         if (target != wanted) continue;
         yyjson_mut_val *location = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_str(doc, location, "uri", owner_uri);
+        yyjson_mut_obj_add_str(doc, location, "uri", node->source_uri);
         yyjson_mut_obj_add_val(doc, location, "range",
-                               range_json(doc, dep->source_range));
+                               range_json(doc, node->dependencies[i].source_range));
         yyjson_mut_arr_add_val(arr, location);
     }
     for (int i = 0; i < node->num_children; i++)
         collect_refs_in_subtree(doc, arr, node->children[i], wanted,
-                                scopes, num_scopes, owner_index, owner_uri);
+                                project_root);
 }
 
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
-                                       const TokenSpan *tokens, int num_tokens,
-                                       LspPos cursor,
-                                       const ProjectScope *scopes,
-                                       int num_scopes) {
-    tj_node *task = task_decl_at_cursor(tokens, num_tokens, cursor);
-    if (!task) return NULL;
+                                       ProjectNode *project_root,
+                                       const ProjectNode *wanted) {
+    if (!project_root || !wanted) return NULL;
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    for (int p = 0; p < num_scopes; p++) {
-        for (int i = 0; i < scopes[p].n; i++)
-            collect_refs_in_subtree(doc, arr, scopes[p].top[i], task,
-                                    scopes, num_scopes, p, scopes[p].uri);
-    }
+    collect_refs_in_subtree(doc, arr, project_root, wanted, project_root);
     return arr;
 }

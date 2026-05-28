@@ -1,0 +1,89 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "processId": null,
+      "rootUri": "file://${CASE_DIR}/workspace",
+      "capabilities": {}
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "initialized",
+    "params": {}
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file://${CASE_DIR}/workspace/project.tjp",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "project p \"Project\" 2024-01-01 +3m {\n}\ntask lib \"Lib\" {\n}\ntask a \"A\" {\n  depends lib.x\n}\ninclude \"lib.tji\" { taskprefix lib }\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file://${CASE_DIR}/workspace/lib.tji",
+        "languageId": "taskjuggler",
+        "version": 1,
+        "text": "task x \"X\" {\n}\ntask y \"Y\" {\n  depends !x\n}\n"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file://${CASE_DIR}/workspace/project.tjp"
+      },
+      "position": {
+        "line": 5,
+        "character": 12
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file://${CASE_DIR}/workspace/lib.tji"
+      },
+      "position": {
+        "line": 3,
+        "character": 11
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "textDocument/references",
+    "params": {
+      "textDocument": {
+        "uri": "file://${CASE_DIR}/workspace/lib.tji"
+      },
+      "position": {
+        "line": 0,
+        "character": 5
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 5,
+    "method": "shutdown",
+    "params": {}
+  }
+]

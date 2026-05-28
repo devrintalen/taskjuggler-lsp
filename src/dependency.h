@@ -23,52 +23,13 @@
 #include "parser.h"
 
 /*
- * On-demand dependency resolution.
+ * Cursor → dependency / task-declaration lookup.
  *
  * Dependencies are captured on task tj_nodes at parse time (see
- * `Dependency` in parser.h) but left unresolved.  The textDocument/
- * definition and textDocument/references handlers resolve them lazily
- * at request time against the requester's project — they never write
- * back into `Dependency.resolved_target`, so the per-document tj_node
- * trees stay immutable and safe to share across query workers.
+ * `Dependency` in parser.h).  These helpers locate the per-document node
+ * under a cursor; cross-file resolution itself runs against the
+ * assembled per-Project ProjectNode tree (see project_tree.h), not here.
  */
-
-/**
- * One document's contribution to a project's resolution scope: its
- * top-level tj_nodes (the children of the document's synthetic root)
- * plus the URI used to build Locations that point into it.  All
- * pointers are borrowed for the duration of a single request.
- */
-typedef struct {
-    tj_node *const *top;   /**< top-level nodes of the document */
-    int             n;     /**< length of @p top */
-    const char     *uri;   /**< owning document URI (borrowed) */
-} ProjectScope;
-
-/**
- * Resolve one captured dependency to its target task.
- *
- * Absolute (zero-bang) references are looked up in the owner's own
- * scope first, then every other scope in the project; the resolved
- * task's owning URI is reported via @p out_uri.  Relative (bang)
- * references walk up @p owner_task's `parent_node` chain one level per
- * `!` and are resolved strictly in-file; a reference that climbs past
- * the document/project root does not resolve.
- *
- * @param dep          Dependency to resolve.
- * @param owner_task   Task tj_node that declared @p dep (the anchor for
- *                     the bang walk).
- * @param scopes       Every document in the requester's project.
- * @param num_scopes   Length of @p scopes.
- * @param owner_index  Index into @p scopes of the owner's document.
- * @param out_uri      When non-NULL, receives the URI of the resolved
- *                     task's document (a borrowed pointer into
- *                     @p scopes), or NULL on a miss.
- * @return The matched task tj_node, or NULL when unresolved.
- */
-tj_node *resolve_dependency(const Dependency *dep, tj_node *owner_task,
-                            const ProjectScope *scopes, int num_scopes,
-                            int owner_index, const char **out_uri);
 
 /**
  * Locate the dependency reference under @p cursor, if any.
