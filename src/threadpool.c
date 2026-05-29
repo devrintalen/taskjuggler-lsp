@@ -43,6 +43,44 @@ static pthread_t coordinator_thread;
 static pthread_t query_threads[NUM_QUERY_WORKERS];
 static int       pool_started = 0;
 
+/* ── Thread-safety contract ──────────────────────────────────────────────────
+ *
+ * Three thread classes:
+ *
+ *   reader      (main.c) — single thread; calls server_process() which
+ *               classifies each message and enqueues a Job onto work_queue.
+ *               No document state is read or written here.
+ *
+ *   coordinator (this file, one thread) — pops work_queue in arrival order.
+ *               Notifications and lifecycle requests (initialize, shutdown,
+ *               semanticTokens/full[/delta]) run inline under docs_mutex so
+ *               later messages observe their side effects.  For regular query
+ *               jobs it calls server_snapshot_for_job() — a brief docs_mutex
+ *               hold to copy slab pages and deep-copy the project tree —
+ *               then pushes the enriched job to request_queue.
+ *
+ *   workers     (this file, NUM_QUERY_WORKERS threads) — pop request_queue
+ *               and call server_dispatch_query().  Workers are LOCK-FREE:
+ *               they read only the private workspace_snapshot attached to
+ *               their job and must NEVER touch:
+ *
+ *                 • docs[], projects[], num_projects — use only the snapshot
+ *                 • g_workspace_root, g_cc_* globals
+ *                 • global flex/bison state (g_build_root, yylval, yytext,
+ *                   yylineno, yycolumn) — parse() must not be called here
+ *                 • non-reentrant libc functions (strtok, localtime, gmtime,
+ *                   strerror, rand, …) — use _r variants where applicable
+ *
+ *               Workers may safely use: their job's workspace_snapshot,
+ *               immutable static-const lookup tables in feature files,
+ *               and stack-local state.  stdout writes go via lsp_send_message()
+ *               which serializes under stdout_mutex.
+ *
+ * Lock order (when multiple locks must be held simultaneously):
+ *   work_queue.mutex → request_queue.mutex  (coordinator push direction)
+ *   docs_mutex is never held while work_queue or request_queue is locked.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
 /* Coordinator thread.  Pops jobs from work_queue in arrival order.
  * Notifications are dispatched inline (preserving causal ordering with
  * respect to subsequent queries).  Query and cancelled-query jobs are
