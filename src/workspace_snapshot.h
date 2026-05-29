@@ -65,7 +65,7 @@ typedef struct {
  * tree with all dependency resolution reset to DEP_UNRESOLVED so the
  * copy can re-resolve lazily within its own node pointers.
  */
-typedef struct {
+typedef struct workspace_snapshot {
     doc_snapshot **docs;
     int            num_docs;
     int            primary_idx;   /**< index into docs[]; -1 if none */

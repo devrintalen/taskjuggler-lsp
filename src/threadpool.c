@@ -23,59 +23,62 @@
 
 #include <pthread.h>
 
-/* TODO(workspace-snapshot): one query worker for now.  The snapshot +
- * immutable-parse-result machinery that previously let query workers
- * run lock-free was retired during the tj_node refactor; while
- * server_dispatch_query() serialises under docs_mutex, raising the
- * worker count buys nothing.  See job_queue.h for context. */
-#define NUM_QUERY_WORKERS 1
+/* Number of parallel query workers.  Queries take a workspace_snapshot
+ * under docs_mutex, then run lock-free, so multiple workers produce
+ * real parallelism on multi-core systems. */
+#define NUM_QUERY_WORKERS 4
 
 /* Single arrival-ordered FIFO populated by the reader.  The
  * coordinator pops from it in order, which is what enforces the LSP
- * "messages processed in arrival order" rule across queries and
- * notifications alike. */
+ * "messages processed in arrival order" rule: notifications always
+ * execute before any later query is handed to a worker. */
 static JobQueue *work_queue;
 
-/* Internal handoff queue: the coordinator pushes query jobs (with
- * their snapshot already attached) onto this for the query worker
- * pool to consume.  Notifications never go here — the coordinator
- * dispatches them inline. */
+/* Internal handoff queue: the coordinator pushes query jobs onto this
+ * for the worker pool to consume.  Notifications never go here —
+ * the coordinator dispatches them inline before picking up the next job. */
 static JobQueue *request_queue;
 
 static pthread_t coordinator_thread;
 static pthread_t query_threads[NUM_QUERY_WORKERS];
 static int       pool_started = 0;
 
-/* Coordinator thread.  Pops jobs from work_queue in arrival order and
- * dispatches each inline so the LSP "messages processed in arrival
- * order" rule is preserved.
- *
- * TODO(workspace-snapshot): the previous design split queries onto a
- * separate worker pool and used a refcounted snapshot taken here so
- * query workers could run lock-free.  That machinery was retired
- * during the tj_node refactor.  request_queue and the worker thread
- * are still allocated below so the public threadpool API does not
- * need to churn; once snapshotting returns, restore the split and
- * re-enable query parallelism. */
+/* Coordinator thread.  Pops jobs from work_queue in arrival order.
+ * Notifications are dispatched inline (preserving causal ordering with
+ * respect to subsequent queries).  Query and cancelled-query jobs are
+ * pushed to request_queue for the worker pool; workers own and free them. */
 static void *coordinator(void *arg) {
     (void)arg;
     while (1) {
         Job *job = job_queue_pop(work_queue);
         if (!job) break;
-        if (job->is_notification) {
-            server_dispatch_notification(job);
+        if (job->is_notification || job->is_lifecycle) {
+            /* Notifications and lifecycle requests (initialize, shutdown) run
+             * inline so subsequent messages observe their state changes before
+             * the coordinator picks up the next job. */
+            if (job->is_notification)
+                server_dispatch_notification(job);
+            else
+                server_dispatch_query(job);
+            job_free(job);
         } else if (job->is_cancelled) {
             server_dispatch_cancelled(job);
+            job_free(job);
         } else {
-            server_dispatch_query(job);
+            /* Pre-compute the snapshot at coordinator time so the query
+             * worker sees document state consistent with when this request
+             * arrived, before any subsequent notification modifies docs[]. */
+            job->snapshot = server_snapshot_for_job(job);
+            job_queue_push(request_queue, job);
         }
-        job_free(job);
     }
     job_queue_close(request_queue);
     return NULL;
 }
 
-/* Query worker.  Currently idle — see coordinator() TODO. */
+/* Query worker.  Pops from request_queue and runs each job lock-free
+ * (server_dispatch_query takes a snapshot at the start, then releases
+ * docs_mutex before doing any handler work). */
 static void *query_worker(void *arg) {
     (void)arg;
     while (1) {

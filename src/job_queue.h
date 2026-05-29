@@ -24,6 +24,9 @@
 #include <stdint.h>
 #include <yyjson.h>
 
+/* Forward declaration; workspace_snapshot.h defines the full type. */
+struct workspace_snapshot;
+
 /**
  * One pending unit of work parsed off stdin by the reader thread and
  * waiting in a queue for a worker to consume.
@@ -50,12 +53,14 @@
  * and string/null ids leave `has_id = 0`.
  */
 typedef struct Job {
-    yyjson_doc *request_doc;
-    int         is_notification;
-    int         is_cancelled;
-    int         has_id;
-    int64_t     id;
-    struct Job *next;
+    yyjson_doc              *request_doc;
+    struct workspace_snapshot *snapshot;  /**< pre-computed by coordinator; owned; NULL for notifications */
+    int                      is_notification;
+    int                      is_lifecycle;  /**< initialize/shutdown — run inline by coordinator */
+    int                      is_cancelled;
+    int                      has_id;
+    int64_t                  id;
+    struct Job              *next;
 } Job;
 
 /** Opaque thread-safe FIFO of Job pointers. */

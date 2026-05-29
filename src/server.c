@@ -647,7 +647,8 @@ static ProjectNode *find_node_by_dotted_path(ProjectNode *start, const char *pat
     char *copy = strdup(path);
     if (!copy) return NULL;
     ProjectNode *cur = start;
-    for (char *seg = strtok(copy, "."); seg && cur; seg = strtok(NULL, ".")) {
+    char *save = NULL;
+    for (char *seg = strtok_r(copy, ".", &save); seg && cur; seg = strtok_r(NULL, ".", &save)) {
         ProjectNode *next = NULL;
         for (int i = 0; i < cur->num_children && !next; i++) {
             ProjectNode *child = cur->children[i];
@@ -1447,7 +1448,8 @@ static ProjectNode *project_node_for_doc_task(const Document *d,
 
     ProjectNode *cur = find_node_by_dotted_path(&p->root, d->task_prefix,
                                                 NODE_KIND_TASK);
-    for (char *seg = strtok(qid, "."); seg && cur; seg = strtok(NULL, ".")) {
+    char *save = NULL;
+    for (char *seg = strtok_r(qid, ".", &save); seg && cur; seg = strtok_r(NULL, ".", &save)) {
         ProjectNode *next = NULL;
         for (int i = 0; i < cur->num_children && !next; i++) {
             ProjectNode *child = cur->children[i];
@@ -1883,6 +1885,30 @@ static workspace_snapshot *workspace_snapshot_create(const Document *primary) {
     return snap;
 }
 
+/** Extract the textDocument URI (if any) from a query job's params. */
+static const char *primary_uri_from_job(const Job *job) {
+    yyjson_val *root   = yyjson_doc_get_root(job->request_doc);
+    yyjson_val *params = yyjson_obj_get(root, "params");
+    if (!params) return NULL;
+    yyjson_val *td = yyjson_obj_get(params, "textDocument");
+    if (td) return json_str(td, "uri");
+    yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
+    if (tdp) {
+        td = yyjson_obj_get(tdp, "textDocument");
+        if (td) return json_str(td, "uri");
+    }
+    return NULL;
+}
+
+workspace_snapshot *server_snapshot_for_job(Job *job) {
+    const char *uri = primary_uri_from_job(job);
+    pthread_mutex_lock(&docs_mutex);
+    Document *primary = uri ? doc_find(uri) : NULL;
+    workspace_snapshot *snap = workspace_snapshot_create(primary);
+    pthread_mutex_unlock(&docs_mutex);
+    return snap;
+}
+
 void server_dispatch_notification(Job *job) {
     yyjson_val *root    = yyjson_doc_get_root(job->request_doc);
     yyjson_val *method  = yyjson_obj_get(root, "method");
@@ -1943,25 +1969,20 @@ void server_dispatch_query(Job *job) {
         return;
     }
 
-    /* All other queries: take a snapshot under mutex, then dispatch lock-free.
-     * Handlers operate on snapshot data without holding docs_mutex. */
-    const char *primary_uri = NULL;
-    if (params) {
-        yyjson_val *td = yyjson_obj_get(params, "textDocument");
-        if (td) primary_uri = json_str(td, "uri");
-        if (!primary_uri) {
-            yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
-            if (tdp) {
-                td = yyjson_obj_get(tdp, "textDocument");
-                if (td) primary_uri = json_str(td, "uri");
-            }
-        }
+    /* All other queries operate on a workspace_snapshot.  The coordinator
+     * pre-computes the snapshot at dispatch time (before any subsequent
+     * notification runs) and attaches it to the job; use that if present.
+     * Fall back to taking a fresh snapshot here for cases where the job
+     * arrives without a pre-attached snapshot (e.g. direct test callers). */
+    const char *primary_uri = primary_uri_from_job(job);
+    workspace_snapshot *snap = job->snapshot;
+    job->snapshot = NULL;  /* transfer ownership; job_free must not free it */
+    if (!snap) {
+        pthread_mutex_lock(&docs_mutex);
+        Document *live_primary = primary_uri ? doc_find(primary_uri) : NULL;
+        snap = workspace_snapshot_create(live_primary);
+        pthread_mutex_unlock(&docs_mutex);
     }
-
-    pthread_mutex_lock(&docs_mutex);
-    Document *live_primary = primary_uri ? doc_find(primary_uri) : NULL;
-    workspace_snapshot *snap = workspace_snapshot_create(live_primary);
-    pthread_mutex_unlock(&docs_mutex);
 
     /* Build a proxy Document from the primary snapshot so handler signatures
      * remain unchanged.  proxy_proj wraps snap->project_root so handlers that
@@ -2078,6 +2099,14 @@ void server_process(const char *json_text) {
     }
 
     job->is_notification = is_notification_method(m);
+    /* Lifecycle and semantic-token methods must run inline in the coordinator:
+     * initialize/shutdown mutate global state that subsequent notifications
+     * depend on; semanticTokens methods accumulate result_id state that the
+     * next semanticTokens/delta call must read back. */
+    job->is_lifecycle    = (strcmp(m, "initialize") == 0
+                         || strcmp(m, "shutdown") == 0
+                         || strcmp(m, "textDocument/semanticTokens/full") == 0
+                         || strcmp(m, "textDocument/semanticTokens/full/delta") == 0);
     threadpool_enqueue_job(job);
 }
 

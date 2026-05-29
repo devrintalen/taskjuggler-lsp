@@ -151,7 +151,8 @@ static void split_dotted_path(const char *path, char ***out_segs, int *out_n) {
     if (!*out_segs) return;
     char *tmp = strdup(path);
     if (!tmp) { free(*out_segs); *out_segs = NULL; return; }
-    for (char *tok = strtok(tmp, "."); tok; tok = strtok(NULL, "."))
+    char *save = NULL;
+    for (char *tok = strtok_r(tmp, ".", &save); tok; tok = strtok_r(NULL, ".", &save))
         (*out_segs)[(*out_n)++] = strdup(tok);
     free(tmp);
 }
