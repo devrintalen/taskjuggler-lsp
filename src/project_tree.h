@@ -151,10 +151,12 @@ void project_node_free_children(ProjectNode *root);
  * synthetic root.  On a second call the memoized result is returned
  * without recomputing.
  *
- * Concurrency: this mutates the dependency on first call.  Safe today
- * because the server holds docs_mutex for the full duration of every
- * notification and every query (single query worker).  The
- * TODO(workspace-snapshot) lock-free model must synchronize this memo.
+ * Concurrency: this mutates the dependency on first call.  Safe under the
+ * worker-pool model because each query worker resolves against its own
+ * per-Job deep copy of the project tree (project_node_deep_copy resets
+ * every dependency to DEP_UNRESOLVED), so the memo write is private to one
+ * worker and never shared.  Callers on the notification path mutate the
+ * live tree only while holding docs_mutex.
  *
  * @param owner_task    The ProjectNode task declaring the dependency.
  * @param dep_index     Index into @p owner_task's `dependencies` array;

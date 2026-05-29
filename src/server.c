@@ -21,12 +21,12 @@
 /* For the data-flow overview, document lifecycle, and query-dispatch
  * table, see doc/modules/server.rst.
  *
- * TODO(workspace-snapshot): query workers used to operate on a refcounted
- * workspace snapshot so they did not block notifications.  That model
- * relied on per-Document ParseResult refcounting and was retired during
- * the tj_node refactor.  Until a replacement lands, server_dispatch_query
- * acquires docs_mutex for the full handler so the live docs[] array stays
- * consistent under it.
+ * Concurrency: query workers run lock-free on a per-Job workspace_snapshot.
+ * The coordinator builds the snapshot under docs_mutex (server_snapshot_for_job)
+ * before handing the Job to a worker, so server_dispatch_query never touches
+ * the live docs[] array — it reads only the snapshot's private mmap slab
+ * copies and deep-copied project tree.  See the thread-safety contract in
+ * threadpool.c for the full invariant.
  */
 
 #include "server.h"

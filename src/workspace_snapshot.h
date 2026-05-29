@@ -61,9 +61,9 @@ typedef struct {
  *
  * `docs[primary_idx]` is the document the query is targeting; all
  * other slots are Documents in the same Project (extra completion
- * pools).  `project` is a deep copy of the primary Document's Project
- * tree with all dependency resolution reset to DEP_UNRESOLVED so the
- * copy can re-resolve lazily within its own node pointers.
+ * pools).  `project_root` is a deep copy of the primary Document's
+ * Project tree with all dependency resolution reset to DEP_UNRESOLVED so
+ * the copy can re-resolve lazily within its own node pointers.
  */
 typedef struct workspace_snapshot {
     doc_snapshot **docs;

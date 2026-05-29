@@ -476,10 +476,9 @@ static void dfs_compact(const tj_build_node *src, tj_idx node_idx,
     if (src->num_children > 0) {
         dst->children_start = (tj_idx)*children_cursor;
         dst->num_children   = src->num_children;
-        /* Pre-assign indices for children (DFS order) */
-        tj_idx child_base = node_idx + 1;
-        /* We need to know the starting index of each child.  Walk the subtree
-         * sizes to get them. */
+        /* Each child's index is this node's index + 1 plus the sizes of all
+         * earlier-sibling subtrees (DFS preorder numbering).  First pass:
+         * record each child's start index into the shared children array. */
         tj_idx cur = node_idx + 1;
         for (int i = 0; i < src->num_children; i++) {
             children_arr[(*children_cursor)++] = cur;
@@ -495,7 +494,6 @@ static void dfs_compact(const tj_build_node *src, tj_idx node_idx,
                         deps_arr, deps_cursor, pool, idx_map);
             cur += count_nodes(src->children[i]);
         }
-        (void)child_base;
     } else {
         dst->children_start = -1;
         dst->num_children   = 0;

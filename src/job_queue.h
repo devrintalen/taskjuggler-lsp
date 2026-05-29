@@ -31,22 +31,23 @@ struct workspace_snapshot;
  * One pending unit of work parsed off stdin by the reader thread and
  * waiting in a queue for a worker to consume.
  *
- * `request_doc` owns the parsed JSON-RPC envelope.  The worker is
+ * `request_doc` owns the parsed JSON-RPC envelope.  The consumer is
  * responsible for freeing it after dispatch.
  *
- * `is_notification` is set by the reader when classifying the message;
- * it determines which queue the Job lands on (the notification path runs
- * on a single worker; the query path feeds a pool).  Only true LSP
- * notifications (no `id`) ride the notification path; LSP requests —
- * including state-mutating lifecycle ones like initialize/shutdown —
- * are queries.
+ * Every Job is first enqueued on the reader's arrival-ordered work_queue.
+ * The coordinator then routes by classification (see threadpool.c):
+ *   - `is_notification` — true LSP notifications (no `id`).  Run inline on
+ *     the coordinator under docs_mutex so later messages observe their
+ *     effects.
+ *   - `is_lifecycle` — state-mutating lifecycle requests (initialize /
+ *     shutdown / semanticTokens) that must also run inline and in order.
+ *   - everything else is a plain query: the coordinator attaches a
+ *     `snapshot` and pushes it to the worker pool.
  *
- * TODO(workspace-snapshot): The previous design captured a refcounted
- * WorkspaceSnapshot at dispatch time so query workers could run lock-
- * free.  The snapshot model was tied to per-Document ParseResult
- * refcounts and was retired during the tj_node refactor.  Until a
- * replacement snapshotting strategy lands, server_dispatch_query()
- * serialises every handler under docs_mutex.
+ * `snapshot` is the per-Job workspace_snapshot pre-computed by the
+ * coordinator under docs_mutex (server_snapshot_for_job).  The query
+ * worker runs lock-free against it and never touches the live docs[]
+ * array.  Owned by the Job; NULL for notification / lifecycle Jobs.
  *
  * `id` / `has_id` carry the JSON-RPC request id as a first-class field
  * on the Job so $/cancelRequest can mark queued Jobs.  Notifications
@@ -54,7 +55,7 @@ struct workspace_snapshot;
  */
 typedef struct Job {
     yyjson_doc              *request_doc;
-    struct workspace_snapshot *snapshot;  /**< pre-computed by coordinator; owned; NULL for notifications */
+    struct workspace_snapshot *snapshot;  /**< pre-computed by coordinator; owned; NULL for notification/lifecycle jobs */
     int                      is_notification;
     int                      is_lifecycle;  /**< initialize/shutdown — run inline by coordinator */
     int                      is_cancelled;
