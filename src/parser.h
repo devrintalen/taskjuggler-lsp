@@ -246,16 +246,26 @@ typedef struct {
 } IncludeRef;
 
 /**
+ * Header for the mmap-backed page that owns the flat slab arrays.
+ * Placed at the very start of the mmap block; `total_mmap_size` is
+ * passed to `munmap()` when the slab is freed.
+ */
+typedef struct {
+    size_t total_mmap_size;
+} parse_page_header;
+
+/**
  * The complete output of a single parse() call for one document.
  *
- * All flat arrays (nodes, children, deps, tok_spans, strings) are
- * separately heap-allocated at Phase 1; Phase 2 will pack them into a
- * single mmap-backed page.  All arrays are owned by this struct and freed
- * by parse_slab_free().
+ * `page` is non-NULL when the flat arrays are packed into a single
+ * mmap-backed block (Phase 2+).  `parse_slab_free()` uses `munmap()`
+ * when `page != NULL` and plain `free()` otherwise (transition).
  *
  * root_idx is the index of the synthetic root node (keyword == 0).
  */
 typedef struct {
+    parse_page_header *page;            /**< NULL on Phase-1 malloc path */
+
     tj_node    *nodes;
     int         num_nodes;
 

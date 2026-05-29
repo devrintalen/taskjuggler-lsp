@@ -24,6 +24,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+/* ── Page-allocation helpers ─────────────────────────────────────────────── */
+
+static size_t g_page_size;
+
+static void init_page_size(void) {
+    if (!g_page_size)
+        g_page_size = (size_t)sysconf(_SC_PAGESIZE);
+}
+
+static size_t round_up_page(size_t n) {
+    init_page_size();
+    return (n + g_page_size - 1) & ~(g_page_size - 1);
+}
+
+/* Align offset up to the given alignment (must be a power of two). */
+#define ALIGN_SECTION(off, align) \
+    (((off) + (size_t)(align) - 1) & ~((size_t)(align) - 1))
 
 /* ── flex scanner interface ──────────────────────────────────────────────── *
  *
@@ -559,19 +579,73 @@ static parse_slab *parse_slab_compact(tj_build_node *build_root,
 
     free(idx_map.pairs);
 
-    /* Assemble the slab */
+    /* ── Pack everything into a single mmap-backed page ── */
+
+    /* Compute section offsets with natural alignment. */
+    size_t off = sizeof(parse_page_header);
+    off = ALIGN_SECTION(off, _Alignof(tj_node));
+    size_t nodes_off = off;
+    off += (size_t)num_nodes * sizeof(tj_node);
+
+    off = ALIGN_SECTION(off, _Alignof(tj_idx));
+    size_t children_off = off;
+    off += (size_t)children_cursor * sizeof(tj_idx);
+
+    off = ALIGN_SECTION(off, _Alignof(Dependency));
+    size_t deps_off = off;
+    off += (size_t)deps_cursor * sizeof(Dependency);
+
+    off = ALIGN_SECTION(off, _Alignof(TokenSpan));
+    size_t spans_off = off;
+    off += (size_t)num_build_spans * sizeof(TokenSpan);
+
+    size_t strings_off = off;
+    off += pool.size;
+
+    size_t total_size = round_up_page(off);
+
+    void *page = mmap(NULL, total_size, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) {
+        fprintf(stderr, "taskjuggler-lsp: mmap failed\n"); exit(1);
+    }
+
+    parse_page_header *hdr = (parse_page_header *)page;
+    hdr->total_mmap_size = total_size;
+
+    memcpy((char *)page + nodes_off,   nodes,     (size_t)num_nodes      * sizeof(tj_node));
+    if (children_cursor)
+        memcpy((char *)page + children_off, children, (size_t)children_cursor * sizeof(tj_idx));
+    if (deps_cursor)
+        memcpy((char *)page + deps_off,    deps,      (size_t)deps_cursor     * sizeof(Dependency));
+    if (num_build_spans)
+        memcpy((char *)page + spans_off,   tok_spans, (size_t)num_build_spans  * sizeof(TokenSpan));
+    memcpy((char *)page + strings_off, pool.buf,  pool.size);
+
+    /* Free the temporary malloc'd intermediate arrays */
+    free(nodes);
+    free(children);
+    free(deps);
+    free(tok_spans);
+    free(pool.buf);
+
+    /* Assemble the slab, pointing into the page interior */
     parse_slab *slab = calloc(1, sizeof(parse_slab));
     if (!slab) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    slab->nodes               = nodes;
+    slab->page                = hdr;
+    slab->nodes               = (tj_node    *)((char *)page + nodes_off);
     slab->num_nodes           = num_nodes;
-    slab->children            = children;
+    slab->children            = children_cursor
+        ? (tj_idx      *)((char *)page + children_off) : NULL;
     slab->num_children_entries = children_cursor;
-    slab->deps                = deps;
+    slab->deps                = deps_cursor
+        ? (Dependency  *)((char *)page + deps_off) : NULL;
     slab->num_deps            = deps_cursor;
-    slab->tok_spans           = tok_spans;
+    slab->tok_spans           = num_build_spans
+        ? (TokenSpan   *)((char *)page + spans_off) : NULL;
     slab->num_tok_spans       = num_build_spans;
     slab->num_sem_entries     = num_sem_entries;
-    slab->strings             = pool.buf;
+    slab->strings             = (char *)page + strings_off;
     slab->strings_size        = pool.size;
     slab->root_idx            = 0;
     slab->includes            = includes;
@@ -584,11 +658,16 @@ static parse_slab *parse_slab_compact(tj_build_node *build_root,
 
 void parse_slab_free(parse_slab *slab) {
     if (!slab) return;
-    free(slab->nodes);
-    free(slab->children);
-    free(slab->deps);
-    free(slab->tok_spans);
-    free(slab->strings);
+    if (slab->page) {
+        munmap(slab->page, slab->page->total_mmap_size);
+    } else {
+        /* Fallback for any slab built without the mmap path. */
+        free(slab->nodes);
+        free(slab->children);
+        free(slab->deps);
+        free(slab->tok_spans);
+        free(slab->strings);
+    }
     for (int i = 0; i < slab->num_includes; i++) {
         free(slab->includes[i].filename);
         free(slab->includes[i].task_prefix);
