@@ -285,7 +285,8 @@ static int write_uint32(char *buf, uint32_t val) {
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
-void compute_semantic_tokens_data(const TokenSpan *spans, int num_spans,
+void compute_semantic_tokens_data(const parse_slab *slab,
+                                   const TokenSpan *spans, int num_spans,
                                    int num_sem_entries,
                                    uint32_t **out_buf, size_t *out_count) {
     /* Allocate flat integer buffer sized during the lexer pass; no realloc needed.
@@ -305,7 +306,7 @@ void compute_semantic_tokens_data(const TokenSpan *spans, int num_spans,
                    s->start.line, s->start.character,
                    s->end.line,   s->end.character,
                    token_type, modifiers,
-                   s->text,
+                   slab_str(slab, s->text_off),
                    &prev_line, &prev_char);
     }
 

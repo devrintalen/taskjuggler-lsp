@@ -83,17 +83,11 @@ typedef struct Document {
     int          disk_only;
     int          is_cc_root;        /**< 1 when this doc is named directly in compile_commands.json */
 
-    /* Parse-derived state.  `root` is a synthetic node whose children are
-     * every top-level declaration (tasks, accounts, resources/shifts,
-     * reports, and the project block) in source order.  It is non-NULL
-     * after a successful parse and NULL before one has happened (use
-     * `root` as the "has-parse" sentinel).  Freed and replaced wholesale
-     * by doc_install_parse(); freed by doc_free() on slot release. */
-    tj_node     *root;
-    TokenSpan   *tok_spans;
-    int          num_tok_spans;
-    int          tok_span_cap;
-    int          num_sem_entries;
+    /* Parse-derived state.  `slab` is non-NULL after a successful parse
+     * and NULL before one has happened (use `slab` as the "has-parse"
+     * sentinel).  Freed and replaced wholesale by doc_install_parse();
+     * freed by doc_free() on slot release. */
+    parse_slab  *slab;
 
     /* Prefixes applied to this Document by the includer's `include` block,
      * one per kind.  Populated by follow_includes() from the includer's
@@ -143,7 +137,7 @@ static int    g_cc_attempted   = 0;
 /* Forward declarations. */
 static char *normalize_uri(const char *raw_uri);
 static void  load_file_from_disk(const char *path);
-static void  follow_includes(const char *file_path, const ParseOutput *po);
+static void  follow_includes(const char *file_path, const parse_slab *slab);
 static void  rebuild_all_projects(void);
 static void  reload_compile_commands(void);
 static void  maybe_reload_compile_commands(void);
@@ -219,45 +213,18 @@ static Document *doc_alloc(const char *uri) {
     return NULL;
 }
 
-/** Release the parse-derived fields on @p d (per-kind tj_node trees,
- *  tokens, include filenames), zeroing each so the slot is reusable. */
+/** Release the parse-derived fields on @p d, zeroing each so the slot
+ *  is reusable. */
 static void doc_clear_parse_state(Document *d) {
-    tj_node_free(d->root);
-    d->root = NULL;
-
-    for (int i = 0; i < d->num_tok_spans; i++)
-        free(d->tok_spans[i].text);
-    free(d->tok_spans);
-    d->tok_spans       = NULL;
-    d->num_tok_spans   = 0;
-    d->tok_span_cap    = 0;
-    d->num_sem_entries = 0;
+    parse_slab_free(d->slab);
+    d->slab = NULL;
 }
 
-/** Move every parse-derived field that the Document keeps long-term out
- *  of @p po into @p d, releasing whatever @p d held previously.
- *  Includes are not part of that long-term state — callers consume them
- *  via follow_includes() before calling here; parse_output_free()
- *  releases the leftover include array along with the shell. */
-static void doc_install_parse(Document *d, ParseOutput *po) {
+/** Install @p slab as @p d's current parse state, releasing whatever
+ *  @p d held previously.  Ownership of @p slab transfers to @p d. */
+static void doc_install_parse(Document *d, parse_slab *slab) {
     doc_clear_parse_state(d);
-    if (po) {
-        d->root                = po->root;
-        d->tok_spans           = po->tok_spans;
-        d->num_tok_spans       = po->num_tok_spans;
-        d->tok_span_cap        = po->tok_span_cap;
-        d->num_sem_entries     = po->num_sem_entries;
-        /* Null out moved-out fields so parse_output_free only releases
-         * what po still owns: the includes array (whose strings live
-         * past follow_includes() because replace_string() strdups them)
-         * and the struct shell. */
-        po->root            = NULL;
-        po->tok_spans       = NULL;
-        po->num_tok_spans   = 0;
-        po->tok_span_cap    = 0;
-        po->num_sem_entries = 0;
-        parse_output_free(po);
-    }
+    d->slab = slab;
     atomic_fetch_add(&d->doc_version, 1);
 }
 
@@ -452,9 +419,9 @@ static void load_file_from_disk(const char *path) {
 
     document->text      = text;
     document->disk_only = 1;
-    ParseOutput *po = parse(text);
-    follow_includes(path, po);
-    doc_install_parse(document, po);
+    parse_slab *slab = parse(text);
+    follow_includes(path, slab);
+    doc_install_parse(document, slab);
 }
 
 /** Replace @p *slot with a fresh strdup of @p value (NULL when @p value
@@ -464,7 +431,7 @@ static void replace_string(char **slot, const char *value) {
     *slot = value ? strdup(value) : NULL;
 }
 
-static void follow_includes(const char *file_path, const ParseOutput *po) {
+static void follow_includes(const char *file_path, const parse_slab *slab) {
     /* Look up the includer Document so we can repopulate its
      * included_uris[] as we resolve each include below.  follow_includes
      * runs exactly once per parse, so clear any prior list before the
@@ -479,7 +446,7 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
         includer->num_included_uris = 0;
     }
 
-    if (!po || !po->num_includes) return;
+    if (!slab || !slab->num_includes) return;
 
     size_t path_len = strlen(file_path);
     const char *last_slash = NULL;
@@ -488,8 +455,8 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
     }
     size_t dir_len = last_slash ? (size_t)(last_slash - file_path) : 0;
 
-    for (int i = 0; i < po->num_includes; i++) {
-        const IncludeRef *inc = &po->includes[i];
+    for (int i = 0; i < slab->num_includes; i++) {
+        const IncludeRef *inc = &slab->includes[i];
         const char *filename = inc->filename;
         if (!filename) continue;
         size_t fname_len = strlen(filename);
@@ -713,9 +680,14 @@ static void projects_clear(void) {
  *  and the namespace the prefix path is resolved within; the project block
  *  is document-local metadata and is skipped. */
 static void copy_document_into_project(Project *p, Document *d) {
-    if (!d->root) return;
-    for (int i = 0; i < d->root->num_children; i++) {
-        tj_node    *child = d->root->children[i];
+    if (!d->slab) return;
+    tj_node *root = slab_node(d->slab, d->slab->root_idx);
+    if (!root) return;
+    tj_idx *kids = slab_children(d->slab, root);
+    for (int i = 0; i < root->num_children; i++) {
+        tj_idx      child_idx = kids[i];
+        tj_node    *child = slab_node(d->slab, child_idx);
+        if (!child) continue;
         const char *prefix;
         NodeKind    kind = node_kind_of(child->keyword);
         switch (child->keyword) {
@@ -734,7 +706,7 @@ static void copy_document_into_project(Project *p, Document *d) {
         ProjectNode *target = find_node_by_dotted_path(&p->root, prefix, kind);
         if (!target) continue;
         project_node_append_child(target,
-                                  project_node_from_tj(child, d->uri));
+                                  project_node_from_tj(d->slab, child_idx, d->uri));
     }
 }
 
@@ -784,7 +756,7 @@ static void project_populate_from_root(Project *p, Document *root) {
         Document *cur = queue[q_head++];
         for (int i = 0; i < cur->num_included_uris; i++) {
             Document *child = doc_find_by_uri(cur->included_uris[i]);
-            if (!child || !child->root) continue;
+            if (!child || !child->slab) continue;
             int seen = 0;
             for (int v = 0; v < v_len && !seen; v++)
                 if (visited[v] == child) seen = 1;
@@ -830,7 +802,7 @@ static void rebuild_all_projects(void) {
     /* Pass 1: compile_commands roots + their include closures. */
     for (int i = 0; i < MAX_DOCS; i++) {
         Document *root = &docs[i];
-        if (!root->in_use || !root->is_cc_root || !root->root) continue;
+        if (!root->in_use || !root->is_cc_root || !root->slab) continue;
 
         Project *p = calloc(1, sizeof(*p));
         if (!p) continue;
@@ -845,7 +817,7 @@ static void rebuild_all_projects(void) {
      * prefix; the doc is its sole member. */
     for (int i = 0; i < MAX_DOCS; i++) {
         Document *d = &docs[i];
-        if (!d->in_use || !d->root || d->primary_project) continue;
+        if (!d->in_use || !d->slab || d->primary_project) continue;
 
         Project *p = calloc(1, sizeof(*p));
         if (!p) continue;
@@ -977,21 +949,24 @@ static void maybe_reload_compile_commands(void) {
     }
 }
 
-/** Recursively sum the `num_dependencies` across @p n and its subtree. */
-static int dependency_count_subtree(const tj_node *n) {
+static int dependency_count_subtree(const parse_slab *slab, const tj_node *n) {
     if (!n) return 0;
     int total = n->num_dependencies;
+    tj_idx *kids = slab_children(slab, n);
     for (int i = 0; i < n->num_children; i++)
-        total += dependency_count_subtree(n->children[i]);
+        total += dependency_count_subtree(slab, slab_node(slab, kids[i]));
     return total;
 }
 
-/** True when @p d declares a project block (scans root's top-level
- *  children for a KW_PROJECT node). */
 static int doc_has_project_block(const Document *d) {
-    if (!d->root) return 0;
-    for (int i = 0; i < d->root->num_children; i++)
-        if (d->root->children[i]->keyword == KW_PROJECT) return 1;
+    if (!d->slab) return 0;
+    tj_node *root = slab_node(d->slab, d->slab->root_idx);
+    if (!root) return 0;
+    tj_idx *kids = slab_children(d->slab, root);
+    for (int i = 0; i < root->num_children; i++) {
+        tj_node *child = slab_node(d->slab, kids[i]);
+        if (child && child->keyword == KW_PROJECT) return 1;
+    }
     return 0;
 }
 
@@ -1022,11 +997,12 @@ static void dump_docs_to_stderr(const char *trigger) {
                           ? (docs[i].primary_project->id
                               ? docs[i].primary_project->id : "(no-id)")
                           : "(none)";
-        int deps = dependency_count_subtree(docs[i].root);
+        tj_node *dbg_root = docs[i].slab ? slab_node(docs[i].slab, docs[i].slab->root_idx) : NULL;
+        int deps = dependency_count_subtree(docs[i].slab, dbg_root);
         fprintf(stderr, "  [%2d] %c%c%c%c  proj=%s  deps=%d  %s\n",
                 i,
                 docs[i].disk_only          ? 'D' : 'd',
-                docs[i].root               ? 'P' : '-',
+                docs[i].slab               ? 'P' : '-',
                 doc_has_project_block(&docs[i]) ? 'R' : '-',
                 docs[i].is_cc_root         ? 'C' : '-',
                 pid,
@@ -1233,9 +1209,9 @@ static void handle_did_change_watched_files(yyjson_val *params) {
             free(document->text);
             document->text      = text;
             document->disk_only = 1;
-            ParseOutput *po = parse(text);
-            follow_includes(path, po);
-            doc_install_parse(document, po);
+            parse_slab *slab = parse(text);
+            follow_includes(path, slab);
+            doc_install_parse(document, slab);
             free(path);
             changed = 1;
         }
@@ -1278,9 +1254,9 @@ static void handle_did_rename_files(yyjson_val *params) {
         free(new_doc->text);
         new_doc->text      = text;
         new_doc->disk_only = 1;
-        ParseOutput *po = parse(text);
-        follow_includes(path, po);
-        doc_install_parse(new_doc, po);
+        parse_slab *slab = parse(text);
+        follow_includes(path, slab);
+        doc_install_parse(new_doc, slab);
         free(path);
         changed = 1;
     }
@@ -1314,14 +1290,14 @@ static void handle_didopen(yyjson_val *params) {
     }
     d->disk_only = 0;
     d->text  = strdup(text);
-    ParseOutput *po = parse(text);
+    parse_slab *slab = parse(text);
 
     char *path = uri_to_path(uri);
     if (path) {
-        follow_includes(path, po);
+        follow_includes(path, slab);
         free(path);
     }
-    doc_install_parse(d, po);
+    doc_install_parse(d, slab);
 
     revalidate_all_docs();
 }
@@ -1367,14 +1343,14 @@ static void handle_didchange(yyjson_val *params) {
 
     free(d->text);
     d->text = current;
-    ParseOutput *po = parse(d->text);
+    parse_slab *slab = parse(d->text);
 
     char *path = uri_to_path(uri);
     if (path) {
-        follow_includes(path, po);
+        follow_includes(path, slab);
         free(path);
     }
-    doc_install_parse(d, po);
+    doc_install_parse(d, slab);
 
     revalidate_all_docs();
 }
@@ -1397,9 +1373,9 @@ static void handle_didclose(yyjson_val *params) {
         free(d->text);
         d->text      = text;
         d->disk_only = 1;
-        ParseOutput *po = parse(text);
-        follow_includes(path, po);
-        doc_install_parse(d, po);
+        parse_slab *slab = parse(text);
+        follow_includes(path, slab);
+        doc_install_parse(d, slab);
     } else {
         publish_diagnostics(uri);
         doc_free(d);
@@ -1417,33 +1393,23 @@ static void handle_didclose(yyjson_val *params) {
  * snapshot machinery was retired.
  */
 
-/** A document's top-level symbol pool: the children of its synthetic
- *  `root`, in source order, or an empty pool when @p d has no parse.
- *  The pointers are borrowed from @p d — never freed by the caller. */
-static void doc_symbol_pool(const Document *d, tj_node *const **out_top, int *out_n) {
-    if (d && d->root) {
-        *out_top = (tj_node *const *)d->root->children;
-        *out_n   = d->root->num_children;
-    } else {
-        *out_top = NULL;
-        *out_n   = 0;
-    }
+/** Get the root node's children index array and count for @p d's slab.
+ *  Returns NULL/0 when @p d has no parse. */
+static tj_idx *doc_kids(const Document *d, int *out_n) {
+    if (!d || !d->slab) { *out_n = 0; return NULL; }
+    tj_node *root = slab_node(d->slab, d->slab->root_idx);
+    if (!root) { *out_n = 0; return NULL; }
+    *out_n = root->num_children;
+    return slab_children(d->slab, root);
 }
 
 static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
                                                yyjson_val *params, Document *d) {
     (void)params;
-    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    /* root->children are already every top-level declaration in source
-     * order (project block included).  TODO(document-symbol): once the
-     * project block reliably contains its children in the hierarchical
-     * sense, nest the in-project entries under it. */
-    tj_node *const *top = (tj_node *const *)d->root->children;
-    int             w   = d->root->num_children;
+    if (!d || !d->slab) return make_response(doc, id, yyjson_mut_null(doc));
 
     size_t  json_len = 0;
-    char   *json     = build_document_symbols_json(top, w, &json_len);
+    char   *json     = build_document_symbols_json(d->slab, d->slab->root_idx, &json_len);
     if (!json) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_mut_val *raw = yyjson_mut_rawncpy(doc, json, json_len);
     free(json);
@@ -1461,10 +1427,10 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
  * does not resolve. */
 static ProjectNode *project_node_for_doc_task(const Document *d,
                                               const tj_node *per_doc_task) {
-    if (!d || !d->primary_project || !per_doc_task) return NULL;
+    if (!d || !d->primary_project || !per_doc_task || !d->slab) return NULL;
     Project *p = d->primary_project;
 
-    char *qid = sym_qualified_id(per_doc_task);   /* unprefixed in-file path */
+    char *qid = sym_qualified_id(d->slab, per_doc_task);   /* unprefixed in-file path */
     if (!qid || !qid[0]) { free(qid); return NULL; }
 
     ProjectNode *cur = find_node_by_dotted_path(&p->root, d->task_prefix,
@@ -1486,28 +1452,26 @@ static ProjectNode *project_node_for_doc_task(const Document *d,
 static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
                                              yyjson_val *params, Document *d) {
     (void)params;
-    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->slab) return make_response(doc, id, yyjson_mut_null(doc));
 
-    tj_node *const *top; int n;
-    doc_symbol_pool(d, &top, &n);
-    yyjson_mut_val *arr = build_folding_ranges_json(doc,
-                                                     d->tok_spans,
-                                                     d->num_tok_spans,
-                                                     top, n);
+    yyjson_mut_val *arr = build_folding_ranges_json(doc, d->slab,
+                                                     d->slab->tok_spans,
+                                                     d->slab->num_tok_spans,
+                                                     d->slab->root_idx);
     return make_response(doc, id, arr);
 }
 
 static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
                                          yyjson_val *params, Document *d) {
     (void)params;
-    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->slab) return make_response(doc, id, yyjson_mut_null(doc));
 
-    tj_node *const *top; int n;
-    doc_symbol_pool(d, &top, &n);
-    yyjson_mut_val *arr = build_code_lens_json(doc,
-                                                d->tok_spans,
-                                                d->num_tok_spans,
-                                                top, n);
+    int n; tj_idx *kids = doc_kids(d, &n);
+    yyjson_mut_val *arr = build_code_lens_json(doc, d->slab,
+                                                d->slab->tok_spans,
+                                                d->slab->num_tok_spans,
+                                                NULL, n);
+    (void)kids;
     return make_response(doc, id, arr);
 }
 
@@ -1520,22 +1484,20 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->slab) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
 
-    /* A cursor on a dependency reference resolves to its target task; show
-     * the target's qualified id and name.  Falls through to keyword docs
-     * when the cursor is not on a dependency or the reference is unresolved. */
     tj_node          *owner = NULL;
     const Dependency *dep   = NULL;
     if (d->primary_project &&
-        dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
+        dependency_at_cursor(d->slab,
+                             d->slab->tok_spans, d->slab->num_tok_spans, pos,
                              &owner, &dep)) {
         ProjectNode *merged_owner = project_node_for_doc_task(d, owner);
         ProjectNode *target = NULL;
         if (merged_owner) {
-            int ordinal = (int)(dep - owner->dependencies);
+            int ordinal = (int)(dep - slab_deps(d->slab, owner));
             if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
                 target = project_dep_resolve(merged_owner, ordinal,
                                              &d->primary_project->root);
@@ -1555,8 +1517,8 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
         }
     }
 
-    ActiveKeyword ak = active_keyword_at(d->tok_spans,
-                                          d->num_tok_spans, pos);
+    ActiveKeyword ak = active_keyword_at(d->slab, d->slab->tok_spans,
+                                          d->slab->num_tok_spans, pos);
     if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     const char *doc_text = keyword_docs(ak.keyword);
@@ -1583,11 +1545,11 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
 
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->slab) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-    ActiveContext ac = active_context(d->tok_spans,
-                                       d->num_tok_spans, pos);
+    ActiveContext ac = active_context(d->slab, d->slab->tok_spans,
+                                       d->slab->num_tok_spans, pos);
     if (!ac.keyword) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_mut_val *sig = build_signature_help_json(doc, ac.keyword, ac.arg_count);
@@ -1607,13 +1569,14 @@ static char *mint_sem_tokens_result_id(Document *d) {
 static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
                                                     yyjson_val *params, Document *d) {
     (void)params;
-    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->slab) return make_response(doc, id, yyjson_mut_null(doc));
 
     uint32_t *buf = NULL;
     size_t    count = 0;
-    compute_semantic_tokens_data(d->tok_spans,
-                                  d->num_tok_spans,
-                                  d->num_sem_entries,
+    compute_semantic_tokens_data(d->slab,
+                                  d->slab->tok_spans,
+                                  d->slab->num_tok_spans,
+                                  d->slab->num_sem_entries,
                                   &buf, &count);
 
     char *result_id = mint_sem_tokens_result_id(d);
@@ -1625,13 +1588,14 @@ static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_v
 static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yyjson_val *id,
                                                           yyjson_val *params, Document *d) {
     const char *previous_result_id = params ? json_str(params, "previousResultId") : NULL;
-    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->slab) return make_response(doc, id, yyjson_mut_null(doc));
 
     uint32_t *new_buf = NULL;
     size_t    new_count = 0;
-    compute_semantic_tokens_data(d->tok_spans,
-                                  d->num_tok_spans,
-                                  d->num_sem_entries,
+    compute_semantic_tokens_data(d->slab,
+                                  d->slab->tok_spans,
+                                  d->slab->num_tok_spans,
+                                  d->slab->num_sem_entries,
                                   &new_buf, &new_count);
 
     char *result_id = mint_sem_tokens_result_id(d);
@@ -1654,12 +1618,13 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->slab) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
     if (!d->primary_project) return make_response(doc, id, yyjson_mut_null(doc));
 
-    tj_node *task = task_decl_at_cursor(d->tok_spans, d->num_tok_spans, pos);
+    tj_node *task = task_decl_at_cursor(d->slab, d->slab->tok_spans,
+                                         d->slab->num_tok_spans, pos);
     ProjectNode *wanted = project_node_for_doc_task(d, task);
     yyjson_mut_val *result = build_references_json(doc,
                                                     &d->primary_project->root,
@@ -1673,16 +1638,16 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
                                                   yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->slab) return make_response(doc, id, yyjson_mut_null(doc));
 
-    tj_node *const *top; int n;
-    doc_symbol_pool(d, &top, &n);
+    int n; tj_idx *kids = doc_kids(d, &n);
+    (void)kids;
 
     LspPos pos = json_to_pos(pos_obj);
-    yyjson_mut_val *result = build_document_highlight_json(doc,
-                                                            top, n,
-                                                            d->tok_spans,
-                                                            d->num_tok_spans,
+    yyjson_mut_val *result = build_document_highlight_json(doc, d->slab,
+                                                            NULL, n,
+                                                            d->slab->tok_spans,
+                                                            d->slab->num_tok_spans,
                                                             pos);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1692,7 +1657,7 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params, Document *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->slab) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
     if (!d->primary_project) return make_response(doc, id, yyjson_mut_null(doc));
@@ -1700,11 +1665,12 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
     tj_node          *owner = NULL;
     const Dependency *dep   = NULL;
     yyjson_mut_val   *result = NULL;
-    if (dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
+    if (dependency_at_cursor(d->slab,
+                             d->slab->tok_spans, d->slab->num_tok_spans, pos,
                              &owner, &dep)) {
         ProjectNode *merged_owner = project_node_for_doc_task(d, owner);
         if (merged_owner) {
-            int ordinal = (int)(dep - owner->dependencies);
+            int ordinal = (int)(dep - slab_deps(d->slab, owner));
             if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
                 result = build_definition_json(doc, merged_owner, ordinal,
                                                &d->primary_project->root);
@@ -1722,41 +1688,40 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
 
     yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!pos_obj || !d || !d->slab) return make_response(doc, id, yyjson_mut_null(doc));
 
-    /* Gather top-level nodes of every other Document in the requester's
-     * project as extra pools.  Skips:
-     *   - the requester itself (its symbols are in `self_top`)
+    /* Gather top-level children index arrays of every other Document in
+     * the requester's project as extra pools.  Skips:
+     *   - the requester itself (its symbols are in the primary kids)
      *   - docs in a different project (cross-project bleed)
      * Orphans are singleton projects, so the loop naturally yields no
      * extras for them — correct behavior.  disk_only project members
      * ARE included: a .tji pulled in via include is a legitimate
      * cross-file completion source. */
-    tj_node *const *extra_pools[MAX_DOCS];
-    int             extra_counts[MAX_DOCS];
-    int             num_extra = 0;
+    const tj_idx *extra_pools[MAX_DOCS];
+    int           extra_counts[MAX_DOCS];
+    int           num_extra = 0;
     for (int i = 0; i < MAX_DOCS && num_extra < MAX_DOCS; i++) {
-        if (!docs[i].in_use) continue;
+        if (!docs[i].in_use || !docs[i].slab) continue;
         if (&docs[i] == d) continue;
         if (!d->primary_project) continue;
         if (docs[i].primary_project != d->primary_project) continue;
-        tj_node *const *top; int n;
-        doc_symbol_pool(&docs[i], &top, &n);
-        if (!top) continue;
-        extra_pools[num_extra]  = top;
+        int n; tj_idx *kids = doc_kids(&docs[i], &n);
+        if (!kids) continue;
+        extra_pools[num_extra]  = kids;
         extra_counts[num_extra] = n;
         num_extra++;
     }
 
-    tj_node *const *self_top; int self_n;
-    doc_symbol_pool(d, &self_top, &self_n);
+    int self_n; tj_idx *self_kids = doc_kids(d, &self_n);
 
     LspPos pos             = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_completions_json(doc,
-                                                     d->tok_spans,
-                                                     d->num_tok_spans,
+                                                     d->slab,
+                                                     d->slab->tok_spans,
+                                                     d->slab->num_tok_spans,
                                                      pos,
-                                                     self_top, self_n,
+                                                     self_kids, self_n,
                                                      extra_pools,
                                                      extra_counts,
                                                      num_extra,
@@ -1771,11 +1736,8 @@ static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use || !docs[i].root) continue;
-        tj_node *const *top; int n;
-        doc_symbol_pool(&docs[i], &top, &n);
-        if (!top) continue;
-        collect_workspace_symbols(doc, query, top, n, docs[i].uri, arr);
+        if (!docs[i].in_use || !docs[i].slab) continue;
+        collect_workspace_symbols(doc, query, docs[i].slab, docs[i].uri, arr);
     }
     return make_response(doc, id, arr);
 }

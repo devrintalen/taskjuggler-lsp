@@ -24,30 +24,18 @@
 #include <string.h>
 #include <strings.h>
 
-/**
- * Recursively walk @p syms, appending matching SymbolInformation entries
- * to @p arr.  Recurses into every node's children regardless of whether
- * the node itself matched.
- *
- * @param doc        Destination mutable JSON document.
- * @param query      Case-insensitive substring filter; `""` matches
- *                   everything.
- * @param syms       Sibling symbols to search.
- * @param n          Length of @p syms.
- * @param uri        Document URI to embed in each Location result.
- * @param container  Name of the parent symbol, or NULL at the top level.
- * @param arr        SymbolInformation[] array to append matches to.
- */
 static void collect_recursive(yyjson_mut_doc *doc, const char *query,
-                               tj_node *const *syms, int n,
+                               const parse_slab *slab,
+                               const tj_idx *kids, int n,
                                const char *uri, const char *container,
                                yyjson_mut_val *arr)
 {
     for (int i = 0; i < n; i++) {
-        const tj_node *sym = syms[i];
-        const char *name = sym->name ? sym->name : "";
+        const tj_node *sym = slab_node(slab, kids[i]);
+        if (!sym) continue;
+        const char *name = slab_str(slab, sym->name_off);
+        if (!name) name = "";
 
-        /* Empty query matches everything; otherwise case-insensitive substring. */
         int matches = (query[0] == '\0') || (strcasestr(name, query) != NULL);
 
         if (matches) {
@@ -66,26 +54,20 @@ static void collect_recursive(yyjson_mut_doc *doc, const char *query,
             yyjson_mut_arr_add_val(arr, entry);
         }
 
-        if (sym->num_children > 0)
-            collect_recursive(doc, query,
-                              sym->children, sym->num_children,
+        if (sym->num_children > 0) {
+            tj_idx *child_kids = slab_children(slab, sym);
+            collect_recursive(doc, query, slab, child_kids, sym->num_children,
                               uri, name, arr);
+        }
     }
 }
 
-/* Append all symbols from syms[] that match query to the JSON array arr.
- * Entry point called by the server for each open document.
- *
- * doc   — the mutable JSON document that will own new values
- * query — case-insensitive substring filter; "" matches everything
- * syms  — root-level symbol array for this document
- * n     — number of entries in syms
- * uri   — document URI used in Location results
- * arr   — shared JSON array to append results to (across all documents)
- */
 void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
-                                tj_node *const *syms, int n,
+                                const parse_slab *slab,
                                 const char *uri, yyjson_mut_val *arr)
 {
-    collect_recursive(doc, query, syms, n, uri, NULL, arr);
+    tj_node *root = slab_node(slab, slab->root_idx);
+    if (!root) return;
+    tj_idx *kids = slab_children(slab, root);
+    collect_recursive(doc, query, slab, kids, root->num_children, uri, NULL, arr);
 }

@@ -37,21 +37,27 @@ extern void            yy_delete_buffer(YY_BUFFER_STATE buf);
 extern int             yycolumn;
 extern int             yylineno;
 
-/* ── Shared globals (used by lexer.l and grammar.y via extern) ───────────── */
+/* ── Build-context globals (used by lexer.l and grammar.y via extern) ────── *
+ *
+ * The build context accumulates parse state during yyparse().  After
+ * yyparse() returns, parse_slab_compact() walks these arrays and produces
+ * the final parse_slab.
+ */
 
-/** Currently-being-built ParseOutput; lexer/grammar populate this directly. */
-/* Defined in grammar.y.  Called at the start of every parse() so that a
- * partial include-body parse from a previous run cannot leak its pending
- * prefix strings into the next parse. */
 extern void reset_pending_include_state(void);
 
-ParseOutput *g_output         = NULL;
-/** Backing storage for the token-span array under construction. */
-TokenSpan   *g_tok_spans      = NULL;
-int          g_num_tok_spans  = 0;
-int          g_tok_span_cap   = 0;
+/* Root of the build tree; grammar.y appends top-level nodes here. */
+tj_build_node   *g_build_root     = NULL;
+/* IncludeRef accumulator; grammar.y calls push_include_to_build(). */
+IncludeRef      *g_build_includes = NULL;
+int              g_build_num_includes = 0;
+int              g_build_includes_cap = 0;
+/* TokenSpan accumulator populated by g_push_tok_span() called from lexer.l. */
+tok_span_build  *g_tok_spans      = NULL;
+int              g_num_tok_spans  = 0;
+int              g_tok_span_cap   = 0;
 /** Running upper bound on emitted semantic-token entries (one per source line covered). */
-int          g_num_sem_entries = 0;
+int              g_num_sem_entries = 0;
 
 /**
  * Test whether a token of @p kind is emitted as a semantic token.
@@ -63,8 +69,8 @@ static int is_sem_highlighted(int kind) {
 }
 
 /**
- * Append one TokenSpan to the global accumulator.  Called from lexer.l for
- * every token that callers may need to inspect.
+ * Append one tok_span_build to the global accumulator.  Called from lexer.l
+ * for every token that callers may need to inspect.
  */
 void g_push_tok_span(int kind,
                      uint32_t sl, uint32_t sc,
@@ -72,12 +78,12 @@ void g_push_tok_span(int kind,
                      const char *text) {
     if (g_num_tok_spans >= g_tok_span_cap) {
         g_tok_span_cap = g_tok_span_cap ? g_tok_span_cap * 2 : 64;
-        TokenSpan *tmp = realloc(g_tok_spans,
-                                 (size_t)g_tok_span_cap * sizeof(TokenSpan));
+        tok_span_build *tmp = realloc(g_tok_spans,
+                                      (size_t)g_tok_span_cap * sizeof(tok_span_build));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         g_tok_spans = tmp;
     }
-    g_tok_spans[g_num_tok_spans++] = (TokenSpan){
+    g_tok_spans[g_num_tok_spans++] = (tok_span_build){
         .token_kind = kind,
         .start      = { sl, sc },
         .end        = { el, ec },
@@ -109,9 +115,9 @@ int parse_tjp_date(const char *text, time_t *out) {
     return 1;
 }
 
-/* ── tj_node helpers ─────────────────────────────────────────────────────── */
+/* ── tj_build_node helpers ───────────────────────────────────────────────── */
 
-void tj_node_free(tj_node *n) {
+void tj_build_node_free(tj_build_node *n) {
     if (!n) return;
     free(n->id);
     free(n->name);
@@ -119,15 +125,16 @@ void tj_node_free(tj_node *n) {
         free(n->dependencies[i].path);
     free(n->dependencies);
     for (int i = 0; i < n->num_children; i++)
-        tj_node_free(n->children[i]);
+        tj_build_node_free(n->children[i]);
     free(n->children);
     free(n);
 }
 
-void tj_node_append_child(tj_node *parent, tj_node *child) {
+void tj_build_node_append_child(tj_build_node *parent, tj_build_node *child) {
     if (parent->num_children >= parent->children_cap) {
         int nc = parent->children_cap ? parent->children_cap * 2 : 4;
-        tj_node **tmp = realloc(parent->children, (size_t)nc * sizeof(tj_node *));
+        tj_build_node **tmp = realloc(parent->children,
+                                      (size_t)nc * sizeof(tj_build_node *));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         parent->children     = tmp;
         parent->children_cap = nc;
@@ -136,11 +143,11 @@ void tj_node_append_child(tj_node *parent, tj_node *child) {
     child->parent_node = parent;
 }
 
-void tj_node_push_dependency(tj_node *task, Dependency dep) {
+void tj_build_node_push_dep(tj_build_node *task, dep_build dep) {
     if (task->num_dependencies >= task->dependencies_cap) {
         int nc = task->dependencies_cap ? task->dependencies_cap * 2 : 4;
-        Dependency *tmp = realloc(task->dependencies,
-                                  (size_t)nc * sizeof(Dependency));
+        dep_build *tmp = realloc(task->dependencies,
+                                  (size_t)nc * sizeof(dep_build));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         task->dependencies     = tmp;
         task->dependencies_cap = nc;
@@ -149,39 +156,19 @@ void tj_node_push_dependency(tj_node *task, Dependency dep) {
     task->dependencies[task->num_dependencies++] = dep;
 }
 
-/* ── ParseOutput helpers ─────────────────────────────────────────────────── */
+/* ── Build-context helpers ───────────────────────────────────────────────── */
 
-static tj_node *alloc_synthetic_root(void) {
-    tj_node *n = calloc(1, sizeof(tj_node));
+static tj_build_node *alloc_build_root(void) {
+    tj_build_node *n = calloc(1, sizeof(tj_build_node));
     if (!n) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     return n;
 }
 
-void parse_output_free(ParseOutput *po) {
-    if (!po) return;
-    tj_node_free(po->root);
-
-    for (int i = 0; i < po->num_tok_spans; i++)
-        free(po->tok_spans[i].text);
-    free(po->tok_spans);
-
-    for (int i = 0; i < po->num_includes; i++) {
-        free(po->includes[i].filename);
-        free(po->includes[i].task_prefix);
-        free(po->includes[i].resource_prefix);
-        free(po->includes[i].account_prefix);
-        free(po->includes[i].report_prefix);
-    }
-    free(po->includes);
-
-    free(po);
-}
-
-void push_include(ParseOutput *po, const char *quoted_text,
-                  const char *task_prefix,
-                  const char *resource_prefix,
-                  const char *account_prefix,
-                  const char *report_prefix) {
+void push_include_to_build(const char *quoted_text,
+                           const char *task_prefix,
+                           const char *resource_prefix,
+                           const char *account_prefix,
+                           const char *report_prefix) {
     if (!quoted_text) return;
     size_t len = strlen(quoted_text);
     const char *inner = quoted_text;
@@ -195,14 +182,14 @@ void push_include(ParseOutput *po, const char *quoted_text,
     memcpy(filename, inner, inner_len);
     filename[inner_len] = '\0';
 
-    if (po->num_includes >= po->includes_cap) {
-        int nc = po->includes_cap ? po->includes_cap * 2 : 4;
-        IncludeRef *tmp = realloc(po->includes, (size_t)nc * sizeof(IncludeRef));
+    if (g_build_num_includes >= g_build_includes_cap) {
+        int nc = g_build_includes_cap ? g_build_includes_cap * 2 : 4;
+        IncludeRef *tmp = realloc(g_build_includes, (size_t)nc * sizeof(IncludeRef));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        po->includes     = tmp;
-        po->includes_cap = nc;
+        g_build_includes     = tmp;
+        g_build_includes_cap = nc;
     }
-    IncludeRef *e = &po->includes[po->num_includes++];
+    IncludeRef *e = &g_build_includes[g_build_num_includes++];
     e->filename        = filename;
     e->task_prefix     = task_prefix     ? strdup(task_prefix)     : NULL;
     e->resource_prefix = resource_prefix ? strdup(resource_prefix) : NULL;
@@ -210,46 +197,31 @@ void push_include(ParseOutput *po, const char *quoted_text,
     e->report_prefix   = report_prefix   ? strdup(report_prefix)   : NULL;
 }
 
-/* ── tj_node tree linkage ────────────────────────────────────────────────── *
- *
- * After the grammar finishes building the trees, we walk each per-kind
- * root to set parent_node / parent_doc pointers consistently, and to
- * assign owners to every TokenSpan.
- */
+/* ── Parent-link assignment on the build tree ────────────────────────────── */
 
-/** Recursively set parent_node and parent_doc fields across one subtree. */
-static void assign_parent_links(tj_node *parent, tj_node **children, int n,
-                                tj_node *doc_root) {
-    /* doc_root is non-NULL only for the top-level frame (children directly
-     * under a per-kind synthetic root).  Once we recurse into a real child,
-     * deeper descendants live INSIDE that child, so their parent_doc must
-     * be NULL — they are no longer top-level entries. */
+static void assign_parent_links_build(tj_build_node *parent,
+                                      tj_build_node **children, int n,
+                                      tj_build_node *doc_root) {
     for (int i = 0; i < n; i++) {
         children[i]->parent_node = parent;
         children[i]->parent_doc  = doc_root;
-        assign_parent_links(children[i], children[i]->children,
-                            children[i]->num_children, NULL);
+        assign_parent_links_build(children[i], children[i]->children,
+                                  children[i]->num_children, NULL);
     }
 }
 
-/**
- * Walk the four per-kind trees in source order and assign each TokenSpan
- * its innermost-enclosing tj_node as `owner`.
- *
- * Strategy: take root's top-level children (already in source order),
- * then use the standard single-pass scope-stack algorithm to assign
- * owners.
- */
-typedef struct {
-    tj_node **children;
-    int       n;
-    int       idx;
-    tj_node  *scope;
-} OwnerFrame;
+/* ── Token-owner assignment on the build tree ────────────────────────────── */
 
-static int compare_node_starts(const void *a, const void *b) {
-    const tj_node *na = *(const tj_node *const *)a;
-    const tj_node *nb = *(const tj_node *const *)b;
+typedef struct {
+    tj_build_node **children;
+    int             n;
+    int             idx;
+    tj_build_node  *scope;
+} owner_frame;
+
+static int compare_build_node_starts(const void *a, const void *b) {
+    const tj_build_node *na = *(const tj_build_node *const *)a;
+    const tj_build_node *nb = *(const tj_build_node *const *)b;
     return pos_cmp(na->range.start, nb->range.start);
 }
 
@@ -258,34 +230,21 @@ static int range_within(LspRange inner, LspRange outer) {
            pos_cmp(inner.end, outer.end) <= 0;
 }
 
-static void assign_token_owners(ParseOutput *po) {
-    tj_node *root = po->root;
+static void assign_token_owners_build(tj_build_node *root,
+                                      tok_span_build *spans, int num_spans) {
     if (!root) return;
 
-    /* The project block (if any) is a top-level child like the rest, but
-     * its body declarations were hoisted to siblings under root (the
-     * project node keeps no children) while its range still spans them.
-     * For ownership we must restore that nesting: any sibling whose range
-     * falls within the project's range becomes a scope-child of the
-     * project, so tokens inside it resolve to the node rather than
-     * dead-ending on the childless project.  Siblings outside the
-     * project's range (declared after the project block) stay as true
-     * top-level entries. */
-    tj_node *project = NULL;
+    tj_build_node *project = NULL;
     for (int i = 0; i < root->num_children; i++)
         if (root->children[i]->keyword == KW_PROJECT) {
             project = root->children[i];
             break;
         }
 
-    /* hoisted = every top-level child except the project node itself.
-     * (When a project node is present num_children is at least 1, so this
-     * cannot go negative; the clamp makes that explicit for the size
-     * computations below.) */
     int hoisted_n = root->num_children - (project ? 1 : 0);
     if (hoisted_n < 0) hoisted_n = 0;
-    tj_node **hoisted = hoisted_n
-        ? malloc((size_t)hoisted_n * sizeof(tj_node *))
+    tj_build_node **hoisted = hoisted_n
+        ? malloc((size_t)hoisted_n * sizeof(tj_build_node *))
         : NULL;
     if (hoisted_n && !hoisted) {
         fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
@@ -294,16 +253,15 @@ static void assign_token_owners(ParseOutput *po) {
     for (int i = 0; i < root->num_children; i++)
         if (root->children[i] != project) hoisted[h++] = root->children[i];
 
-    /* Top-level scope frame plus the project's synthetic scope-children. */
-    tj_node **top = malloc((size_t)(hoisted_n + 1) * sizeof(tj_node *));
+    tj_build_node **top = malloc((size_t)(hoisted_n + 1) * sizeof(tj_build_node *));
     if (!top) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     int top_n = 0;
-    tj_node **proj_kids = NULL;
-    int       proj_kids_n = 0;
+    tj_build_node **proj_kids = NULL;
+    int              proj_kids_n = 0;
 
     if (project) {
         proj_kids = hoisted_n
-            ? malloc((size_t)hoisted_n * sizeof(tj_node *))
+            ? malloc((size_t)hoisted_n * sizeof(tj_build_node *))
             : NULL;
         if (hoisted_n && !proj_kids) {
             fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
@@ -316,53 +274,54 @@ static void assign_token_owners(ParseOutput *po) {
         }
         top[top_n++] = project;
         if (proj_kids_n > 1)
-            qsort(proj_kids, (size_t)proj_kids_n, sizeof(tj_node *), compare_node_starts);
+            qsort(proj_kids, (size_t)proj_kids_n,
+                  sizeof(tj_build_node *), compare_build_node_starts);
     } else {
         for (int i = 0; i < hoisted_n; i++) top[top_n++] = hoisted[i];
     }
     if (top_n > 1)
-        qsort(top, (size_t)top_n, sizeof(tj_node *), compare_node_starts);
+        qsort(top, (size_t)top_n, sizeof(tj_build_node *), compare_build_node_starts);
 
     int frame_cap = 64;
-    OwnerFrame *stack = malloc((size_t)frame_cap * sizeof(OwnerFrame));
+    owner_frame *stack = malloc((size_t)frame_cap * sizeof(owner_frame));
     if (!stack) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     int depth = 1;
-    stack[0] = (OwnerFrame){ top, top_n, 0, NULL };
+    stack[0] = (owner_frame){ top, top_n, 0, NULL };
 
-    for (int t = 0; t < po->num_tok_spans; t++) {
-        LspPos pos = po->tok_spans[t].start;
+    for (int t = 0; t < num_spans; t++) {
+        LspPos pos = spans[t].start;
 
         while (depth > 1 &&
                pos_cmp(pos, stack[depth - 1].scope->range.end) >= 0)
             depth--;
 
         for (;;) {
-            OwnerFrame *top_frame = &stack[depth - 1];
+            owner_frame *top_frame = &stack[depth - 1];
 
             while (top_frame->idx < top_frame->n &&
                    pos_cmp(pos, top_frame->children[top_frame->idx]->range.end) >= 0)
                 top_frame->idx++;
             if (top_frame->idx >= top_frame->n) break;
 
-            tj_node *child = top_frame->children[top_frame->idx];
+            tj_build_node *child = top_frame->children[top_frame->idx];
             if (pos_cmp(pos, child->range.start) < 0)
                 break;
 
             if (depth >= frame_cap) {
                 frame_cap *= 2;
-                OwnerFrame *tmp = realloc(stack, (size_t)frame_cap * sizeof(OwnerFrame));
-                if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+                owner_frame *tmp = realloc(stack,
+                                           (size_t)frame_cap * sizeof(owner_frame));
+                if (!tmp) {
+                    fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+                }
                 stack = tmp;
             }
-            /* The project node carries its hoisted body decls as
-             * scope-children here even though its own `children` array is
-             * empty. */
-            tj_node **kids = (child == project) ? proj_kids : child->children;
-            int       nkids = (child == project) ? proj_kids_n : child->num_children;
-            stack[depth++] = (OwnerFrame){ kids, nkids, 0, child };
+            tj_build_node **kids  = (child == project) ? proj_kids : child->children;
+            int             nkids = (child == project) ? proj_kids_n : child->num_children;
+            stack[depth++] = (owner_frame){ kids, nkids, 0, child };
         }
 
-        po->tok_spans[t].owner = (depth > 1) ? stack[depth - 1].scope : NULL;
+        spans[t].owner = (depth > 1) ? stack[depth - 1].scope : NULL;
     }
 
     free(stack);
@@ -371,48 +330,327 @@ static void assign_token_owners(ParseOutput *po) {
     free(hoisted);
 }
 
+/* ── parse_slab_compact() ────────────────────────────────────────────────── *
+ *
+ * Convert the pointer-based build tree into a flat parse_slab.
+ *
+ * Strategy (two-pass):
+ *   Pass 1 — DFS over the build tree: count nodes, total children-array
+ *             entries, total dep entries, and total string bytes.
+ *   Pass 2 — allocate flat arrays, copy data, replace pointers with
+ *             indices and string-pool offsets.
+ */
+
+/* ── String pool builder ── */
+
+typedef struct {
+    char  *buf;
+    size_t size;
+    size_t cap;
+} str_pool;
+
+static void str_pool_init(str_pool *p) {
+    p->cap  = 256;
+    p->buf  = malloc(p->cap);
+    if (!p->buf) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    p->buf[0] = '\0';   /* offset 0 reserved as NULL sentinel */
+    p->size = 1;
+}
+
+static str_off str_pool_push(str_pool *p, const char *s) {
+    if (!s || !s[0]) return 0;
+    size_t len = strlen(s) + 1;
+    while (p->size + len > p->cap) {
+        p->cap *= 2;
+        char *tmp = realloc(p->buf, p->cap);
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        p->buf = tmp;
+    }
+    str_off off = (str_off)p->size;
+    memcpy(p->buf + p->size, s, len);
+    p->size += len;
+    return off;
+}
+
+/* ── DFS node-numbering ── */
+
+typedef struct {
+    tj_build_node *build_ptr;
+    tj_idx         index;
+} build_idx_pair;
+
+typedef struct {
+    build_idx_pair *pairs;
+    int             count;
+    int             cap;
+} build_idx_map;
+
+static void idx_map_push(build_idx_map *m, tj_build_node *ptr, tj_idx idx) {
+    if (m->count >= m->cap) {
+        m->cap = m->cap ? m->cap * 2 : 64;
+        m->pairs = realloc(m->pairs, (size_t)m->cap * sizeof(build_idx_pair));
+        if (!m->pairs) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    }
+    m->pairs[m->count].build_ptr = ptr;
+    m->pairs[m->count].index     = idx;
+    m->count++;
+}
+
+static tj_idx idx_map_lookup(const build_idx_map *m, const tj_build_node *ptr) {
+    if (!ptr) return -1;
+    for (int i = 0; i < m->count; i++)
+        if (m->pairs[i].build_ptr == ptr) return m->pairs[i].index;
+    return -1;
+}
+
+/* Count nodes in a subtree. */
+static int count_nodes(const tj_build_node *n) {
+    if (!n) return 0;
+    int total = 1;
+    for (int i = 0; i < n->num_children; i++)
+        total += count_nodes(n->children[i]);
+    return total;
+}
+
+/* DFS walk: assign sequential indices and populate flat arrays. */
+static void dfs_compact(const tj_build_node *src, tj_idx node_idx,
+                        tj_node *nodes,
+                        tj_idx *children_arr, int *children_cursor,
+                        Dependency *deps_arr, int *deps_cursor,
+                        str_pool *pool,
+                        build_idx_map *idx_map) {
+    /* We already have the index for this node (pre-assigned by caller). */
+    tj_node *dst = &nodes[node_idx];
+    dst->keyword   = src->keyword;
+    dst->id_off    = str_pool_push(pool, src->id);
+    dst->name_off  = str_pool_push(pool, src->name);
+    dst->range             = src->range;
+    dst->selection_range   = src->selection_range;
+    dst->start_date        = src->start_date;
+    dst->end_date          = src->end_date;
+    dst->has_start         = src->has_start;
+    dst->has_end           = src->has_end;
+    /* parent_node / parent_doc: filled in pass-2 fixup after all nodes are numbered */
+    dst->parent_node = -1;
+    dst->parent_doc  = -1;
+
+    /* Dependencies */
+    if (src->num_dependencies > 0) {
+        dst->dep_start        = (tj_idx)*deps_cursor;
+        dst->num_dependencies = src->num_dependencies;
+        for (int i = 0; i < src->num_dependencies; i++) {
+            const dep_build *sd = &src->dependencies[i];
+            Dependency *dd = &deps_arr[(*deps_cursor)++];
+            dd->kind         = sd->kind;
+            dd->bang_count   = sd->bang_count;
+            dd->path_off     = str_pool_push(pool, sd->path);
+            dd->source_range = sd->source_range;
+            dd->resolved_idx = -1;
+        }
+    } else {
+        dst->dep_start        = -1;
+        dst->num_dependencies = 0;
+    }
+
+    /* Children: record their indices, recurse */
+    if (src->num_children > 0) {
+        dst->children_start = (tj_idx)*children_cursor;
+        dst->num_children   = src->num_children;
+        /* Pre-assign indices for children (DFS order) */
+        tj_idx child_base = node_idx + 1;
+        /* We need to know the starting index of each child.  Walk the subtree
+         * sizes to get them. */
+        tj_idx cur = node_idx + 1;
+        for (int i = 0; i < src->num_children; i++) {
+            children_arr[(*children_cursor)++] = cur;
+            int sub = count_nodes(src->children[i]);
+            cur += sub;
+        }
+        /* Now recurse with the pre-assigned indices */
+        cur = node_idx + 1;
+        for (int i = 0; i < src->num_children; i++) {
+            idx_map_push(idx_map, src->children[i], cur);
+            dfs_compact(src->children[i], cur, nodes,
+                        children_arr, children_cursor,
+                        deps_arr, deps_cursor, pool, idx_map);
+            cur += count_nodes(src->children[i]);
+        }
+        (void)child_base;
+    } else {
+        dst->children_start = -1;
+        dst->num_children   = 0;
+    }
+}
+
+static parse_slab *parse_slab_compact(tj_build_node *build_root,
+                                      tok_span_build *build_spans,
+                                      int             num_build_spans,
+                                      int             num_sem_entries,
+                                      IncludeRef     *includes,
+                                      int             num_includes) {
+    int num_nodes = count_nodes(build_root);
+
+    /* Count totals */
+    int total_children = 0;
+    int total_deps     = 0;
+    {
+        /* BFS/DFS count */
+        tj_build_node **stack = malloc((size_t)num_nodes * sizeof(tj_build_node *));
+        if (!stack) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        int sp = 0;
+        stack[sp++] = build_root;
+        while (sp > 0) {
+            tj_build_node *n = stack[--sp];
+            total_children += n->num_children;
+            total_deps     += n->num_dependencies;
+            for (int i = 0; i < n->num_children; i++)
+                stack[sp++] = n->children[i];
+        }
+        free(stack);
+    }
+
+    /* Allocate flat arrays */
+    tj_node    *nodes    = calloc((size_t)num_nodes, sizeof(tj_node));
+    tj_idx     *children = total_children
+        ? malloc((size_t)total_children * sizeof(tj_idx)) : NULL;
+    Dependency *deps     = total_deps
+        ? malloc((size_t)total_deps * sizeof(Dependency)) : NULL;
+    if (!nodes) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    if (total_children && !children) {
+        fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+    }
+    if (total_deps && !deps) {
+        fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+    }
+
+    str_pool pool;
+    str_pool_init(&pool);
+
+    build_idx_map idx_map = {0};
+    idx_map_push(&idx_map, build_root, 0);
+
+    int children_cursor = 0;
+    int deps_cursor     = 0;
+    dfs_compact(build_root, 0, nodes,
+                children, &children_cursor,
+                deps, &deps_cursor, &pool, &idx_map);
+
+    /* Pass 2: wire parent_node and parent_doc using the idx_map */
+    for (int i = 0; i < idx_map.count; i++) {
+        const tj_build_node *bn  = idx_map.pairs[i].build_ptr;
+        tj_idx               idx = idx_map.pairs[i].index;
+        nodes[idx].parent_node = idx_map_lookup(&idx_map, bn->parent_node);
+        nodes[idx].parent_doc  = idx_map_lookup(&idx_map, bn->parent_doc);
+    }
+
+    /* Build TokenSpan slab entries */
+    TokenSpan *tok_spans = num_build_spans
+        ? malloc((size_t)num_build_spans * sizeof(TokenSpan)) : NULL;
+    if (num_build_spans && !tok_spans) {
+        fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+    }
+    for (int i = 0; i < num_build_spans; i++) {
+        tok_spans[i].token_kind = build_spans[i].token_kind;
+        tok_spans[i].start      = build_spans[i].start;
+        tok_spans[i].end        = build_spans[i].end;
+        tok_spans[i].text_off   = str_pool_push(&pool, build_spans[i].text);
+        tok_spans[i].owner_idx  = idx_map_lookup(&idx_map, build_spans[i].owner);
+    }
+
+    free(idx_map.pairs);
+
+    /* Assemble the slab */
+    parse_slab *slab = calloc(1, sizeof(parse_slab));
+    if (!slab) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    slab->nodes               = nodes;
+    slab->num_nodes           = num_nodes;
+    slab->children            = children;
+    slab->num_children_entries = children_cursor;
+    slab->deps                = deps;
+    slab->num_deps            = deps_cursor;
+    slab->tok_spans           = tok_spans;
+    slab->num_tok_spans       = num_build_spans;
+    slab->num_sem_entries     = num_sem_entries;
+    slab->strings             = pool.buf;
+    slab->strings_size        = pool.size;
+    slab->root_idx            = 0;
+    slab->includes            = includes;
+    slab->num_includes        = num_includes;
+
+    return slab;
+}
+
+/* ── parse_slab_free() ───────────────────────────────────────────────────── */
+
+void parse_slab_free(parse_slab *slab) {
+    if (!slab) return;
+    free(slab->nodes);
+    free(slab->children);
+    free(slab->deps);
+    free(slab->tok_spans);
+    free(slab->strings);
+    for (int i = 0; i < slab->num_includes; i++) {
+        free(slab->includes[i].filename);
+        free(slab->includes[i].task_prefix);
+        free(slab->includes[i].resource_prefix);
+        free(slab->includes[i].account_prefix);
+        free(slab->includes[i].report_prefix);
+    }
+    free(slab->includes);
+    free(slab);
+}
+
 /* ── Public parse() entry point ──────────────────────────────────────────── */
 
-ParseOutput *parse(const char *src) {
-    ParseOutput *po = calloc(1, sizeof(ParseOutput));
-    if (!po) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    po->root = alloc_synthetic_root();
-
-    /* Set up global state for lexer.l and grammar.y */
-    g_output          = po;
-    g_tok_spans       = NULL;
-    g_num_tok_spans   = 0;
-    g_tok_span_cap    = 0;
-    g_num_sem_entries = 0;
-    yycolumn          = 0;
-    yylineno          = 1;
+parse_slab *parse(const char *src) {
+    /* Initialize build-phase globals */
+    g_build_root          = alloc_build_root();
+    g_build_includes      = NULL;
+    g_build_num_includes  = 0;
+    g_build_includes_cap  = 0;
+    g_tok_spans           = NULL;
+    g_num_tok_spans       = 0;
+    g_tok_span_cap        = 0;
+    g_num_sem_entries     = 0;
+    yycolumn              = 0;
+    yylineno              = 1;
     reset_pending_include_state();
 
     YY_BUFFER_STATE buf = yy_scan_string(src);
     yyparse();
     yy_delete_buffer(buf);
 
-    po->tok_spans       = g_tok_spans;
-    po->num_tok_spans   = g_num_tok_spans;
-    po->tok_span_cap    = g_tok_span_cap;
-    po->num_sem_entries = g_num_sem_entries;
+    /* Sort root children by source position */
+    if (g_build_root->num_children > 1)
+        qsort(g_build_root->children, (size_t)g_build_root->num_children,
+              sizeof(tj_build_node *), compare_build_node_starts);
+    assign_parent_links_build(g_build_root, g_build_root->children,
+                              g_build_root->num_children, g_build_root);
+    assign_token_owners_build(g_build_root, g_tok_spans, g_num_tok_spans);
 
-    g_output          = NULL;
-    g_tok_spans       = NULL;
-    g_num_tok_spans   = 0;
-    g_tok_span_cap    = 0;
-    g_num_sem_entries = 0;
+    /* Compact into slab */
+    parse_slab *slab = parse_slab_compact(g_build_root,
+                                          g_tok_spans,
+                                          g_num_tok_spans,
+                                          g_num_sem_entries,
+                                          g_build_includes,
+                                          g_build_num_includes);
 
-    /* The grammar appends top-level declarations to root as they reduce,
-     * which interleaves a project block's hoisted body children ahead of
-     * the project node itself.  Sort by source position so root->children
-     * is in true source order, then wire parent/owner pointers. */
-    if (po->root->num_children > 1)
-        qsort(po->root->children, (size_t)po->root->num_children,
-              sizeof(tj_node *), compare_node_starts);
-    assign_parent_links(po->root, po->root->children,
-                        po->root->num_children, po->root);
-    assign_token_owners(po);
+    /* Free the build context */
+    tj_build_node_free(g_build_root);
+    for (int i = 0; i < g_num_tok_spans; i++)
+        free(g_tok_spans[i].text);
+    free(g_tok_spans);
+    /* Note: g_build_includes is now owned by slab (no free here) */
 
-    return po;
+    g_build_root          = NULL;
+    g_build_includes      = NULL;
+    g_build_num_includes  = 0;
+    g_build_includes_cap  = 0;
+    g_tok_spans           = NULL;
+    g_num_tok_spans       = 0;
+    g_tok_span_cap        = 0;
+    g_num_sem_entries     = 0;
+
+    return slab;
 }

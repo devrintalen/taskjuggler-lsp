@@ -40,16 +40,19 @@ void project_node_append_child(ProjectNode *parent, ProjectNode *child) {
     child->parent_node = parent;
 }
 
-static void copy_dependencies(ProjectNode *dst, const tj_node *src) {
+static void copy_dependencies(ProjectNode *dst, const parse_slab *slab,
+                               const tj_node *src) {
     if (src->num_dependencies <= 0) return;
     dst->dependencies = calloc((size_t)src->num_dependencies, sizeof(ProjectDep));
     if (!dst->dependencies) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    const Dependency *deps = slab_deps(slab, src);
     for (int i = 0; i < src->num_dependencies; i++) {
-        const Dependency *s = &src->dependencies[i];
+        const Dependency *s = &deps[i];
         ProjectDep       *d = &dst->dependencies[i];
+        const char *path    = slab_str(slab, s->path_off);
         d->kind            = s->kind;
         d->bang_count      = s->bang_count;
-        d->path            = s->path ? strdup(s->path) : NULL;
+        d->path            = path ? strdup(path) : NULL;
         d->source_range    = s->source_range;
         d->resolved_target = NULL;
         d->target_uri      = NULL;
@@ -58,20 +61,25 @@ static void copy_dependencies(ProjectNode *dst, const tj_node *src) {
     dst->num_dependencies = src->num_dependencies;
 }
 
-ProjectNode *project_node_from_tj(const tj_node *src, const char *source_uri) {
+ProjectNode *project_node_from_tj(const parse_slab *slab, tj_idx node_idx,
+                                   const char *source_uri) {
+    tj_node *src = slab_node(slab, node_idx);
     if (!src) return NULL;
     ProjectNode *dst = calloc(1, sizeof(ProjectNode));
     if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    const char *id   = slab_str(slab, src->id_off);
+    const char *name = slab_str(slab, src->name_off);
     dst->keyword         = src->keyword;
-    dst->id              = src->id   ? strdup(src->id)   : NULL;
-    dst->name            = src->name ? strdup(src->name) : NULL;
+    dst->id              = id   ? strdup(id)   : NULL;
+    dst->name            = name ? strdup(name) : NULL;
     dst->range           = src->range;
     dst->selection_range = src->selection_range;
     dst->source_uri      = source_uri ? strdup(source_uri) : NULL;
-    copy_dependencies(dst, src);
+    copy_dependencies(dst, slab, src);
+    tj_idx *kids = slab_children(slab, src);
     for (int i = 0; i < src->num_children; i++)
-        project_node_append_child(dst, project_node_from_tj(src->children[i],
-                                                            source_uri));
+        project_node_append_child(dst,
+            project_node_from_tj(slab, kids[i], source_uri));
     return dst;
 }
 

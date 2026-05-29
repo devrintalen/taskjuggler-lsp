@@ -93,17 +93,20 @@ struct ProjectNode {
 };
 
 /**
- * Deep-copy a tj_node subtree into a freshly allocated ProjectNode
- * subtree, stamping @p source_uri (deep-copied) onto every node.  Copies
- * id / name strings and the dependency array (with `resolved_target`
- * cleared to DEP_UNRESOLVED).  `parent_node` is wired internally; the
- * returned root's `parent_node` is NULL.
+ * Deep-copy a tj_node (and its subtree) from the parse slab into a
+ * freshly allocated ProjectNode subtree, stamping @p source_uri onto
+ * every node.  Copies id / name strings and the dependency array (with
+ * `resolved_target` cleared to DEP_UNRESOLVED).  `parent_node` is wired
+ * internally; the returned root's `parent_node` is NULL.
  *
- * @param src         Source tj_node.  NULL returns NULL.
+ * @param slab        Parse slab owning @p node_idx and all string data.
+ * @param node_idx    Index of the root tj_node in @p slab to copy.
+ *                    Returns NULL when @p node_idx == -1.
  * @param source_uri  Owning document URI; deep-copied onto every node.
  * @return Newly allocated independent subtree.
  */
-ProjectNode *project_node_from_tj(const tj_node *src, const char *source_uri);
+ProjectNode *project_node_from_tj(const parse_slab *slab, tj_idx node_idx,
+                                   const char *source_uri);
 
 /**
  * Append @p child under @p parent (growing the children array) and set

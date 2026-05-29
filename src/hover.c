@@ -54,16 +54,15 @@ TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
     }
 
     if (found >= 0 && pos_in(pos, tokens[found].start, tokens[found].end)) {
-        TokenSpan copy = tokens[found];
-        copy.text = strdup(tokens[found].text ? tokens[found].text : "");
-        return copy;
+        return tokens[found];
     }
-    return (TokenSpan){ TK_EOF, pos, pos, strdup(""), NULL };
+    return (TokenSpan){ TK_EOF, pos, pos, 0, -1 };
 }
 
 /* ── scan_kw_stack ───────────────────────────────────────────────────────── */
 
-int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
+int scan_kw_stack(const parse_slab *slab,
+                  const TokenSpan *tokens, int num_tokens, LspPos cursor,
                   int kind_max, int track_argc,
                   KwStackEntry *stack, int stack_cap,
                   uint32_t *out_depth) {
@@ -95,12 +94,12 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
             break;
 
         default:
-            if (tok->token_kind < kind_max && tok->text) {
+            if (tok->token_kind < kind_max && tok->text_off) {
                 while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth)
                     free(stack[--stack_n].kw);
                 if (stack_n < stack_cap) {
                     stack[stack_n++] = (KwStackEntry){
-                        strdup(tok->text),
+                        strdup(slab_str(slab, tok->text_off)),
                         (LspRange){ tok->start, tok->end },
                         brace_depth,
                         0
@@ -131,10 +130,12 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
 
 /* ── active_keyword_at ───────────────────────────────────────────────────── */
 
-ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
+ActiveKeyword active_keyword_at(const parse_slab *slab,
+                                const TokenSpan *tokens, int num_tokens,
+                                LspPos cursor) {
     KwStackEntry stack[512];
     uint32_t brace_depth;
-    int stack_n = scan_kw_stack(tokens, num_tokens, cursor,
+    int stack_n = scan_kw_stack(slab, tokens, num_tokens, cursor,
                                 KW_DOCS_END, 0, stack, 512, &brace_depth);
 
     for (int i = stack_n - 1; i >= 0; i--) {
@@ -152,31 +153,32 @@ ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos 
 
 /* ── sym_qualified_id ────────────────────────────────────────────────────── */
 
-char *sym_qualified_id(const tj_node *sym) {
-    if (!sym || !sym->id) return strdup("");
+char *sym_qualified_id(const parse_slab *slab, const tj_node *sym) {
+    if (!sym || !slab_str(slab, sym->id_off)) return strdup("");
 
     const tj_node *chain[64];
     int depth = 0;
     for (const tj_node *s = sym;
          s != NULL && depth < (int)(sizeof(chain) / sizeof(chain[0]));
-         s = s->parent_node) {
-        if (s->keyword == sym->keyword && s->id && s->id[0])
+         s = slab_node(slab, s->parent_node)) {
+        const char *s_id = slab_str(slab, s->id_off);
+        if (s->keyword == sym->keyword && s_id && s_id[0])
             chain[depth++] = s;
     }
 
-    if (depth == 0) return strdup(sym->id);
+    if (depth == 0) return strdup(slab_str(slab, sym->id_off));
 
     size_t total = 0;
-    for (int i = 0; i < depth; i++) total += strlen(chain[i]->id);
+    for (int i = 0; i < depth; i++) total += strlen(slab_str(slab, chain[i]->id_off));
     total += (size_t)(depth - 1);
 
     char *out = malloc(total + 1);
-    if (!out) return strdup(sym->id);
+    if (!out) return strdup(slab_str(slab, sym->id_off));
 
     char *p = out;
     for (int i = depth - 1; i >= 0; i--) {
-        size_t len = strlen(chain[i]->id);
-        memcpy(p, chain[i]->id, len);
+        size_t len = strlen(slab_str(slab, chain[i]->id_off));
+        memcpy(p, slab_str(slab, chain[i]->id_off), len);
         p += len;
         if (i > 0) *p++ = '.';
     }

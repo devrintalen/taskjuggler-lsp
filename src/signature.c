@@ -25,10 +25,12 @@
 
 /* ── active_context ──────────────────────────────────────────────────────── */
 
-ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
+ActiveContext active_context(const parse_slab *slab,
+                              const TokenSpan *tokens, int num_tokens,
+                              LspPos cursor) {
     KwStackEntry stack[512];
     uint32_t brace_depth;
-    int stack_n = scan_kw_stack(tokens, num_tokens, cursor,
+    int stack_n = scan_kw_stack(slab, tokens, num_tokens, cursor,
                                 KW_SIG_END, 1, stack, 512, &brace_depth);
 
     for (int i = stack_n - 1; i >= 0; i--) {

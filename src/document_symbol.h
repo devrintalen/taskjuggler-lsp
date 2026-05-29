@@ -25,31 +25,32 @@
 
 /**
  * Return the innermost tj_node whose range contains @p pos (inclusive
- * start, exclusive end), using the precomputed `.owner` field on @p tokens.
+ * start, exclusive end), using the precomputed `.owner_idx` field on @p tokens.
  *
+ * @param slab        Parse slab owning the token and node arrays.
  * @param tokens      Token spans of the current document.
  * @param num_tokens  Length of @p tokens.
  * @param pos         Position to look up.
  * @return The matching node, or NULL when @p pos is outside every tj_node.
  */
-tj_node *tj_node_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
+tj_node *tj_node_at(const parse_slab *slab,
+                    const TokenSpan *tokens, int num_tokens, LspPos pos);
 
 /**
  * Navigate a tj_node tree by following @p path (an array of @p plen
  * identifier strings).  Used to resolve dotted task paths against the
  * task tree.
  *
- * @param syms   Top-level nodes to start from.
- * @param n      Length of @p syms.
- * @param path   Identifiers to follow, outermost first.
- * @param plen   Length of @p path.
- * @param out_n  Receives the length of the returned children array.
- * @return Children array of the matched node, or NULL with `*out_n = 0`
- *         when the path does not resolve.
+ * @param slab          Parse slab owning the node and string arrays.
+ * @param child_indices Flat children index array to start from.
+ * @param n             Length of @p child_indices.
+ * @param path          Identifiers to follow, outermost first.
+ * @param plen          Length of @p path.
+ * @return The matched node, or NULL when the path does not resolve.
  */
-tj_node *const *tj_node_find_path(tj_node *const *syms, int n,
-                                  const char **path, int plen,
-                                  int *out_n);
+tj_node *tj_node_find_path(const parse_slab *slab,
+                            const tj_idx *child_indices, int n,
+                            const char **path, int plen);
 
 /**
  * Serialise an LspRange to a mutable JSON object allocated in @p doc.
@@ -73,9 +74,12 @@ int symbol_kind_for(int keyword);
  * NUL-terminated JSON array string.  Intended to be embedded via
  * yyjson_mut_rawncpy.
  *
- * @param syms     Top-level nodes to render.
- * @param n        Length of @p syms.
- * @param out_len  Receives the byte length of the result, excluding the NUL.
+ * Renders all children of the node at @p root_idx.
+ *
+ * @param slab      Parse slab owning the nodes and string pool.
+ * @param root_idx  Index of the synthetic root node whose children to render.
+ * @param out_len   Receives the byte length of the result, excluding the NUL.
  * @return Heap-allocated JSON; caller owns and must free().
  */
-char *build_document_symbols_json(tj_node *const *syms, int n, size_t *out_len);
+char *build_document_symbols_json(const parse_slab *slab, tj_idx root_idx,
+                                   size_t *out_len);
