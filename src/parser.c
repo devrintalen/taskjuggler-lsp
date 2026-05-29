@@ -416,11 +416,27 @@ static void idx_map_push(build_idx_map *m, tj_build_node *ptr, tj_idx idx) {
     m->count++;
 }
 
+static int idx_map_pair_cmp(const void *a, const void *b) {
+    const build_idx_pair *pa = (const build_idx_pair *)a;
+    const build_idx_pair *pb = (const build_idx_pair *)b;
+    if (pa->build_ptr < pb->build_ptr) return -1;
+    if (pa->build_ptr > pb->build_ptr) return  1;
+    return 0;
+}
+
+/* Sort the map in place so subsequent bsearch lookups are O(log N). */
+static void idx_map_sort(build_idx_map *m) {
+    qsort(m->pairs, (size_t)m->count, sizeof(build_idx_pair), idx_map_pair_cmp);
+}
+
 static tj_idx idx_map_lookup(const build_idx_map *m, const tj_build_node *ptr) {
     if (!ptr) return -1;
-    for (int i = 0; i < m->count; i++)
-        if (m->pairs[i].build_ptr == ptr) return m->pairs[i].index;
-    return -1;
+    build_idx_pair key;
+    key.build_ptr = (tj_build_node *)ptr;
+    key.index     = 0;
+    const build_idx_pair *found = bsearch(&key, m->pairs, (size_t)m->count,
+                                          sizeof(build_idx_pair), idx_map_pair_cmp);
+    return found ? found->index : -1;
 }
 
 /* Count nodes in a subtree. */
@@ -476,24 +492,28 @@ static void dfs_compact(const tj_build_node *src, tj_idx node_idx,
     if (src->num_children > 0) {
         dst->children_start = (tj_idx)*children_cursor;
         dst->num_children   = src->num_children;
-        /* Each child's index is this node's index + 1 plus the sizes of all
-         * earlier-sibling subtrees (DFS preorder numbering).  First pass:
-         * record each child's start index into the shared children array. */
+
+        /* First pass: compute each subtree size once and record the child's
+         * flat index into the shared children array.  Sizes are saved so the
+         * second pass can advance cur without calling count_nodes again. */
+        int *sizes = malloc((size_t)src->num_children * sizeof(int));
+        if (!sizes) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         tj_idx cur = node_idx + 1;
         for (int i = 0; i < src->num_children; i++) {
             children_arr[(*children_cursor)++] = cur;
-            int sub = count_nodes(src->children[i]);
-            cur += sub;
+            sizes[i] = count_nodes(src->children[i]);
+            cur += sizes[i];
         }
-        /* Now recurse with the pre-assigned indices */
+        /* Second pass: recurse with the pre-assigned indices, reusing sizes. */
         cur = node_idx + 1;
         for (int i = 0; i < src->num_children; i++) {
             idx_map_push(idx_map, src->children[i], cur);
             dfs_compact(src->children[i], cur, nodes,
                         children_arr, children_cursor,
                         deps_arr, deps_cursor, pool, idx_map);
-            cur += count_nodes(src->children[i]);
+            cur += sizes[i];
         }
+        free(sizes);
     } else {
         dst->children_start = -1;
         dst->num_children   = 0;
@@ -552,6 +572,9 @@ static parse_slab *parse_slab_compact(tj_build_node *build_root,
     dfs_compact(build_root, 0, nodes,
                 children, &children_cursor,
                 deps, &deps_cursor, &pool, &idx_map);
+
+    /* Sort the map by pointer so pass-2 lookups are O(log N) via bsearch. */
+    idx_map_sort(&idx_map);
 
     /* Pass 2: wire parent_node and parent_doc using the idx_map */
     for (int i = 0; i < idx_map.count; i++) {
