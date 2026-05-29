@@ -424,11 +424,6 @@ static int idx_map_pair_cmp(const void *a, const void *b) {
     return 0;
 }
 
-/* Sort the map in place so subsequent bsearch lookups are O(log N). */
-static void idx_map_sort(build_idx_map *m) {
-    qsort(m->pairs, (size_t)m->count, sizeof(build_idx_pair), idx_map_pair_cmp);
-}
-
 static tj_idx idx_map_lookup(const build_idx_map *m, const tj_build_node *ptr) {
     if (!ptr) return -1;
     build_idx_pair key;
@@ -573,8 +568,8 @@ static parse_slab *parse_slab_compact(tj_build_node *build_root,
                 children, &children_cursor,
                 deps, &deps_cursor, &pool, &idx_map);
 
-    /* Sort the map by pointer so pass-2 lookups are O(log N) via bsearch. */
-    idx_map_sort(&idx_map);
+    /* Sort by pointer so pass-2 lookups are O(log N) via bsearch. */
+    qsort(idx_map.pairs, (size_t)idx_map.count, sizeof(build_idx_pair), idx_map_pair_cmp);
 
     /* Pass 2: wire parent_node and parent_doc using the idx_map */
     for (int i = 0; i < idx_map.count; i++) {
