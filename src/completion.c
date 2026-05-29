@@ -677,12 +677,13 @@ static int id_kind_for_keyword(const char *keyword) {
  */
 static void collect_all_ids(const parse_slab *slab,
                             const tj_idx *kids, int num_kids,
+                            const parse_slab **extra_slabs,
                             const tj_idx **extra_pools,
                             const int *extra_counts, int num_extra,
                             int id_kind, IdList *ids) {
     collect_ids(slab, kids, num_kids, id_kind, "", ids);
     for (int e = 0; e < num_extra; e++)
-        collect_ids(slab, extra_pools[e], extra_counts[e], id_kind, "", ids);
+        collect_ids(extra_slabs[e], extra_pools[e], extra_counts[e], id_kind, "", ids);
 }
 
 /**
@@ -771,6 +772,7 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                   const TokenSpan *tokens, int num_tokens,
                                   LspPos cursor,
                                   const tj_idx *kids, int num_kids,
+                                  const parse_slab **extra_slabs,
                                   const tj_idx **extra_pools,
                                   const int *extra_counts, int num_extra,
                                   int id_kind, int *out_incomplete) {
@@ -779,9 +781,14 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                          &first_bang_pos);
     IdList ids = {0};
     char bang_prefix[64] = "";
+    /* bang_prefix renders one '!' per bang plus a NUL; clamp so the run can
+     * never overflow the buffer (also lets the compiler bound the memset). */
+    if (bang_count < 0) bang_count = 0;
+    if (bang_count > (int)sizeof(bang_prefix) - 1)
+        bang_count = (int)sizeof(bang_prefix) - 1;
 
     if (bang_count == 0) {
-        collect_all_ids(slab, kids, num_kids, extra_pools, extra_counts,
+        collect_all_ids(slab, kids, num_kids, extra_slabs, extra_pools, extra_counts,
                         num_extra, id_kind, &ids);
     } else {
         int scope_n = 0;
@@ -789,13 +796,19 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                           cursor, &scope_n);
 
         if (bang_count <= scope_n) {
-            tj_node *found = tj_node_find_path(
-                slab, kids, num_kids,
-                (const char **)scope, scope_n - bang_count);
-            if (found) {
-                tj_idx *found_kids = slab_children(slab, found);
-                collect_ids(slab, found_kids, found->num_children,
-                            id_kind, "", &ids);
+            int path_len = scope_n - bang_count;
+            if (path_len == 0) {
+                /* Climbed all the way to the document root. */
+                collect_ids(slab, kids, num_kids, id_kind, "", &ids);
+            } else {
+                tj_node *found = tj_node_find_path(
+                    slab, kids, num_kids,
+                    (const char **)scope, path_len);
+                if (found) {
+                    tj_idx *found_kids = slab_children(slab, found);
+                    collect_ids(slab, found_kids, found->num_children,
+                                id_kind, "", &ids);
+                }
             }
         }
 
@@ -848,6 +861,7 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                 const TokenSpan *tokens, int num_tokens,
                                 LspPos cursor,
                                 const tj_idx *kids, int num_kids,
+                                const parse_slab **extra_slabs,
                                 const tj_idx **extra_pools,
                                 const int *extra_counts, int num_extra,
                                 int id_kind, int *out_incomplete) {
@@ -855,11 +869,11 @@ static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
         return build_dep_completions(doc, items, slab, tokens, num_tokens,
                                      cursor,
                                      kids, num_kids,
-                                     extra_pools, extra_counts, num_extra,
+                                     extra_slabs, extra_pools, extra_counts, num_extra,
                                      id_kind, out_incomplete);
 
     IdList ids = {0};
-    collect_all_ids(slab, kids, num_kids, extra_pools, extra_counts,
+    collect_all_ids(slab, kids, num_kids, extra_slabs, extra_pools, extra_counts,
                     num_extra, id_kind, &ids);
 
     int count = 0;
@@ -923,6 +937,7 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const TokenSpan *tokens, int num_tokens,
                                         LspPos cursor,
                                         const tj_idx *kids, int num_kids,
+                                        const parse_slab **extra_slabs,
                                         const tj_idx **extra_pools,
                                         const int *extra_counts,
                                         int num_extra,
@@ -964,7 +979,7 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                               tokens, num_tokens,
                                               cursor,
                                               kids, num_kids,
-                                              extra_pools, extra_counts, num_extra,
+                                              extra_slabs, extra_pools, extra_counts, num_extra,
                                               id_kind, &is_incomplete);
             free(ac.keyword);
             goto done;  /* Don't mix ID completions with keyword completions */

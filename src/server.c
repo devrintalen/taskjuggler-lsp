@@ -1708,9 +1708,10 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     /* Gather top-level children arrays of every other doc_snapshot in the
      * same project.  The snapshot already filters to the primary's project,
      * so every slot other than primary_idx is a cross-file pool candidate. */
-    const tj_idx *extra_pools[MAX_DOCS];
-    int           extra_counts[MAX_DOCS];
-    int           num_extra = 0;
+    const parse_slab *extra_slabs[MAX_DOCS];
+    const tj_idx     *extra_pools[MAX_DOCS];
+    int               extra_counts[MAX_DOCS];
+    int               num_extra = 0;
     if (snap) {
         for (int i = 0; i < snap->num_docs && num_extra < MAX_DOCS; i++) {
             if (i == snap->primary_idx) continue;
@@ -1718,6 +1719,7 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
             if (!eds->page) continue;
             int n; tj_idx *kids = slab_root_kids(&eds->slab, &n);
             if (!kids) continue;
+            extra_slabs[num_extra]  = &eds->slab;
             extra_pools[num_extra]  = kids;
             extra_counts[num_extra] = n;
             num_extra++;
@@ -1733,6 +1735,7 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
                                                      d->slab->num_tok_spans,
                                                      pos,
                                                      self_kids, self_n,
+                                                     extra_slabs,
                                                      extra_pools,
                                                      extra_counts,
                                                      num_extra,
