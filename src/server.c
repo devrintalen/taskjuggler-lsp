@@ -32,6 +32,7 @@
 #include "server.h"
 #include "parser.h"
 #include "project_tree.h"
+#include "workspace_snapshot.h"
 #include "grammar.tab.h"   /* KW_* keyword constants for per-kind routing */
 #include "job_queue.h"
 #include "threadpool.h"
@@ -61,6 +62,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1403,6 +1405,16 @@ static tj_idx *doc_kids(const Document *d, int *out_n) {
     return slab_children(d->slab, root);
 }
 
+/** Get the root node's children index array and count directly from a slab.
+ *  Used by snapshot-based paths where no Document wrapper is available. */
+static tj_idx *slab_root_kids(const parse_slab *slab, int *out_n) {
+    if (!slab) { *out_n = 0; return NULL; }
+    tj_node *root = slab_node(slab, slab->root_idx);
+    if (!root) { *out_n = 0; return NULL; }
+    *out_n = root->num_children;
+    return slab_children(slab, root);
+}
+
 static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
                                                yyjson_val *params, Document *d) {
     (void)params;
@@ -1681,7 +1693,8 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params, Document *d) {
+                                          yyjson_val *params, Document *d,
+                                          workspace_snapshot *snap) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
     if (!tdp) tdp = params;
@@ -1690,27 +1703,23 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
     if (!pos_obj || !d || !d->slab) return make_response(doc, id, yyjson_mut_null(doc));
 
-    /* Gather top-level children index arrays of every other Document in
-     * the requester's project as extra pools.  Skips:
-     *   - the requester itself (its symbols are in the primary kids)
-     *   - docs in a different project (cross-project bleed)
-     * Orphans are singleton projects, so the loop naturally yields no
-     * extras for them — correct behavior.  disk_only project members
-     * ARE included: a .tji pulled in via include is a legitimate
-     * cross-file completion source. */
+    /* Gather top-level children arrays of every other doc_snapshot in the
+     * same project.  The snapshot already filters to the primary's project,
+     * so every slot other than primary_idx is a cross-file pool candidate. */
     const tj_idx *extra_pools[MAX_DOCS];
     int           extra_counts[MAX_DOCS];
     int           num_extra = 0;
-    for (int i = 0; i < MAX_DOCS && num_extra < MAX_DOCS; i++) {
-        if (!docs[i].in_use || !docs[i].slab) continue;
-        if (&docs[i] == d) continue;
-        if (!d->primary_project) continue;
-        if (docs[i].primary_project != d->primary_project) continue;
-        int n; tj_idx *kids = doc_kids(&docs[i], &n);
-        if (!kids) continue;
-        extra_pools[num_extra]  = kids;
-        extra_counts[num_extra] = n;
-        num_extra++;
+    if (snap) {
+        for (int i = 0; i < snap->num_docs && num_extra < MAX_DOCS; i++) {
+            if (i == snap->primary_idx) continue;
+            doc_snapshot *eds = snap->docs[i];
+            if (!eds->page) continue;
+            int n; tj_idx *kids = slab_root_kids(&eds->slab, &n);
+            if (!kids) continue;
+            extra_pools[num_extra]  = kids;
+            extra_counts[num_extra] = n;
+            num_extra++;
+        }
     }
 
     int self_n; tj_idx *self_kids = doc_kids(d, &self_n);
@@ -1730,14 +1739,18 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                                yyjson_val *params) {
+                                                yyjson_val *params,
+                                                workspace_snapshot *snap) {
     const char *query = params ? json_str(params, "query") : NULL;
     if (!query) query = "";
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use || !docs[i].slab) continue;
-        collect_workspace_symbols(doc, query, docs[i].slab, docs[i].uri, arr);
+    if (snap) {
+        for (int i = 0; i < snap->num_docs; i++) {
+            doc_snapshot *ds = snap->docs[i];
+            if (!ds->page) continue;
+            collect_workspace_symbols(doc, query, &ds->slab, ds->uri, arr);
+        }
     }
     return make_response(doc, id, arr);
 }
@@ -1763,6 +1776,111 @@ static void send_response(yyjson_mut_doc *out_doc, yyjson_mut_val *resp) {
         lsp_send_message(text);
         free(text);
     }
+}
+
+/* ── Workspace snapshot helpers ───────────────────────────────────────────
+ *
+ * Build a self-contained per-query copy of all relevant Document state.
+ * Caller must hold docs_mutex.  The returned snapshot is owned by the
+ * caller and is freed after the handler completes.
+ */
+
+/** Copy one Document's parse slab page and metadata into a doc_snapshot.
+ *  The mmap page is copied via memcpy (one syscall + bulk copy) so the
+ *  snapshot's slab pointers reference the copy, not the live page.
+ *  Caller holds docs_mutex. */
+static doc_snapshot *doc_snapshot_create(const Document *d) {
+    doc_snapshot *ds = calloc(1, sizeof(doc_snapshot));
+    if (!ds) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    ds->uri             = d->uri             ? strdup(d->uri)             : NULL;
+    ds->text            = d->text            ? strdup(d->text)            : NULL;
+    ds->task_prefix     = d->task_prefix     ? strdup(d->task_prefix)     : NULL;
+    ds->account_prefix  = d->account_prefix  ? strdup(d->account_prefix)  : NULL;
+    ds->report_prefix   = d->report_prefix   ? strdup(d->report_prefix)   : NULL;
+    ds->resource_prefix = d->resource_prefix ? strdup(d->resource_prefix) : NULL;
+
+    if (d->slab && d->slab->page) {
+        size_t sz = d->slab->page->total_mmap_size;
+        void *pg = mmap(NULL, sz, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (pg == MAP_FAILED) {
+            fprintf(stderr, "taskjuggler-lsp: mmap failed\n"); exit(1);
+        }
+        memcpy(pg, d->slab->page, sz);
+
+        /* Relocate slab pointer fields from the live page to the copy.
+         * Each field is an absolute pointer into the original page; adding
+         * the delta (copy_base − orig_base) yields the corresponding address
+         * in the copied page. */
+        ptrdiff_t delta = (char *)pg - (char *)d->slab->page;
+        ds->page           = (parse_page_header *)pg;
+        ds->slab           = *d->slab;  /* copy counts and sentinel fields */
+        ds->slab.page      = ds->page;
+        ds->slab.nodes     = d->slab->nodes
+            ? (tj_node    *)((char *)d->slab->nodes     + delta) : NULL;
+        ds->slab.children  = d->slab->children
+            ? (tj_idx     *)((char *)d->slab->children  + delta) : NULL;
+        ds->slab.deps      = d->slab->deps
+            ? (Dependency *)((char *)d->slab->deps      + delta) : NULL;
+        ds->slab.tok_spans = d->slab->tok_spans
+            ? (TokenSpan  *)((char *)d->slab->tok_spans + delta) : NULL;
+        ds->slab.strings   = d->slab->strings
+            ? (char *)d->slab->strings + delta : NULL;
+        /* includes are not used by query handlers; clear to avoid dangling refs */
+        ds->slab.includes     = NULL;
+        ds->slab.num_includes = 0;
+    }
+
+    /* Deep-copy sem_tokens for delta comparison. */
+    if (d->sem_tokens.data && d->sem_tokens.count > 0) {
+        ds->sem_tokens.data = malloc(d->sem_tokens.count * sizeof(uint32_t));
+        if (!ds->sem_tokens.data) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        memcpy(ds->sem_tokens.data, d->sem_tokens.data,
+               d->sem_tokens.count * sizeof(uint32_t));
+    }
+    ds->sem_tokens.count          = d->sem_tokens.count;
+    ds->sem_tokens.result_id      = d->sem_tokens.result_id
+        ? strdup(d->sem_tokens.result_id) : NULL;
+    ds->sem_tokens.next_result_id = d->sem_tokens.next_result_id;
+
+    return ds;
+}
+
+/** Build a workspace_snapshot for the given primary document and its
+ *  project.  Every Document in the same project gets a doc_snapshot so
+ *  completion's extra-pool builder can work without touching docs[].
+ *  Caller must hold docs_mutex. */
+static workspace_snapshot *workspace_snapshot_create(const Document *primary) {
+    workspace_snapshot *snap = calloc(1, sizeof(workspace_snapshot));
+    if (!snap) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+
+    /* Capacity: at most MAX_DOCS entries. */
+    snap->docs = malloc((size_t)MAX_DOCS * sizeof(doc_snapshot *));
+    if (!snap->docs) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    snap->primary_idx = -1;
+
+    for (int i = 0; i < MAX_DOCS; i++) {
+        Document *d = &docs[i];
+        if (!d->in_use || !d->slab) continue;
+        /* When primary is set, include only docs in the same project.
+         * When primary is NULL (workspace/symbol), include all docs. */
+        if (primary && d->primary_project &&
+            primary->primary_project &&
+            d->primary_project != primary->primary_project &&
+            d != primary) continue;
+
+        doc_snapshot *ds = doc_snapshot_create(d);
+        if (d == primary) snap->primary_idx = snap->num_docs;
+        snap->docs[snap->num_docs++] = ds;
+    }
+
+    /* Deep-copy the primary project's root for cross-file resolution. */
+    if (primary && primary->primary_project) {
+        snap->project_root =
+            project_node_deep_copy(&primary->primary_project->root);
+    }
+
+    return snap;
 }
 
 void server_dispatch_notification(Job *job) {
@@ -1812,10 +1930,21 @@ void server_dispatch_query(Job *job) {
     yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *resp = NULL;
 
-    /* Locate the primary Document (if any) so handlers receive a stable
-     * pointer.  Held docs_mutex covers both lookup and handler execution. */
-    pthread_mutex_lock(&docs_mutex);
+    /* initialize and shutdown mutate global server state; run under full mutex. */
+    if (strcmp(m, "initialize") == 0 || strcmp(m, "shutdown") == 0) {
+        pthread_mutex_lock(&docs_mutex);
+        if (strcmp(m, "initialize") == 0)
+            resp = handle_initialize(out_doc, id_item, params);
+        else
+            resp = handle_shutdown(out_doc, id_item);
+        pthread_mutex_unlock(&docs_mutex);
+        if (resp) send_response(out_doc, resp);
+        yyjson_mut_doc_free(out_doc);
+        return;
+    }
 
+    /* All other queries: take a snapshot under mutex, then dispatch lock-free.
+     * Handlers operate on snapshot data without holding docs_mutex. */
     const char *primary_uri = NULL;
     if (params) {
         yyjson_val *td = yyjson_obj_get(params, "textDocument");
@@ -1828,44 +1957,90 @@ void server_dispatch_query(Job *job) {
             }
         }
     }
-    Document *primary = primary_uri ? doc_find(primary_uri) : NULL;
 
-    if (strcmp(m, "initialize") == 0) {
-        resp = handle_initialize(out_doc, id_item, params);
-    } else if (strcmp(m, "shutdown") == 0) {
-        resp = handle_shutdown(out_doc, id_item);
-    } else if (strcmp(m, "textDocument/documentSymbol") == 0) {
-        resp = handle_document_symbol(out_doc, id_item, params, primary);
+    pthread_mutex_lock(&docs_mutex);
+    Document *live_primary = primary_uri ? doc_find(primary_uri) : NULL;
+    workspace_snapshot *snap = workspace_snapshot_create(live_primary);
+    pthread_mutex_unlock(&docs_mutex);
+
+    /* Build a proxy Document from the primary snapshot so handler signatures
+     * remain unchanged.  proxy_proj wraps snap->project_root so handlers that
+     * read d->primary_project->root work without holding the live mutex. */
+    Document proxy = {0};
+    Project  proxy_proj = {0};
+    doc_snapshot *pds = (snap->primary_idx >= 0) ? snap->docs[snap->primary_idx] : NULL;
+    if (pds) {
+        proxy.uri             = pds->uri;
+        proxy.text            = pds->text;
+        proxy.task_prefix     = pds->task_prefix;
+        proxy.account_prefix  = pds->account_prefix;
+        proxy.report_prefix   = pds->report_prefix;
+        proxy.resource_prefix = pds->resource_prefix;
+        proxy.slab            = &pds->slab;
+        proxy.sem_tokens      = pds->sem_tokens;
+        proxy.in_use          = 1;
+    }
+    if (snap->project_root) {
+        proxy_proj.root       = *snap->project_root;  /* borrow struct value; children owned by snap */
+        proxy.primary_project = &proxy_proj;
+    }
+    Document *d = pds ? &proxy : NULL;
+
+    if (strcmp(m, "textDocument/documentSymbol") == 0) {
+        resp = handle_document_symbol(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/foldingRange") == 0) {
-        resp = handle_folding_range(out_doc, id_item, params, primary);
+        resp = handle_folding_range(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/codeLens") == 0) {
-        resp = handle_code_lens(out_doc, id_item, params, primary);
+        resp = handle_code_lens(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/hover") == 0) {
-        resp = handle_hover(out_doc, id_item, params, primary);
+        resp = handle_hover(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/signatureHelp") == 0) {
-        resp = handle_signature_help(out_doc, id_item, params, primary);
+        resp = handle_signature_help(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/references") == 0) {
-        resp = handle_references(out_doc, id_item, params, primary);
+        resp = handle_references(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/documentHighlight") == 0) {
-        resp = handle_document_highlight(out_doc, id_item, params, primary);
+        resp = handle_document_highlight(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/definition") == 0) {
-        resp = handle_definition(out_doc, id_item, params, primary);
+        resp = handle_definition(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/completion") == 0) {
-        resp = handle_completion(out_doc, id_item, params, primary);
+        resp = handle_completion(out_doc, id_item, params, d, snap);
     } else if (strcmp(m, "workspace/symbol") == 0) {
-        resp = handle_workspace_symbol(out_doc, id_item, params);
+        resp = handle_workspace_symbol(out_doc, id_item, params, snap);
     } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
-        resp = handle_semantic_tokens_full(out_doc, id_item, params, primary);
+        resp = handle_semantic_tokens_full(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/semanticTokens/full/delta") == 0) {
-        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params, primary);
+        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params, d);
     } else if (id_item) {
         resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
     }
 
-    pthread_mutex_unlock(&docs_mutex);
+    /* Semantic-token handlers update d->sem_tokens in-place (via
+     * semantic_token_result_replace which frees old data).  Write the new
+     * state back to the live Document under a brief re-lock, then zero out
+     * pds->sem_tokens so workspace_snapshot_free does not double-free the
+     * transferred heap data. */
+    if (pds && (strcmp(m, "textDocument/semanticTokens/full") == 0 ||
+                strcmp(m, "textDocument/semanticTokens/full/delta") == 0)) {
+        pthread_mutex_lock(&docs_mutex);
+        Document *cur = primary_uri ? doc_find(primary_uri) : NULL;
+        if (cur) {
+            semantic_token_result_release(&cur->sem_tokens);
+            cur->sem_tokens = proxy.sem_tokens;
+        } else {
+            semantic_token_result_release(&proxy.sem_tokens);
+        }
+        pds->sem_tokens.data      = NULL;
+        pds->sem_tokens.result_id = NULL;
+        pds->sem_tokens.count     = 0;
+        pthread_mutex_unlock(&docs_mutex);
+    }
 
+    /* Send before freeing the snapshot: handler-built JSON may contain string
+     * pointers into the snapshot's mmap page, which munmap() invalidates. */
     if (resp) send_response(out_doc, resp);
     yyjson_mut_doc_free(out_doc);
+
+    workspace_snapshot_free(snap);
 }
 
 void server_process(const char *json_text) {

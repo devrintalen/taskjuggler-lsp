@@ -97,6 +97,37 @@ void project_node_free(ProjectNode *node) {
     free(node);
 }
 
+ProjectNode *project_node_deep_copy(const ProjectNode *src) {
+    if (!src) return NULL;
+    ProjectNode *dst = calloc(1, sizeof(ProjectNode));
+    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    dst->keyword         = src->keyword;
+    dst->id              = src->id         ? strdup(src->id)         : NULL;
+    dst->name            = src->name       ? strdup(src->name)       : NULL;
+    dst->range           = src->range;
+    dst->selection_range = src->selection_range;
+    dst->source_uri      = src->source_uri ? strdup(src->source_uri) : NULL;
+    if (src->num_dependencies > 0) {
+        dst->dependencies = calloc((size_t)src->num_dependencies, sizeof(ProjectDep));
+        if (!dst->dependencies) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        for (int i = 0; i < src->num_dependencies; i++) {
+            const ProjectDep *sd = &src->dependencies[i];
+            ProjectDep       *dd = &dst->dependencies[i];
+            dd->kind            = sd->kind;
+            dd->bang_count      = sd->bang_count;
+            dd->path            = sd->path ? strdup(sd->path) : NULL;
+            dd->source_range    = sd->source_range;
+            dd->resolved_target = NULL;
+            dd->target_uri      = NULL;
+            dd->state           = DEP_UNRESOLVED;
+        }
+        dst->num_dependencies = src->num_dependencies;
+    }
+    for (int i = 0; i < src->num_children; i++)
+        project_node_append_child(dst, project_node_deep_copy(src->children[i]));
+    return dst;
+}
+
 void project_node_free_children(ProjectNode *root) {
     if (!root) return;
     for (int i = 0; i < root->num_children; i++)

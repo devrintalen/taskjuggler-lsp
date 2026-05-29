@@ -121,6 +121,16 @@ void project_node_append_child(ProjectNode *parent, ProjectNode *child);
 void project_node_free(ProjectNode *node);
 
 /**
+ * Recursively deep-copy @p src into a new heap-allocated ProjectNode
+ * subtree.  Strings (id, name, source_uri, dep.path) are strdup'd.
+ * All dependency resolution state is reset to DEP_UNRESOLVED so the
+ * copy can re-resolve lazily without cross-tree pointer hazards.
+ * `parent_node` is wired internally; the returned root's `parent_node`
+ * is NULL.  Safe to call with NULL (returns NULL).
+ */
+ProjectNode *project_node_deep_copy(const ProjectNode *src);
+
+/**
  * Free every owned child of @p root, leaving @p root as an empty shell.
  * Used to tear down an inline synthetic root before each rebuild.
  */
