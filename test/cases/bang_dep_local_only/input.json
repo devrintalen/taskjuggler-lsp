@@ -5,7 +5,7 @@
     "method": "initialize",
     "params": {
       "processId": null,
-      "rootUri": null,
+      "rootUri": "file://${CASE_DIR}/workspace",
       "capabilities": {}
     }
   },
