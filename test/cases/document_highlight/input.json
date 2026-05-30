@@ -19,7 +19,7 @@
     "method": "textDocument/didOpen",
     "params": {
       "textDocument": {
-        "uri": "file:///test/highlight.tjp",
+        "uri": "file://${CASE_DIR}/workspace/highlight.tjp",
         "languageId": "taskjuggler",
         "version": 1,
         "text": "project test \"Test\" 2024-01-01 +1m {\n}\n\ntask foo \"Foo\" {\n  task bar \"Bar\" {\n  }\n  task baz \"Baz\" {\n    depends !bar\n  }\n}\n\ntask qux \"Qux\" {\n  depends foo.bar\n}\n"
@@ -32,7 +32,7 @@
     "method": "textDocument/documentHighlight",
     "params": {
       "textDocument": {
-        "uri": "file:///test/highlight.tjp"
+        "uri": "file://${CASE_DIR}/workspace/highlight.tjp"
       },
       "position": {
         "line": 4,
@@ -46,7 +46,7 @@
     "method": "textDocument/documentHighlight",
     "params": {
       "textDocument": {
-        "uri": "file:///test/highlight.tjp"
+        "uri": "file://${CASE_DIR}/workspace/highlight.tjp"
       },
       "position": {
         "line": 7,
@@ -60,7 +60,7 @@
     "method": "textDocument/documentHighlight",
     "params": {
       "textDocument": {
-        "uri": "file:///test/highlight.tjp"
+        "uri": "file://${CASE_DIR}/workspace/highlight.tjp"
       },
       "position": {
         "line": 12,
@@ -74,7 +74,7 @@
     "method": "textDocument/documentHighlight",
     "params": {
       "textDocument": {
-        "uri": "file:///test/highlight.tjp"
+        "uri": "file://${CASE_DIR}/workspace/highlight.tjp"
       },
       "position": {
         "line": 0,

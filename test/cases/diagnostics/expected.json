@@ -103,7 +103,7 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file:///test/sample.tjp",
+      "uri": "file://${CASE_DIR}/workspace/sample.tjp",
       "diagnostics": [
         {
           "range": {

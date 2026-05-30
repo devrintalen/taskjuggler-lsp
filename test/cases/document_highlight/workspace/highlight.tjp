@@ -1,0 +1,14 @@
+project test "Test" 2024-01-01 +1m {
+}
+
+task foo "Foo" {
+  task bar "Bar" {
+  }
+  task baz "Baz" {
+    depends !bar
+  }
+}
+
+task qux "Qux" {
+  depends foo.bar
+}

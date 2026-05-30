@@ -1,0 +1,7 @@
+project p "P" 2024-01-01 +3m {
+}
+task backend "Backend" {
+}
+task frontend "Frontend" {
+  depends backend
+}

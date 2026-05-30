@@ -1,0 +1,6 @@
+project p "Project" 2026-01-01 +3m {}
+task parent "Parent" {
+  task child "Child" {
+    depends !sibling
+  }
+}

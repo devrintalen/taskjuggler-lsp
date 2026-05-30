@@ -19,7 +19,7 @@
     "method": "textDocument/didOpen",
     "params": {
       "textDocument": {
-        "uri": "file:///test/sample.tjp",
+        "uri": "file://${CASE_DIR}/workspace/sample.tjp",
         "languageId": "taskjuggler",
         "version": 1,
         "text": "project p \"Project\" 2024-01-01 +3m {\n}\ntask build \"Build\" {\n  depends nonexistent\n  depends !!toodeep\n}\n"

@@ -1,0 +1,6 @@
+project p "Project" 2024-01-01 +3m {
+}
+task build "Build" {
+  depends nonexistent
+  depends !!toodeep
+}

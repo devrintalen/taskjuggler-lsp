@@ -19,7 +19,7 @@
     "method": "textDocument/didOpen",
     "params": {
       "textDocument": {
-        "uri": "file:///test/sample.tjp",
+        "uri": "file://${CASE_DIR}/workspace/sample.tjp",
         "languageId": "taskjuggler",
         "version": 1,
         "text": "project p \"P\" 2024-01-01 +3m {\n}\ntask backend \"Backend\" {\n}\ntask frontend \"Frontend\" {\n  depends backend\n}\n"
@@ -31,7 +31,7 @@
     "method": "textDocument/didChange",
     "params": {
       "textDocument": {
-        "uri": "file:///test/sample.tjp",
+        "uri": "file://${CASE_DIR}/workspace/sample.tjp",
         "version": 2
       },
       "contentChanges": [
@@ -52,7 +52,7 @@
     "method": "textDocument/didChange",
     "params": {
       "textDocument": {
-        "uri": "file:///test/sample.tjp",
+        "uri": "file://${CASE_DIR}/workspace/sample.tjp",
         "version": 3
       },
       "contentChanges": [
