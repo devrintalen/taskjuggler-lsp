@@ -32,12 +32,13 @@
  * the document.
  *
  * @param doc          Destination mutable JSON document.
+ * @param slab         Parse slab owning the token and node arrays.
  * @param tokens       Token spans for the current document.
  * @param num_tokens   Length of @p tokens.
  * @param cursor       Cursor position.
- * @param symbols      Top-level symbols of the current document.
- * @param num_symbols  Length of @p symbols.
- * @param extra_pools  Top-level symbols of every other open/background doc.
+ * @param kids         Children index array of the current document's root.
+ * @param num_kids     Length of @p kids.
+ * @param extra_pools  Children index arrays of other open/background docs.
  * @param extra_counts Per-pool lengths matching @p extra_pools.
  * @param num_extra    Length of @p extra_pools.
  * @param text         Raw source text of the current document.
@@ -45,10 +46,12 @@
  *         completions apply at @p cursor.
  */
 yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
+                                        const parse_slab *slab,
                                         const TokenSpan *tokens, int num_tokens,
                                         LspPos cursor,
-                                        tj_node *const *symbols, int num_symbols,
-                                        tj_node *const **extra_pools,
+                                        const tj_idx *kids, int num_kids,
+                                        const parse_slab **extra_slabs,
+                                        const tj_idx **extra_pools,
                                         const int *extra_counts,
                                         int num_extra,
                                         const char *text);

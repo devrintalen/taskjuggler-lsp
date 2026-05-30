@@ -24,14 +24,14 @@
 %code requires {
 #include "parser.h"
 
-/* Dynamic array of tj_node pointers, used for body children. */
-typedef struct { tj_node **arr; int n, cap; } SymArr;
+/* Dynamic array of tj_build_node pointers, used for body children. */
+typedef struct { tj_build_node **arr; int n, cap; } SymArr;
 
 /* Return type for opt_body and body_items rules. */
 typedef struct { SymArr syms; LspPos end; } BodyResult;
 
-/* Return type for item rule: either a tj_node pointer or nothing. */
-typedef struct { tj_node *sym; int has_sym; } ItemResult;
+/* Return type for item rule: either a tj_build_node pointer or nothing. */
+typedef struct { tj_build_node *sym; int has_sym; } ItemResult;
 
 /* Return type for dep_path and task_ref rules. */
 typedef struct {
@@ -43,26 +43,26 @@ typedef struct {
 }
 
 %{
-#include "parser.h"           /* Token, tj_node, ParseOutput, LspRange, etc. */
+#include "parser.h"           /* Token, tj_build_node, parse_slab, LspRange, etc. */
 #include "grammar.tab.h"      /* TK_* / KW_* constants, YYSTYPE */
 #include "document_symbol.h"  /* symbol_kind_for() */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Globals defined in parser.c, shared with lexer.l */
-extern ParseOutput *g_output;
+/* Globals defined in parser.c, accessed by grammar actions */
+extern tj_build_node *g_build_root;
 
 int  yylex(void);
 void yyerror(const char *msg);
 
 /* ── Helpers (declared/defined in parser.c) ─────────────────────────────── */
 
-extern void push_include(ParseOutput *po, const char *quoted_text,
-                         const char *task_prefix,
-                         const char *resource_prefix,
-                         const char *account_prefix,
-                         const char *report_prefix);
+extern void push_include_to_build(const char *quoted_text,
+                                  const char *task_prefix,
+                                  const char *resource_prefix,
+                                  const char *account_prefix,
+                                  const char *report_prefix);
 
 /* ── Include-statement prefix capture ────────────────────────────────────
  *
@@ -117,23 +117,23 @@ void reset_pending_include_state(void) {
  * input) is dropped rather than admitted as a top-level sibling.
  */
 static int output_has_project(void) {
-    if (!g_output || !g_output->root) return 0;
-    for (int i = 0; i < g_output->root->num_children; i++)
-        if (g_output->root->children[i]->keyword == KW_PROJECT)
+    if (!g_build_root) return 0;
+    for (int i = 0; i < g_build_root->num_children; i++)
+        if (g_build_root->children[i]->keyword == KW_PROJECT)
             return 1;
     return 0;
 }
 
 /* Append @p node to the document root, or free it when it cannot be
- * admitted (no output, or a duplicate project block). */
-static void route_top_level(tj_node *node) {
+ * admitted (no root, or a duplicate project block). */
+static void route_top_level(tj_build_node *node) {
     if (!node) return;
-    if (!g_output || !g_output->root ||
+    if (!g_build_root ||
         (node->keyword == KW_PROJECT && output_has_project())) {
-        tj_node_free(node);
+        tj_build_node_free(node);
         return;
     }
-    tj_node_append_child(g_output->root, node);
+    tj_build_node_append_child(g_build_root, node);
 }
 
 /* ── Current dep-ref direction ──────────────────────────────────────────── *
@@ -148,10 +148,10 @@ static DepKind g_pending_dep_kind = DEP_KIND_DEPENDS;
  * Tracks the current task being parsed so that the KW_START / KW_END
  * date-attribute actions can store the parsed date on the right node.
  * Pushed when entering a task body, popped on exit.                        */
-static tj_node *g_sym_stack[128];
-static int      g_sym_stack_n = 0;
+static tj_build_node *g_sym_stack[128];
+static int            g_sym_stack_n = 0;
 
-static void sym_stack_push(tj_node *s) {
+static void sym_stack_push(tj_build_node *s) {
     if (g_sym_stack_n < 128)
         g_sym_stack[g_sym_stack_n++] = s;
 }
@@ -161,29 +161,30 @@ static void sym_stack_pop(void) {
         g_sym_stack_n--;
 }
 
-static tj_node *sym_stack_top(void) {
+static tj_build_node *sym_stack_top(void) {
     return g_sym_stack_n > 0 ? g_sym_stack[g_sym_stack_n - 1] : NULL;
 }
 
-/* ── tj_node array helper ──────────────────────────────────────────────── */
+/* ── tj_build_node array helper ──────────────────────────────────────────── */
 
-static void symarr_push(SymArr *a, tj_node *s) {
+static void symarr_push(SymArr *a, tj_build_node *s) {
     if (a->n >= a->cap) {
         a->cap = a->cap ? a->cap * 2 : 4;
-        tj_node **tmp = realloc(a->arr, (size_t)a->cap * sizeof(tj_node *));
+        tj_build_node **tmp = realloc(a->arr,
+                                      (size_t)a->cap * sizeof(tj_build_node *));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         a->arr = tmp;
     }
     a->arr[a->n++] = s;
 }
 
-/* ── Build a tj_node from the components of a symbol_decl rule ───────────── */
+/* ── Build a tj_build_node from the components of a symbol_decl rule ──────── */
 
-/* Allocate a tj_node and populate it with header fields (kind, id, name,
+/* Allocate a tj_build_node and populate it with header fields (kind, id, name,
  * selection_range).  Body fields (range.end, children) are filled in
  * later by finish_tj_node().                                              */
-static tj_node *alloc_tj_node(Token kw, Token id, Token name) {
-    tj_node *s = calloc(1, sizeof(tj_node));
+static tj_build_node *alloc_tj_node(Token kw, Token id, Token name) {
+    tj_build_node *s = calloc(1, sizeof(tj_build_node));
     if (!s) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     s->keyword = kw.kind;
 
@@ -203,8 +204,8 @@ static tj_node *alloc_tj_node(Token kw, Token id, Token name) {
     return s;
 }
 
-/* Finalize a tj_node after its body has been parsed. */
-static void finish_tj_node(tj_node *s, Token kw, BodyResult body) {
+/* Finalize a tj_build_node after its body has been parsed. */
+static void finish_tj_node(tj_build_node *s, Token kw, BodyResult body) {
     LspPos range_end = body.end;
     if (range_end.line == 0 && range_end.character == 0)
         range_end = kw.end;
@@ -222,7 +223,7 @@ static void finish_tj_node(tj_node *s, Token kw, BodyResult body) {
  * whose opt_body content is discarded (e.g. dailymax dur_val opt_body). */
 static void discard_body(BodyResult *b) {
     for (int i = 0; i < b->syms.n; i++)
-        tj_node_free(b->syms.arr[i]);
+        tj_build_node_free(b->syms.arr[i]);
     free(b->syms.arr);
 }
 %}
@@ -230,13 +231,13 @@ static void discard_body(BodyResult *b) {
 /* ── Value union ─────────────────────────────────────────────────────────── */
 
 %union {
-    Token      tok;   /* single token (kind / start / end / text) */
-    tj_node   *sym;   /* heap-allocated tj_node */
-    BodyResult body;  /* body: children + closing-brace position */
-    ItemResult item;  /* item: optional symbol */
-    TaskRef    tref;  /* dep path + bang count */
-    int        ival;  /* integer (bang count) */
-    char      *text;  /* heap-allocated string (e.g. joined dotted id) */
+    Token          tok;   /* single token (kind / start / end / text) */
+    tj_build_node *sym;   /* heap-allocated tj_build_node */
+    BodyResult     body;  /* body: children + closing-brace position */
+    ItemResult     item;  /* item: optional symbol */
+    TaskRef        tref;  /* dep path + bang count */
+    int            ival;  /* integer (bang count) */
+    char          *text;  /* heap-allocated string (e.g. joined dotted id) */
 }
 
 /* ── Discarded-symbol destructors ────────────────────────────────────────── *
@@ -254,8 +255,8 @@ static void discard_body(BodyResult *b) {
  * node allocated in a mid-rule action and then orphaned by a later parse
  * failure would still leak — which is why symbol_decl allocates the
  * project node in its final action rather than a mid-rule one. */
-%destructor { tj_node_free($$); }                       <sym>
-%destructor { if ($$.has_sym) tj_node_free($$.sym); }   <item>
+%destructor { tj_build_node_free($$); }                       <sym>
+%destructor { if ($$.has_sym) tj_build_node_free($$.sym); }   <item>
 %destructor { free($$); }                               <text>
 
 /* ── Token declarations ──────────────────────────────────────────────────── */
@@ -457,7 +458,7 @@ item
     /* Syntax: start <date>                                                   */
     | KW_START TK_DATE
         {
-            tj_node *task = sym_stack_top();
+            tj_build_node *task = sym_stack_top();
             if (task && task->keyword == KW_TASK) {
                 time_t parsed;
                 if (parse_tjp_date($2.text, &parsed)) {
@@ -470,7 +471,7 @@ item
     /* Syntax: end <date>                                                     */
     | KW_END TK_DATE
         {
-            tj_node *task = sym_stack_top();
+            tj_build_node *task = sym_stack_top();
             if (task && task->keyword == KW_TASK) {
                 time_t parsed;
                 if (parse_tjp_date($2.text, &parsed)) {
@@ -542,42 +543,42 @@ item
      */
     | KW_DAILYMAX dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) tj_build_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: dailymin <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_DAILYMIN dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) tj_build_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: weeklymax <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_WEEKLYMAX dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) tj_build_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: weeklymin <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_WEEKLYMIN dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) tj_build_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: monthlymax <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_MONTHLYMAX dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) tj_build_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: monthlymin <value> (min | h | d | w | m | y) [{ <attributes> }] */
     | KW_MONTHLYMIN dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) tj_build_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: maximum <value> (min | h | d | w | m | y) [{ <attributes> }]  */
     | KW_MAXIMUM dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) tj_build_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
     /* Syntax: minimum <value> (min | h | d | w | m | y) [{ <attributes> }]  */
     | KW_MINIMUM dur_val opt_body
         { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
+          for (int i = 0; i < $3.syms.n; i++) tj_build_node_free($3.syms.arr[i]);
           free($3.syms.arr); $$.has_sym = 0; }
 
     /* ── Numeric attributes ── */
@@ -874,7 +875,7 @@ item
      * Body attributes: overtime.booking, sloppy.booking                     */
     | KW_BOOKING TK_IDENT booking_interval_list opt_body
         { token_free(&$1); token_free(&$2);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) tj_build_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: shift <shift> [<interval2>] [, <shift> [<interval2>] ...]
      * (attribute form inside resource/task; differs from the shift declaration) */
@@ -887,12 +888,12 @@ item
     /* Syntax: limits [{ <attributes> }]                                     */
     | KW_LIMITS opt_body
         { token_free(&$1);
-          for (int i = 0; i < $2.syms.n; i++) tj_node_free($2.syms.arr[i]);
+          for (int i = 0; i < $2.syms.n; i++) tj_build_node_free($2.syms.arr[i]);
           free($2.syms.arr); $$.has_sym = 0; }
     /* Syntax: projection [{ <attributes> }]                                  */
     | KW_PROJECTION opt_body
         { token_free(&$1);
-          for (int i = 0; i < $2.syms.n; i++) tj_node_free($2.syms.arr[i]);
+          for (int i = 0; i < $2.syms.n; i++) tj_build_node_free($2.syms.arr[i]);
           free($2.syms.arr); $$.has_sym = 0; }
 
     /* ── Account/charge attributes ── */
@@ -1015,13 +1016,13 @@ item
      * (inside timesheet task or statussheet)                                */
     | KW_STATUS TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) tj_build_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: newtask <task> <STRING> { <attributes> }
      * (inside timesheet)                                                    */
     | KW_NEWTASK TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) tj_build_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
 
     /* ── Format specifiers ── */
@@ -1047,27 +1048,27 @@ item
      * (inside 'extend (task|resource) { }' body)                            */
     | KW_DATE TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) tj_build_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: number <id> <name> [{ <attributes> }]                          */
     | KW_NUMBER TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) tj_build_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: reference <id> <name> [{ <attributes> }]                       */
     | KW_REFERENCE TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) tj_build_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: richtext <id> <name> [{ <attributes> }]                        */
     | KW_RICHTEXT TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) tj_build_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
     /* Syntax: text <id> <name> [{ <attributes> }]                            */
     | KW_TEXT TK_IDENT string_val opt_body
         { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
+          for (int i = 0; i < $4.syms.n; i++) tj_build_node_free($4.syms.arr[i]);
           free($4.syms.arr); $$.has_sym = 0; }
 
     /* ── Tokens used only in logical expressions ─────────────────────────── *
@@ -1154,11 +1155,11 @@ symbol_decl
                 range_end = $1.end;
             $$->range.end = range_end;
             for (int i = 0; i < $6.syms.n; i++) {
-                tj_node *child = $6.syms.arr[i];
+                tj_build_node *child = $6.syms.arr[i];
                 if (child->keyword == KW_PROJECT) {
                     /* Nested `project` inside a project block is malformed;
                      * drop it rather than corrupt the tree. */
-                    tj_node_free(child);
+                    tj_build_node_free(child);
                     continue;
                 }
                 route_top_level(child);
@@ -1332,7 +1333,7 @@ extend_stmt
     : KW_EXTEND extend_target opt_body
         {
             token_free(&$1); token_free(&$2);
-            for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
+            for (int i = 0; i < $3.syms.n; i++) tj_build_node_free($3.syms.arr[i]);
             free($3.syms.arr);
         }
     ;
@@ -1352,7 +1353,7 @@ supplement_stmt
     : KW_SUPPLEMENT supplement_target dotted_id opt_body
         {
             token_free(&$1); token_free(&$2);
-            for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
+            for (int i = 0; i < $4.syms.n; i++) tj_build_node_free($4.syms.arr[i]);
             free($4.syms.arr);
         }
     ;
@@ -1391,11 +1392,11 @@ include_stmt
       opt_body
         {
             g_in_include_depth--;
-            push_include(g_output, $2.text,
-                         g_pending_task_prefix,
-                         g_pending_resource_prefix,
-                         g_pending_account_prefix,
-                         g_pending_report_prefix);
+            push_include_to_build($2.text,
+                                  g_pending_task_prefix,
+                                  g_pending_resource_prefix,
+                                  g_pending_account_prefix,
+                                  g_pending_report_prefix);
             free(g_pending_task_prefix);     g_pending_task_prefix     = NULL;
             free(g_pending_resource_prefix); g_pending_resource_prefix = NULL;
             free(g_pending_account_prefix);  g_pending_account_prefix  = NULL;
@@ -1600,16 +1601,16 @@ dep_ref
              * discarded — captured only when a consumer needs them. */
             discard_body(&$2);
 
-            tj_node *task = sym_stack_top();
+            tj_build_node *task = sym_stack_top();
             if (task) {
-                Dependency dep = {
+                dep_build dep = {
                     .kind            = g_pending_dep_kind,
                     .bang_count      = $1.bang_count,
                     .path            = $1.path,   /* transfer ownership */
                     .source_range    = { $1.start, $1.end },
                     .resolved_target = NULL,
                 };
-                tj_node_push_dependency(task, dep);
+                tj_build_node_push_dep(task, dep);
             } else {
                 /* `depends`/`precedes` outside a task body — syntactically
                  * possible during error recovery; nothing to attach to. */
@@ -1633,7 +1634,7 @@ alloc_ref
     : TK_IDENT opt_body
         {
             token_free(&$1);
-            for (int i = 0; i < $2.syms.n; i++) tj_node_free($2.syms.arr[i]);
+            for (int i = 0; i < $2.syms.n; i++) tj_build_node_free($2.syms.arr[i]);
             free($2.syms.arr);
         }
     ;
@@ -1733,7 +1734,7 @@ column_id
 column_entry
     : column_id opt_body
         {
-            for (int i = 0; i < $2.syms.n; i++) tj_node_free($2.syms.arr[i]);
+            for (int i = 0; i < $2.syms.n; i++) tj_build_node_free($2.syms.arr[i]);
             free($2.syms.arr);
         }
     ;

@@ -48,10 +48,11 @@ static int range_eq(LspRange a, LspRange b) {
     return pos_cmp(a.start, b.start) == 0 && pos_cmp(a.end, b.end) == 0;
 }
 
-static const tj_node *find_decl_at(const TokenSpan *tokens, int num_tokens,
+static const tj_node *find_decl_at(const parse_slab *slab,
+                                    const TokenSpan *tokens, int num_tokens,
                                     LspPos pos) {
-    for (tj_node *sym = tj_node_at(tokens, num_tokens, pos);
-         sym != NULL; sym = sym->parent_node) {
+    for (tj_node *sym = tj_node_at(slab, tokens, num_tokens, pos);
+         sym != NULL; sym = slab_node(slab, sym->parent_node)) {
         if (pos_in_range(pos, sym->selection_range))
             return sym;
     }
@@ -68,6 +69,7 @@ static void push_highlight(yyjson_mut_doc *doc, yyjson_mut_val *arr,
 
 yyjson_mut_val *build_document_highlight_json(
     yyjson_mut_doc *doc,
+    const parse_slab *slab,
     tj_node *const *symbols, int num_symbols,
     const TokenSpan *tokens, int num_tokens,
     LspPos cursor) {
@@ -76,16 +78,17 @@ yyjson_mut_val *build_document_highlight_json(
 
     TokenSpan tok = tok_span_at(tokens, num_tokens, cursor);
     if (tok.token_kind != TK_IDENT) {
-        free(tok.text);
         return NULL;
     }
 
-    const tj_node *target = find_decl_at(tokens, num_tokens, cursor);
+    const tj_node *target = find_decl_at(slab, tokens, num_tokens, cursor);
     /* Cursor not on a declaration name — fall back to "any identifier
      * token whose text matches the cursor token's text".  No Write
      * highlight in that case since we have no declaration site to
      * point at. */
-    const char *match = (target && target->id) ? target->id : tok.text;
+    const char *target_id = target ? slab_str(slab, target->id_off) : NULL;
+    const char *tok_text  = slab_str(slab, tok.text_off);
+    const char *match = target_id ? target_id : tok_text;
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
 
@@ -94,13 +97,13 @@ yyjson_mut_val *build_document_highlight_json(
 
     for (int t = 0; t < num_tokens; t++) {
         if (tokens[t].token_kind != TK_IDENT) continue;
-        if (!tokens[t].text) continue;
-        if (strcmp(tokens[t].text, match) != 0) continue;
+        const char *text = slab_str(slab, tokens[t].text_off);
+        if (!text) continue;
+        if (!match || strcmp(text, match) != 0) continue;
         LspRange tr = { tokens[t].start, tokens[t].end };
         if (target && range_eq(tr, target->selection_range)) continue;
         push_highlight(doc, arr, tr, 2);
     }
 
-    free(tok.text);
     return arr;
 }

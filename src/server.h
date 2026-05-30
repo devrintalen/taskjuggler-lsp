@@ -21,6 +21,7 @@
 #pragma once
 
 #include "job_queue.h"
+#include "workspace_snapshot.h"
 
 #include <yyjson.h>
 
@@ -57,10 +58,25 @@ void server_process(const char *json_text);
 void server_dispatch_notification(Job *job);
 
 /**
+ * Build a workspace_snapshot for the query contained in @p job.  Acquires
+ * docs_mutex briefly to read document state, then releases.  Intended to
+ * be called by the coordinator thread before handing @p job off to a query
+ * worker, so the snapshot captures the document state at the time the
+ * query arrived rather than when the worker runs it.
+ *
+ * Returns NULL if the request has no textDocument and no documents are
+ * loaded (e.g. very early initialize before any docs are open).
+ * Always returns a non-NULL snapshot when there is at least one loaded doc.
+ *
+ * @param job  Query job whose request_doc carries the primary URI (if any).
+ */
+workspace_snapshot *server_snapshot_for_job(Job *job);
+
+/**
  * Run the query handler for @p job and send the response.  Runs on a
- * query worker thread; acquires docs_mutex for the duration of the
- * handler because the previous snapshot machinery was retired during
- * the tj_node refactor — see job_queue.h.
+ * query worker thread.  Uses job->snapshot (pre-computed by coordinator)
+ * if available; otherwise computes the snapshot inline.  Transfers
+ * ownership of job->snapshot to itself, setting it to NULL.
  *
  * @param job  Pending query job.  Worker frees it after return.
  */

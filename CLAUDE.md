@@ -67,10 +67,49 @@ stale generated header.
 
 ### Process model
 
-Single-threaded, synchronous JSON-RPC over stdin/stdout. `src/main.c`
-reads `Content-Length`-framed messages and hands each body to
-`server_process()` (`src/server.c`); responses are written back via
-`lsp_send_message()`. There is no worker pool, no async I/O.
+JSON-RPC over stdin/stdout. `src/main.c` reads `Content-Length`-framed
+messages and hands each body to `server_process()` (`src/server.c`);
+responses are written back via `lsp_send_message()` (serialized under
+`stdout_mutex`).
+
+Message handling uses a three-thread-class design (`src/threadpool.c`):
+
+- **Reader** (`main.c`): parses Content-Length framing, calls
+  `server_process()` to classify each message and push a `Job` onto
+  `work_queue`.
+- **Coordinator** (single thread): pops jobs from `work_queue` in
+  arrival order.  Notifications and lifecycle requests (`initialize`,
+  `shutdown`, `textDocument/semanticTokens/full[/delta]`) run **inline**
+  under `docs_mutex` so subsequent messages observe their side effects.
+  For regular query jobs the coordinator calls
+  `server_snapshot_for_job()` — which briefly holds `docs_mutex` to copy
+  the relevant slab pages and deep-copy the project tree — then pushes
+  the job (with its attached snapshot) to `request_queue`.
+- **Query workers** (`NUM_QUERY_WORKERS = 4`): pop from `request_queue`
+  and call `server_dispatch_query()`.  Workers run **entirely lock-free**:
+  they operate only on the private `workspace_snapshot` attached to the
+  job and never touch `docs[]`, `projects[]`, `g_workspace_root`,
+  `g_cc_*`, or the global flex/bison parser state.
+
+#### Thread-safety invariant
+
+A query worker handler MUST NOT read or write any of the following:
+
+- `docs[]` / `num_docs` / the `Document` struct fields of any live slot
+- `projects[]` / `num_projects`
+- `g_workspace_root`, `g_cc_path`, `g_cc_mtime_*`, `g_cc_size`,
+  `g_cc_attempted`
+- The global lexer/parser build state (`g_build_root`, `yylval`,
+  `yytext`, `yylineno`, `yycolumn`) — i.e. `parse()` must never be
+  called from a worker
+- Any non-reentrant libc function (`strtok`, `localtime`, `gmtime`,
+  `strerror`, `rand`, …); use the `_r` variants where applicable
+
+Workers may safely read: their job's `workspace_snapshot` (a private
+mmap copy of the slab and a deep copy of the project tree), the immutable
+`static const` keyword/signature tables in `completion.c`/`signature.c`,
+and any per-call stack-local state.  stdout writes must go through
+`lsp_send_message()`.
 
 ### Document store
 

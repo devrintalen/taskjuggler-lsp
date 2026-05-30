@@ -18,22 +18,32 @@
 
 /** @file */
 
-#pragma once
+#include "workspace_snapshot.h"
 
-#include "parser.h"
-#include <yyjson.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
 
-/**
- * Append SymbolInformation entries whose name contains @p query
- * (case-insensitive substring; empty query matches all) from the given
- * parse slab's symbol tree into @p arr.
- *
- * @param doc    Destination mutable JSON document (owns allocations).
- * @param query  Case-insensitive substring filter; empty string matches all.
- * @param slab   Parse slab owning the nodes and string pool.
- * @param uri    URI placed into each entry's `location.uri` field.
- * @param arr    JSON array to append SymbolInformation entries to.
- */
-void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
-                                const parse_slab *slab,
-                                const char *uri, yyjson_mut_val *arr);
+void doc_snapshot_free(doc_snapshot *ds) {
+    if (!ds) return;
+    free(ds->uri);
+    free(ds->text);
+    free(ds->task_prefix);
+    free(ds->account_prefix);
+    free(ds->report_prefix);
+    free(ds->resource_prefix);
+    if (ds->page)
+        munmap(ds->page, ds->page->total_mmap_size);
+    free(ds->sem_tokens.data);
+    free(ds->sem_tokens.result_id);
+    free(ds);
+}
+
+void workspace_snapshot_free(workspace_snapshot *snap) {
+    if (!snap) return;
+    for (int i = 0; i < snap->num_docs; i++)
+        doc_snapshot_free(snap->docs[i]);
+    free(snap->docs);
+    project_node_free(snap->project_root);
+    free(snap);
+}

@@ -35,13 +35,16 @@ typedef struct {
  * keyword together with the number of completed argument tokens.
  * Caller must free result.keyword (if non-NULL).
  *
+ * @param slab        Parse slab owning the token string pool.
  * @param tokens      Token spans of the current document.
  * @param num_tokens  Length of @p tokens.
  * @param cursor      Cursor position.
  * @return Active keyword and argument count; `{NULL, 0}` when no
  *         keyword's argument list encompasses @p cursor.
  */
-ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cursor);
+ActiveContext active_context(const parse_slab *slab,
+                              const TokenSpan *tokens, int num_tokens,
+                              LspPos cursor);
 
 /**
  * Build an LSP SignatureHelp JSON object for @p kw with @p active_param

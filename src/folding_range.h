@@ -35,14 +35,14 @@
  * Values are allocated in @p doc; caller owns @p doc.
  *
  * @param doc          Destination mutable JSON document.
+ * @param slab         Parse slab owning the node and token arrays.
  * @param spans        Token spans of the current document.
  * @param num_spans    Length of @p spans.
- * @param symbols      Top-level symbols of the current document.
- * @param num_symbols  Length of @p symbols.
+ * @param root_idx     Index of the synthetic root node in @p slab.
  * @return The newly created JSON array of FoldingRange objects.
  */
 yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
+                                           const parse_slab *slab,
                                            const TokenSpan *spans,
                                            int num_spans,
-                                           tj_node *const *symbols,
-                                           int num_symbols);
+                                           tj_idx root_idx);

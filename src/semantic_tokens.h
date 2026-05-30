@@ -113,11 +113,13 @@ void semantic_token_result_replace(SemanticTokenResult *r,
  *
  * Multi-line tokens (TK_BLOCK_COMMENT, TK_MULTI_LINE_STR) are split into
  * one entry per source line as required by the protocol.  The accumulated
- * text stored in TokenSpan.text is used to compute per-line lengths.
+ * text stored in the string pool at TokenSpan.text_off is used to compute
+ * per-line lengths.
  *
  * Tokens recorded in tok_spans solely for cursor-position queries
  * (TK_LBRACE, TK_RBRACE, TK_BANG, TK_DOT, TK_COMMA) are silently skipped.
  *
+ * @param slab             Parse slab owning the token string pool.
  * @param spans            Token spans of the current document.
  * @param num_spans        Length of @p spans.
  * @param num_sem_entries  Upper bound on the number of semantic-token
@@ -128,7 +130,8 @@ void semantic_token_result_replace(SemanticTokenResult *r,
  * @param out_count        Receives the number of uint32 entries written.
  *                         Always a multiple of 5.
  */
-void compute_semantic_tokens_data(const TokenSpan *spans, int num_spans,
+void compute_semantic_tokens_data(const parse_slab *slab,
+                                   const TokenSpan *spans, int num_spans,
                                    int num_sem_entries,
                                    uint32_t **out_buf, size_t *out_count);
 

@@ -93,17 +93,20 @@ struct ProjectNode {
 };
 
 /**
- * Deep-copy a tj_node subtree into a freshly allocated ProjectNode
- * subtree, stamping @p source_uri (deep-copied) onto every node.  Copies
- * id / name strings and the dependency array (with `resolved_target`
- * cleared to DEP_UNRESOLVED).  `parent_node` is wired internally; the
- * returned root's `parent_node` is NULL.
+ * Deep-copy a tj_node (and its subtree) from the parse slab into a
+ * freshly allocated ProjectNode subtree, stamping @p source_uri onto
+ * every node.  Copies id / name strings and the dependency array (with
+ * `resolved_target` cleared to DEP_UNRESOLVED).  `parent_node` is wired
+ * internally; the returned root's `parent_node` is NULL.
  *
- * @param src         Source tj_node.  NULL returns NULL.
+ * @param slab        Parse slab owning @p node_idx and all string data.
+ * @param node_idx    Index of the root tj_node in @p slab to copy.
+ *                    Returns NULL when @p node_idx == -1.
  * @param source_uri  Owning document URI; deep-copied onto every node.
  * @return Newly allocated independent subtree.
  */
-ProjectNode *project_node_from_tj(const tj_node *src, const char *source_uri);
+ProjectNode *project_node_from_tj(const parse_slab *slab, tj_idx node_idx,
+                                   const char *source_uri);
 
 /**
  * Append @p child under @p parent (growing the children array) and set
@@ -116,6 +119,16 @@ void project_node_append_child(ProjectNode *parent, ProjectNode *child);
  * node itself.  Safe to call with NULL.
  */
 void project_node_free(ProjectNode *node);
+
+/**
+ * Recursively deep-copy @p src into a new heap-allocated ProjectNode
+ * subtree.  Strings (id, name, source_uri, dep.path) are strdup'd.
+ * All dependency resolution state is reset to DEP_UNRESOLVED so the
+ * copy can re-resolve lazily without cross-tree pointer hazards.
+ * `parent_node` is wired internally; the returned root's `parent_node`
+ * is NULL.  Safe to call with NULL (returns NULL).
+ */
+ProjectNode *project_node_deep_copy(const ProjectNode *src);
 
 /**
  * Free every owned child of @p root, leaving @p root as an empty shell.
@@ -138,10 +151,12 @@ void project_node_free_children(ProjectNode *root);
  * synthetic root.  On a second call the memoized result is returned
  * without recomputing.
  *
- * Concurrency: this mutates the dependency on first call.  Safe today
- * because the server holds docs_mutex for the full duration of every
- * notification and every query (single query worker).  The
- * TODO(workspace-snapshot) lock-free model must synchronize this memo.
+ * Concurrency: this mutates the dependency on first call.  Safe under the
+ * worker-pool model because each query worker resolves against its own
+ * per-Job deep copy of the project tree (project_node_deep_copy resets
+ * every dependency to DEP_UNRESOLVED), so the memo write is private to one
+ * worker and never shared.  Callers on the notification path mutate the
+ * live tree only while holding docs_mutex.
  *
  * @param owner_task    The ProjectNode task declaring the dependency.
  * @param dep_index     Index into @p owner_task's `dependencies` array;
