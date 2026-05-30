@@ -1,0 +1,4 @@
+project p "Project" 2026-01-01 +3m {}
+task build "Build" {
+  depends spec
+}

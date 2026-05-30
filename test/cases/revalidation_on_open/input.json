@@ -19,7 +19,7 @@
     "method": "textDocument/didOpen",
     "params": {
       "textDocument": {
-        "uri": "file:///test/project.tjp",
+        "uri": "file://${CASE_DIR}/workspace/project.tjp",
         "languageId": "taskjuggler",
         "version": 1,
         "text": "project p \"Project\" 2026-01-01 +3m {}\ntask build \"Build\" {\n  depends spec\n}\n"
@@ -31,7 +31,7 @@
     "method": "textDocument/didOpen",
     "params": {
       "textDocument": {
-        "uri": "file:///test/tasks.tji",
+        "uri": "file://${CASE_DIR}/workspace/tasks.tji",
         "languageId": "taskjuggler",
         "version": 1,
         "text": "task spec \"Spec\" {}\n"

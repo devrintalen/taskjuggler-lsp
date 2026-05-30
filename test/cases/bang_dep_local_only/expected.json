@@ -111,14 +111,6 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
       "uri": "file://${CASE_DIR}/workspace/project.tjp",
       "diagnostics": [
         {
@@ -136,6 +128,14 @@
           "message": "unresolved dependency: sibling"
         }
       ]
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
+      "diagnostics": []
     }
   },
   {

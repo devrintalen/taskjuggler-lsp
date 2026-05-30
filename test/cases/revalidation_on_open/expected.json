@@ -103,7 +103,7 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file:///test/project.tjp",
+      "uri": "file://${CASE_DIR}/workspace/project.tjp",
       "diagnostics": [
         {
           "range": {
@@ -126,7 +126,7 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file:///test/project.tjp",
+      "uri": "file://${CASE_DIR}/workspace/project.tjp",
       "diagnostics": []
     }
   },
@@ -134,7 +134,7 @@
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
-      "uri": "file:///test/tasks.tji",
+      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
       "diagnostics": []
     }
   },
