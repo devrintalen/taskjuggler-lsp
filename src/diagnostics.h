@@ -22,28 +22,40 @@
 
 #include "parser.h"
 
-/* ── Diagnostic accumulation ─────────────────────────────────────────────── */
+/* ── Diagnostic severity ─────────────────────────────────────────────────── */
+
+/** LSP DiagnosticSeverity for hard errors. */
+#define DIAG_ERROR   1
+/** LSP DiagnosticSeverity for warnings. */
+#define DIAG_WARNING 2
 
 /**
- * Append a Diagnostic to @p r->diagnostics.  Used by the grammar/parser and
- * by cross-file resolution to report errors and warnings that will later be
- * forwarded to the editor via publish_diagnostics().
- *
- * @param r         Parse result whose diagnostics array is appended to.
- * @param range     Source range the diagnostic applies to.
- * @param severity  DIAG_ERROR or DIAG_WARNING.
- * @param msg       Diagnostic message; copied into a fresh heap allocation.
+ * A single error or warning to be reported to the editor.  Carried forward
+ * from the previous design so that other modules referencing the type still
+ * compile, even though diagnostic collection is currently dropped.
  */
-void push_diagnostic(ParseResult *r, LspRange range, int severity,
-                     const char *msg);
+struct Diagnostic {
+    LspRange  range;
+    int       severity;
+    char     *message;
+};
 
-/* ── LSP publishDiagnostics notification ─────────────────────────────────── */
+/* ── LSP publishDiagnostics notification ─────────────────────────────────── *
+ *
+ * TODO(diagnostics): Diagnostic collection was removed during the tj_node
+ * refactor.  publish_diagnostics() is kept as a stub that publishes an
+ * empty diagnostics array for @p uri so the client clears any previous
+ * markers when documents are reparsed, opened, closed, or renamed.
+ *
+ * Restore richer behaviour once the global tj_node tree is in place and
+ * dep resolution / unresolved-include / syntax-error reporting are
+ * reintroduced.
+ */
 
 /**
- * Serialise @p r->diagnostics and send a textDocument/publishDiagnostics
- * notification for @p uri to the editor.
+ * Send a textDocument/publishDiagnostics notification for @p uri with an
+ * empty diagnostics array.
  *
- * @param uri  Document URI whose diagnostics are being published.
- * @param r    ParseResult whose diagnostics array is serialised.
+ * @param uri  Document URI whose diagnostics are being cleared.
  */
-void publish_diagnostics(const char *uri, const ParseResult *r);
+void publish_diagnostics(const char *uri);

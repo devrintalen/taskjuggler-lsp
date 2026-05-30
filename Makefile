@@ -74,10 +74,27 @@ LEXTEST_SRC = tools/lexer_test.c
 $(LEXTEST_BIN): $(GEN_HDR) $(GEN_LEX) $(LEXTEST_SRC)
 	$(CC) $(CFLAGS) -Wno-unused-function -o $@ $(LEXTEST_SRC) $(GEN_LEX)
 
+# ── Snapshot copy microbenchmark ─────────────────────────────────────────── #
+#
+# Measures and compares:
+#   - Slab copy:  mmap(MAP_ANONYMOUS) + memcpy of the parse_slab page.
+#   - Tree copy:  project_node_deep_copy() of the assembled ProjectNode tree.
+#
+# Usage: ./bench-snapshot test/tutorial.tjp
+#        ./bench-snapshot test/perf_highdeps.tjp --iterations 200
+
+BENCH_SNAP_BIN = bench-snapshot
+BENCH_SNAP_SRC = tools/bench_snapshot.c
+BENCH_SNAP_OBJ = src/parser.c src/project_tree.c $(GEN_LEX) $(GEN_GRAM)
+
+$(BENCH_SNAP_BIN): $(GEN_HDR) $(BENCH_SNAP_OBJ) $(BENCH_SNAP_SRC)
+	$(CC) $(CFLAGS) -Wno-unused-function -o $@ $(BENCH_SNAP_SRC) $(BENCH_SNAP_OBJ) -lpthread
+
 clean:
 	rm -f $(OBJ) $(BIN) $(GEN_LEX) $(GEN_GRAM) $(GEN_HDR)
 	rm -f $(DEBUG_OBJ) $(DEBUG_BIN)
 	rm -f $(LEXTEST_BIN) tools/lexer_test.o
+	rm -f $(BENCH_SNAP_BIN)
 	rm -f $(OBJ:.o=.d) $(DEBUG_OBJ:.o=.d)
 
 # Auto-generated header dependencies from -MMD.
@@ -92,4 +109,4 @@ docs:
 docs-clean:
 	rm -rf doc/_doxygen/
 
-.PHONY: all debug clean lexer-test docs docs-clean
+.PHONY: all debug clean lexer-test bench-snapshot docs docs-clean

@@ -21,20 +21,15 @@
 #include "document_symbol.h"
 #include "grammar.tab.h"
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 
 /* LSP SymbolKind values — only used for JSON serialization. */
-
-/** SymbolKind for a project (rendered as a module). */
 #define SK_MODULE   2
-/** SymbolKind for a task (rendered as a function). */
 #define SK_FUNCTION 12
-/** SymbolKind for an account (rendered as a variable). */
 #define SK_VARIABLE 13
-/** SymbolKind for a resource (rendered as an object). */
 #define SK_OBJECT   19
-/** SymbolKind for a shift (rendered as an event). */
 #define SK_EVENT    24
 
 int symbol_kind_for(int keyword) {
@@ -45,6 +40,55 @@ int symbol_kind_for(int keyword) {
     case KW_SHIFT:    return SK_EVENT;
     default:          return SK_FUNCTION;
     }
+}
+
+/* ── tj_node tree navigation ─────────────────────────────────────────────── */
+
+tj_node *tj_node_find_path(const parse_slab *slab,
+                            const tj_idx *child_indices, int n,
+                            const char **path, int plen) {
+    if (plen == 0 || n == 0) return NULL;
+    for (int i = 0; i < n; i++) {
+        tj_node *node = slab_node(slab, child_indices[i]);
+        if (!node) continue;
+        const char *node_id = slab_str(slab, node->id_off);
+        if (node->keyword == KW_TASK && node_id &&
+                strcmp(node_id, path[0]) == 0) {
+            if (plen == 1) return node;
+            tj_idx *kids = slab_children(slab, node);
+            return tj_node_find_path(slab, kids, node->num_children,
+                                     path + 1, plen - 1);
+        }
+        /* Transparently traverse project containers so that task scope paths
+         * rooted inside a project body resolve correctly. */
+        if (node->keyword == KW_PROJECT) {
+            tj_idx *kids = slab_children(slab, node);
+            tj_node *found = tj_node_find_path(
+                slab, kids, node->num_children, path, plen);
+            if (found) return found;
+        }
+    }
+    return NULL;
+}
+
+tj_node *tj_node_at(const parse_slab *slab,
+                    const TokenSpan *tokens, int num_tokens, LspPos pos) {
+    int lo = 0, hi = num_tokens - 1, found = -1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (tokens[mid].token_kind == TK_EOF) { hi = mid - 1; continue; }
+        if (pos_cmp(tokens[mid].start, pos) <= 0) {
+            found = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if (found < 0) return NULL;
+    tj_node *s = slab_node(slab, tokens[found].owner_idx);
+    while (s && pos_cmp(pos, s->range.end) >= 0)
+        s = slab_node(slab, s->parent_node);
+    return s;
 }
 
 /** Convenience macro: push a string literal without calling strlen at runtime. */
@@ -67,18 +111,11 @@ yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r) {
 
 /** Growable byte buffer used to assemble the document-symbol JSON payload. */
 typedef struct {
-    char   *data;  /**< heap-allocated bytes; not NUL-terminated */
-    size_t  len;   /**< number of bytes currently in use */
-    size_t  cap;   /**< allocated capacity */
+    char   *data;
+    size_t  len;
+    size_t  cap;
 } Buf;
 
-/**
- * Append @p n bytes from @p s to @p b, growing the buffer if needed.
- *
- * @param b  Destination buffer.
- * @param s  Source bytes (not required to be NUL-terminated).
- * @param n  Number of bytes to copy.
- */
 static void buf_push(Buf *b, const char *s, size_t n) {
     if (b->len + n > b->cap) {
         size_t new_cap = b->cap ? b->cap * 2 : 4096;
@@ -92,14 +129,6 @@ static void buf_push(Buf *b, const char *s, size_t n) {
     b->len += n;
 }
 
-
-/**
- * Hand-rolled uint32 formatter; avoids sprintf overhead.
- *
- * @param p  Destination buffer with at least 10 bytes of space.
- * @param v  Value to format.
- * @return Number of bytes written to @p p.
- */
 static int write_uint(char *p, uint32_t v) {
     if (v == 0) { *p = '0'; return 1; }
     char tmp[10];
@@ -112,14 +141,7 @@ static int write_uint(char *p, uint32_t v) {
     return len;
 }
 
-/**
- * Append the decimal representation of @p v to @p b.
- *
- * @param b  Destination buffer.
- * @param v  Value to serialise.
- */
 static void buf_push_uint(Buf *b, uint32_t v) {
-    /* 10 digits max for uint32 */
     if (b->len + 10 > b->cap) {
         size_t new_cap = b->cap ? b->cap * 2 : 4096;
         while (new_cap < b->len + 10) new_cap *= 2;
@@ -131,13 +153,6 @@ static void buf_push_uint(Buf *b, uint32_t v) {
     b->len += (size_t)write_uint(b->data + b->len, v);
 }
 
-/**
- * Write a JSON-escaped string value including surrounding double quotes.
- * Bulk-copies runs of safe characters to avoid per-byte call overhead.
- *
- * @param b  Destination buffer.
- * @param s  NUL-terminated string to encode.
- */
 static void buf_push_json_str(Buf *b, const char *s) {
     buf_push(b, "\"", 1);
     const char *run = s;
@@ -156,17 +171,10 @@ static void buf_push_json_str(Buf *b, const char *s) {
             run = p + 1;
         }
     }
-    /* flush remaining safe run (p now points at NUL) */
     if (p > run) buf_push(b, run, (size_t)(p - run));
     buf_push(b, "\"", 1);
 }
 
-/**
- * Append a serialised LSP Range object to @p b.
- *
- * @param b  Destination buffer.
- * @param r  Range to serialise.
- */
 static void write_range_buf(Buf *b, LspRange r) {
     PUSH_LIT(b, "{\"start\":{\"line\":");
     buf_push_uint(b, r.start.line);
@@ -179,18 +187,13 @@ static void write_range_buf(Buf *b, LspRange r) {
     PUSH_LIT(b, "}}");
 }
 
-/**
- * Append a serialised LSP DocumentSymbol object (and any children) to
- * @p b.
- *
- * @param b    Destination buffer.
- * @param sym  Symbol to serialise.
- */
-static void write_sym_buf(Buf *b, const DocSymbol *sym) {
+static void write_node_buf(Buf *b, const parse_slab *slab, const tj_node *sym) {
+    const char *name = slab_str(slab, sym->name_off);
+    const char *id   = slab_str(slab, sym->id_off);
     PUSH_LIT(b, "{\"name\":");
-    buf_push_json_str(b, sym->name   ? sym->name   : "");
+    buf_push_json_str(b, name ? name : "");
     PUSH_LIT(b, ",\"detail\":");
-    buf_push_json_str(b, sym->id ? sym->id : "");
+    buf_push_json_str(b, id   ? id   : "");
     PUSH_LIT(b, ",\"kind\":");
     buf_push_uint(b, (uint32_t)symbol_kind_for(sym->keyword));
     PUSH_LIT(b, ",\"range\":");
@@ -198,22 +201,31 @@ static void write_sym_buf(Buf *b, const DocSymbol *sym) {
     PUSH_LIT(b, ",\"selectionRange\":");
     write_range_buf(b, sym->selection_range);
     if (sym->num_children > 0) {
+        tj_idx *kids = slab_children(slab, sym);
         PUSH_LIT(b, ",\"children\":[");
         for (int i = 0; i < sym->num_children; i++) {
             if (i > 0) buf_push(b, ",", 1);
-            write_sym_buf(b, sym->children[i]);
+            tj_node *child = slab_node(slab, kids[i]);
+            if (child) write_node_buf(b, slab, child);
         }
         buf_push(b, "]", 1);
     }
     buf_push(b, "}", 1);
 }
 
-char *build_document_symbols_json(DocSymbol *const *syms, int n, size_t *out_len) {
+char *build_document_symbols_json(const parse_slab *slab, tj_idx root_idx,
+                                   size_t *out_len) {
+    tj_node *root = slab_node(slab, root_idx);
     Buf b = {0};
     buf_push(&b, "[", 1);
-    for (int i = 0; i < n; i++) {
-        if (i > 0) buf_push(&b, ",", 1);
-        write_sym_buf(&b, syms[i]);
+    if (root) {
+        tj_idx *kids = slab_children(slab, root);
+        int n = root->num_children;
+        for (int i = 0; i < n; i++) {
+            if (i > 0) buf_push(&b, ",", 1);
+            tj_node *child = slab_node(slab, kids[i]);
+            if (child) write_node_buf(&b, slab, child);
+        }
     }
     buf_push(&b, "]", 1);
     *out_len = b.len;

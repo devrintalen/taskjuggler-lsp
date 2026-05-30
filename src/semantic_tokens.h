@@ -75,17 +75,51 @@ extern const char * const semantic_token_modifier_names[];
 extern const int          num_semantic_token_modifiers;
 
 /**
+ * Last semantic-tokens response sent to the client for a single
+ * document, plus the counter used to mint future resultIds.  Retained
+ * across revalidations so semanticTokens/full/delta requests can diff
+ * against exactly what the client is holding.  `data` / `result_id` are
+ * NULL until the client makes its first semanticTokens request;
+ * `next_result_id` starts at 1.  Synchronization is the caller's
+ * responsibility (the document store holds these under its mutex).
+ */
+typedef struct SemanticTokenResult {
+    uint32_t *data;            /**< flat uint32 buffer last sent (NULL until first response) */
+    size_t    count;           /**< entries in data (multiple of 5) */
+    char     *result_id;       /**< resultId returned alongside data */
+    uint64_t  next_result_id;  /**< monotonic counter for minting fresh resultIds */
+} SemanticTokenResult;
+
+/**
+ * Free `data` and `result_id` and zero them out.  `next_result_id` is
+ * left intact so a subsequent response continues the id sequence.
+ * NULL-safe.
+ */
+void semantic_token_result_release(SemanticTokenResult *r);
+
+/**
+ * Replace the cached payload in @p r with @p new_data / @p new_count /
+ * @p new_result_id, freeing whatever was there before.  Ownership of
+ * both pointers transfers to @p r.  Leaves `next_result_id` untouched.
+ */
+void semantic_token_result_replace(SemanticTokenResult *r,
+                                    uint32_t *new_data, size_t new_count,
+                                    char *new_result_id);
+
+/**
  * Compute the LSP-encoded semantic-tokens data array for the given token
  * spans.  The output uses the standard five-integer delta encoding per
  * token: [deltaLine, deltaStartChar, length, tokenType, tokenModifiers].
  *
  * Multi-line tokens (TK_BLOCK_COMMENT, TK_MULTI_LINE_STR) are split into
  * one entry per source line as required by the protocol.  The accumulated
- * text stored in TokenSpan.text is used to compute per-line lengths.
+ * text stored in the string pool at TokenSpan.text_off is used to compute
+ * per-line lengths.
  *
  * Tokens recorded in tok_spans solely for cursor-position queries
  * (TK_LBRACE, TK_RBRACE, TK_BANG, TK_DOT, TK_COMMA) are silently skipped.
  *
+ * @param slab             Parse slab owning the token string pool.
  * @param spans            Token spans of the current document.
  * @param num_spans        Length of @p spans.
  * @param num_sem_entries  Upper bound on the number of semantic-token
@@ -96,7 +130,8 @@ extern const int          num_semantic_token_modifiers;
  * @param out_count        Receives the number of uint32 entries written.
  *                         Always a multiple of 5.
  */
-void compute_semantic_tokens_data(const TokenSpan *spans, int num_spans,
+void compute_semantic_tokens_data(const parse_slab *slab,
+                                   const TokenSpan *spans, int num_spans,
                                    int num_sem_entries,
                                    uint32_t **out_buf, size_t *out_count);
 

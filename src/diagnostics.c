@@ -18,69 +18,21 @@
 
 /** @file */
 
-/* See doc/modules/diagnostics.rst for the module overview. */
-
 #include "diagnostics.h"
-#include "parser.h"
 #include "server.h"
 
 #include <yyjson.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
-/* ── Diagnostic accumulation ─────────────────────────────────────────────── */
-
-/* Append a diagnostic to r's diagnostics array, growing it if needed.
- * range    — source range to highlight in the editor
- * severity — DIAG_ERROR or DIAG_WARNING
- * msg      — human-readable message; a heap copy is made and owned by r
- */
-void push_diagnostic(ParseResult *r, LspRange range, int severity,
-                     const char *msg) {
-    if (r->num_diagnostics >= r->diag_cap) {
-        int nc = r->diag_cap ? r->diag_cap * 2 : 4;
-        Diagnostic *tmp = realloc(r->diagnostics,
-                                  (size_t)nc * sizeof(Diagnostic));
-        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        r->diagnostics = tmp;
-        r->diag_cap = nc;
-    }
-    r->diagnostics[r->num_diagnostics++] =
-        (Diagnostic){ range, severity, strdup(msg) };
-}
-
-/* ── LSP publishDiagnostics notification ─────────────────────────────────── */
-
-/* Must only be called from the coordinator thread.  The test harness in
- * tools/lsp_test.py compares notifications positionally (responses are
- * matched by id, but notifications are an ordered list), so a worker
- * emitting publishDiagnostics concurrently with the coordinator would
- * interleave nondeterministically with mutation-emitted notifications
- * and break golden-file diffs.  Today every call site sits inside a
- * mutation handler (or revalidate_all_docs, which is called from one). */
-void publish_diagnostics(const char *uri, const ParseResult *r) {
+/* TODO(diagnostics): see diagnostics.h.  This stub publishes an empty
+ * diagnostics array so the editor clears stale markers whenever the
+ * server would previously have re-published.  Once diagnostic
+ * collection is restored, this function will serialise the rebuilt
+ * diagnostic set. */
+void publish_diagnostics(const char *uri) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
 
     yyjson_mut_val *diag_arr = yyjson_mut_arr(doc);
-    for (int i = 0; i < r->num_diagnostics; i++) {
-        const Diagnostic *d = &r->diagnostics[i];
-        yyjson_mut_val *dj = yyjson_mut_obj(doc);
-
-        yyjson_mut_val *range = yyjson_mut_obj(doc);
-        yyjson_mut_val *start = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_uint(doc, start, "line",      d->range.start.line);
-        yyjson_mut_obj_add_uint(doc, start, "character", d->range.start.character);
-        yyjson_mut_val *end = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_uint(doc, end, "line",      d->range.end.line);
-        yyjson_mut_obj_add_uint(doc, end, "character", d->range.end.character);
-        yyjson_mut_obj_add_val(doc, range, "start", start);
-        yyjson_mut_obj_add_val(doc, range, "end",   end);
-        yyjson_mut_obj_add_val(doc,  dj, "range",    range);
-        yyjson_mut_obj_add_uint(doc, dj, "severity", (uint64_t)d->severity);
-        yyjson_mut_obj_add_str(doc,  dj, "message",  d->message);
-        yyjson_mut_arr_add_val(diag_arr, dj);
-    }
 
     yyjson_mut_val *params = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_str(doc, params, "uri", uri);
@@ -94,6 +46,8 @@ void publish_diagnostics(const char *uri, const ParseResult *r) {
     yyjson_mut_doc_set_root(doc, notif);
     char *text = yyjson_mut_write(doc, 0, NULL);
     yyjson_mut_doc_free(doc);
-    lsp_send_message(text);
-    free(text);
+    if (text) {
+        lsp_send_message(text);
+        free(text);
+    }
 }
