@@ -50,22 +50,17 @@ static void push_range(yyjson_mut_doc *doc, yyjson_mut_val *arr,
  *
  * @param doc   Destination mutable JSON document.
  * @param arr   FoldingRange[] array.
- * @param slab  Parse slab owning the node and children arrays.
- * @param kids  Children index array to walk.
- * @param n     Length of @p kids.
+ * @param syms  Sibling symbols to walk.
+ * @param n     Length of @p syms.
  */
 static void emit_symbol_ranges(yyjson_mut_doc *doc, yyjson_mut_val *arr,
-                                const parse_slab *slab,
-                                const tj_idx *kids, int n) {
+                                tj_node *const *syms, int n) {
     for (int i = 0; i < n; i++) {
-        tj_node *sym = slab_node(slab, kids[i]);
-        if (!sym) continue;
-        if (sym->range.end.line > sym->range.start.line)
+        if (syms[i]->range.end.line > syms[i]->range.start.line)
             push_range(doc, arr,
-                       sym->range.start.line,
-                       sym->range.end.line, "region");
-        tj_idx *child_kids = slab_children(slab, sym);
-        emit_symbol_ranges(doc, arr, slab, child_kids, sym->num_children);
+                       syms[i]->range.start.line,
+                       syms[i]->range.end.line, "region");
+        emit_symbol_ranges(doc, arr, syms[i]->children, syms[i]->num_children);
     }
 }
 
@@ -118,15 +113,11 @@ static void emit_token_ranges(yyjson_mut_doc *doc, yyjson_mut_val *arr,
  *   — Token scan for bracket pairs ([ ... ]) and multi-line block comments
  */
 yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
-                                           const parse_slab *slab,
                                            const TokenSpan *spans, int num_spans,
-                                           tj_idx root_idx) {
+                                           tj_node *const *symbols,
+                                           int num_symbols) {
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    tj_node *root = slab_node(slab, root_idx);
-    if (root) {
-        tj_idx *kids = slab_children(slab, root);
-        emit_symbol_ranges(doc, arr, slab, kids, root->num_children);
-    }
+    emit_symbol_ranges(doc, arr, symbols, num_symbols);
     emit_token_ranges(doc, arr, spans, num_spans);
     return arr;
 }

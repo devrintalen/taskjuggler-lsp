@@ -89,25 +89,22 @@ static int parse_compact_duration(const char *text,
  * token stream — either a compact `TK_DURATION` or
  * `TK_INTEGER`|`TK_FLOAT` + `TK_IDENT`.
  */
-static int parse_dur_val_at(const parse_slab *slab,
-                            const TokenSpan *spans, int num_spans,
+static int parse_dur_val_at(const TokenSpan *spans, int num_spans,
                             int start_idx,
                             int *out_value, char *out_unit) {
     if (start_idx >= num_spans) return 0;
     const TokenSpan *t = &spans[start_idx];
     if (t->token_kind == TK_DURATION) {
-        return parse_compact_duration(slab_str(slab, t->text_off),
-                                      out_value, out_unit);
+        return parse_compact_duration(t->text, out_value, out_unit);
     }
     if (t->token_kind == TK_INTEGER || t->token_kind == TK_FLOAT) {
         if (start_idx + 1 >= num_spans) return 0;
         const TokenSpan *u = &spans[start_idx + 1];
         if (u->token_kind != TK_IDENT) return 0;
-        char unit = canon_unit(slab_str(slab, u->text_off));
+        char unit = canon_unit(u->text);
         if (!unit) return 0;
-        const char *ttext = slab_str(slab, t->text_off);
-        if (!ttext) return 0;
-        int value = (int)strtol(ttext, NULL, 10);
+        if (!t->text) return 0;
+        int value = (int)strtol(t->text, NULL, 10);
         *out_value = value;
         *out_unit  = unit;
         return 1;
@@ -242,7 +239,6 @@ static void push_lens(yyjson_mut_doc *doc, yyjson_mut_val *arr,
  * with other build_*_json entry points.
  */
 yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
-                                     const parse_slab *slab,
                                      const TokenSpan *spans, int num_spans,
                                      tj_node *const *symbols,
                                      int num_symbols) {
@@ -255,13 +251,13 @@ yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
     for (int i = 0; i < num_spans; i++) {
         const TokenSpan *t = &spans[i];
         if (t->token_kind != KW_LENGTH && t->token_kind != KW_DURATION) continue;
-        tj_node *owner = slab_node(slab, t->owner_idx);
+        tj_node *owner = t->owner;
         if (!owner || owner->keyword != KW_TASK) continue;
         if (!owner->has_start && !owner->has_end) continue;
 
         int value;
         char unit;
-        if (!parse_dur_val_at(slab, spans, num_spans, i + 1, &value, &unit)) continue;
+        if (!parse_dur_val_at(spans, num_spans, i + 1, &value, &unit)) continue;
         if (value == 0) continue;
 
         int direction;

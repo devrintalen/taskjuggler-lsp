@@ -26,14 +26,15 @@
 /**
  * Append SymbolInformation entries whose name contains @p query
  * (case-insensitive substring; empty query matches all) from the given
- * parse slab's symbol tree into @p arr.
+ * symbol tree into @p arr.
  *
  * @param doc    Destination mutable JSON document (owns allocations).
  * @param query  Case-insensitive substring filter; empty string matches all.
- * @param slab   Parse slab owning the nodes and string pool.
+ * @param syms   Top-level symbols to walk.
+ * @param n      Length of @p syms.
  * @param uri    URI placed into each entry's `location.uri` field.
  * @param arr    JSON array to append SymbolInformation entries to.
  */
 void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
-                                const parse_slab *slab,
+                                tj_node *const *syms, int n,
                                 const char *uri, yyjson_mut_val *arr);

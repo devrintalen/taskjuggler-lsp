@@ -45,7 +45,6 @@
  * Values are allocated in @p doc; caller owns @p doc.
  *
  * @param doc          Destination mutable JSON document.
- * @param slab         Parse slab owning the token and node arrays.
  * @param spans        Token spans of the current document.
  * @param num_spans    Length of @p spans.
  * @param symbols      Top-level symbols of the current document.
@@ -53,7 +52,6 @@
  * @return The newly created JSON array of CodeLens objects (may be empty).
  */
 yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
-                                     const parse_slab *slab,
                                      const TokenSpan *spans,
                                      int num_spans,
                                      tj_node *const *symbols,

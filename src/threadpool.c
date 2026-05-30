@@ -23,100 +23,59 @@
 
 #include <pthread.h>
 
-/* Number of parallel query workers.  Queries take a workspace_snapshot
- * under docs_mutex, then run lock-free, so multiple workers produce
- * real parallelism on multi-core systems. */
-#define NUM_QUERY_WORKERS 4
+/* TODO(workspace-snapshot): one query worker for now.  The snapshot +
+ * immutable-parse-result machinery that previously let query workers
+ * run lock-free was retired during the tj_node refactor; while
+ * server_dispatch_query() serialises under docs_mutex, raising the
+ * worker count buys nothing.  See job_queue.h for context. */
+#define NUM_QUERY_WORKERS 1
 
 /* Single arrival-ordered FIFO populated by the reader.  The
  * coordinator pops from it in order, which is what enforces the LSP
- * "messages processed in arrival order" rule: notifications always
- * execute before any later query is handed to a worker. */
+ * "messages processed in arrival order" rule across queries and
+ * notifications alike. */
 static JobQueue *work_queue;
 
-/* Internal handoff queue: the coordinator pushes query jobs onto this
- * for the worker pool to consume.  Notifications never go here —
- * the coordinator dispatches them inline before picking up the next job. */
+/* Internal handoff queue: the coordinator pushes query jobs (with
+ * their snapshot already attached) onto this for the query worker
+ * pool to consume.  Notifications never go here — the coordinator
+ * dispatches them inline. */
 static JobQueue *request_queue;
 
 static pthread_t coordinator_thread;
 static pthread_t query_threads[NUM_QUERY_WORKERS];
 static int       pool_started = 0;
 
-/* ── Thread-safety contract ──────────────────────────────────────────────────
+/* Coordinator thread.  Pops jobs from work_queue in arrival order and
+ * dispatches each inline so the LSP "messages processed in arrival
+ * order" rule is preserved.
  *
- * Three thread classes:
- *
- *   reader      (main.c) — single thread; calls server_process() which
- *               classifies each message and enqueues a Job onto work_queue.
- *               No document state is read or written here.
- *
- *   coordinator (this file, one thread) — pops work_queue in arrival order.
- *               Notifications and lifecycle requests (initialize, shutdown,
- *               semanticTokens/full[/delta]) run inline under docs_mutex so
- *               later messages observe their side effects.  For regular query
- *               jobs it calls server_snapshot_for_job() — a brief docs_mutex
- *               hold to copy slab pages and deep-copy the project tree —
- *               then pushes the enriched job to request_queue.
- *
- *   workers     (this file, NUM_QUERY_WORKERS threads) — pop request_queue
- *               and call server_dispatch_query().  Workers are LOCK-FREE:
- *               they read only the private workspace_snapshot attached to
- *               their job and must NEVER touch:
- *
- *                 • docs[], projects[], num_projects — use only the snapshot
- *                 • g_workspace_root, g_cc_* globals
- *                 • global flex/bison state (g_build_root, yylval, yytext,
- *                   yylineno, yycolumn) — parse() must not be called here
- *                 • non-reentrant libc functions (strtok, localtime, gmtime,
- *                   strerror, rand, …) — use _r variants where applicable
- *
- *               Workers may safely use: their job's workspace_snapshot,
- *               immutable static-const lookup tables in feature files,
- *               and stack-local state.  stdout writes go via lsp_send_message()
- *               which serializes under stdout_mutex.
- *
- * Lock order (when multiple locks must be held simultaneously):
- *   work_queue.mutex → request_queue.mutex  (coordinator push direction)
- *   docs_mutex is never held while work_queue or request_queue is locked.
- * ─────────────────────────────────────────────────────────────────────────── */
-
-/* Coordinator thread.  Pops jobs from work_queue in arrival order.
- * Notifications are dispatched inline (preserving causal ordering with
- * respect to subsequent queries).  Query and cancelled-query jobs are
- * pushed to request_queue for the worker pool; workers own and free them. */
+ * TODO(workspace-snapshot): the previous design split queries onto a
+ * separate worker pool and used a refcounted snapshot taken here so
+ * query workers could run lock-free.  That machinery was retired
+ * during the tj_node refactor.  request_queue and the worker thread
+ * are still allocated below so the public threadpool API does not
+ * need to churn; once snapshotting returns, restore the split and
+ * re-enable query parallelism. */
 static void *coordinator(void *arg) {
     (void)arg;
     while (1) {
         Job *job = job_queue_pop(work_queue);
         if (!job) break;
-        if (job->is_notification || job->is_lifecycle) {
-            /* Notifications and lifecycle requests (initialize, shutdown) run
-             * inline so subsequent messages observe their state changes before
-             * the coordinator picks up the next job. */
-            if (job->is_notification)
-                server_dispatch_notification(job);
-            else
-                server_dispatch_query(job);
-            job_free(job);
+        if (job->is_notification) {
+            server_dispatch_notification(job);
         } else if (job->is_cancelled) {
             server_dispatch_cancelled(job);
-            job_free(job);
         } else {
-            /* Pre-compute the snapshot at coordinator time so the query
-             * worker sees document state consistent with when this request
-             * arrived, before any subsequent notification modifies docs[]. */
-            job->snapshot = server_snapshot_for_job(job);
-            job_queue_push(request_queue, job);
+            server_dispatch_query(job);
         }
+        job_free(job);
     }
     job_queue_close(request_queue);
     return NULL;
 }
 
-/* Query worker.  Pops from request_queue and runs each job lock-free
- * (server_dispatch_query takes a snapshot at the start, then releases
- * docs_mutex before doing any handler work). */
+/* Query worker.  Currently idle — see coordinator() TODO. */
 static void *query_worker(void *arg) {
     (void)arg;
     while (1) {

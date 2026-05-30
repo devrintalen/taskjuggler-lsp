@@ -38,7 +38,6 @@
  * first enclosing task carrying a dependency whose `source_range`
  * contains @p cursor.
  *
- * @param slab        Parse slab owning the token and node arrays.
  * @param tokens      Token spans of the document under the cursor.
  * @param num_tokens  Length of @p tokens.
  * @param cursor      Cursor position.
@@ -46,8 +45,7 @@
  * @param out_dep     Receives the matched dependency.
  * @return 1 when a dependency reference is found, 0 otherwise.
  */
-int dependency_at_cursor(const parse_slab *slab,
-                         const TokenSpan *tokens, int num_tokens,
+int dependency_at_cursor(const TokenSpan *tokens, int num_tokens,
                          LspPos cursor,
                          tj_node **out_owner, const Dependency **out_dep);
 
@@ -55,13 +53,11 @@ int dependency_at_cursor(const parse_slab *slab,
  * Return the task declaration whose identifier (`selection_range`)
  * contains @p cursor, walking outward from the innermost enclosing node.
  *
- * @param slab        Parse slab owning the token and node arrays.
  * @param tokens      Token spans of the document under the cursor.
  * @param num_tokens  Length of @p tokens.
  * @param cursor      Cursor position.
  * @return The matched task tj_node, or NULL when the cursor is not on a
  *         task identifier.
  */
-tj_node *task_decl_at_cursor(const parse_slab *slab,
-                              const TokenSpan *tokens, int num_tokens,
-                              LspPos cursor);
+tj_node *task_decl_at_cursor(const TokenSpan *tokens, int num_tokens,
+                             LspPos cursor);

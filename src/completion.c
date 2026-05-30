@@ -102,6 +102,7 @@ static int cursor_in_dquote(const char *text, LspPos cursor,
     /* Fast path: token spans already cover terminated strings. */
     TokenSpan ts = tok_span_at(tokens, num_tokens, cursor);
     int kind = ts.token_kind;
+    free(ts.text);
     if (kind == TK_STR)
         return 1;
 
@@ -154,6 +155,7 @@ static int cursor_in_scissors(const char *text, LspPos cursor,
     /* Fast path: check token spans. */
     TokenSpan ts = tok_span_at(tokens, num_tokens, cursor);
     int kind = ts.token_kind;
+    free(ts.text);
     if (kind == TK_MULTI_LINE_STR)
         return 1;
     if (kind != TK_EOF)
@@ -189,9 +191,7 @@ static int cursor_in_scissors(const char *text, LspPos cursor,
  * @return Heap-allocated copy of the identifier text, or NULL when the line
  *         starts with something other than an identifier.
  */
-static char *line_first_word(const parse_slab *slab,
-                             const TokenSpan *tokens, int num_tokens,
-                             LspPos cursor) {
+static char *line_first_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     for (int i = 0; i < num_tokens; i++) {
         const TokenSpan *t = &tokens[i];
         if (t->token_kind == TK_EOF) break;
@@ -199,7 +199,7 @@ static char *line_first_word(const parse_slab *slab,
         if (t->start.line < cursor.line) continue;
         if (t->start.line > cursor.line) break;
         /* First non-comment token on cursor.line */
-        if (t->token_kind == TK_IDENT && t->text_off) return strdup(slab_str(slab, t->text_off));
+        if (t->token_kind == TK_IDENT && t->text) return strdup(t->text);
         return NULL;
     }
     return NULL;
@@ -235,11 +235,14 @@ static int at_statement_start(const TokenSpan *tokens, int num_tokens, LspPos cu
  *         token, or an empty heap-allocated string otherwise.  Caller must
  *         free.
  */
-static char *partial_word(const parse_slab *slab,
-                          const TokenSpan *tokens, int num_tokens, LspPos cursor) {
+static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
     TokenSpan t = tok_span_at(tokens, num_tokens, cursor);
-    if (t.token_kind == TK_IDENT && t.text_off)
-        return strdup(slab_str(slab, t.text_off));
+    if (t.token_kind == TK_IDENT) {
+        char *txt = t.text; /* take ownership */
+        t.text = NULL;
+        return txt;
+    }
+    free(t.text);
     return strdup("");
 }
 
@@ -258,15 +261,14 @@ static char *partial_word(const parse_slab *slab,
  * @return Heap-allocated array of KW_* values; caller must free.  NULL when
  *         @p cursor sits outside every tj_node.
  */
-static int *block_stack(const parse_slab *slab,
-                        const TokenSpan *tokens, int num_tokens,
+static int *block_stack(const TokenSpan *tokens, int num_tokens,
                         LspPos cursor, int *out_n) {
     *out_n = 0;
 
     /* Count the chain depth up from the innermost. */
     int depth = 0;
-    for (tj_node *sym = tj_node_at(slab, tokens, num_tokens, cursor);
-         sym != NULL; sym = slab_node(slab, sym->parent_node))
+    for (tj_node *sym = tj_node_at(tokens, num_tokens, cursor);
+         sym != NULL; sym = sym->parent_node)
         depth++;
     if (depth == 0) return NULL;
 
@@ -275,8 +277,8 @@ static int *block_stack(const parse_slab *slab,
 
     /* Fill in reverse so the result reads outermost-first. */
     int i = depth;
-    for (tj_node *sym = tj_node_at(slab, tokens, num_tokens, cursor);
-         sym != NULL; sym = slab_node(slab, sym->parent_node))
+    for (tj_node *sym = tj_node_at(tokens, num_tokens, cursor);
+         sym != NULL; sym = sym->parent_node)
         result[--i] = sym->keyword;
 
     *out_n = depth;
@@ -486,34 +488,27 @@ static void idlist_free(IdList *il) {
  *                be `""`).
  * @param out     IdList to append to.
  */
-static void collect_ids(const parse_slab *slab,
-                        const tj_idx *kids, int n, int kind,
-                        const char *prefix, IdList *out) {
+static void collect_ids(tj_node *const *syms, int n, int kind,
+                         const char *prefix, IdList *out) {
     for (int i = 0; i < n; i++) {
-        tj_node *node = slab_node(slab, kids[i]);
-        if (!node) continue;
-        const char *node_id   = slab_str(slab, node->id_off);
-        const char *node_name = slab_str(slab, node->name_off);
-        if (node->keyword == kind && node_id && node_id[0]) {
+        if (syms[i]->keyword == kind && syms[i]->id && syms[i]->id[0]) {
             size_t plen = prefix ? strlen(prefix) : 0;
-            size_t dlen = strlen(node_id);
+            size_t dlen = strlen(syms[i]->id);
             size_t qlen = plen ? plen + 1 + dlen : dlen;
             char *qid = malloc(qlen + 1);
             if (!qid) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
             if (!prefix || !prefix[0]) {
-                memcpy(qid, node_id, dlen + 1);
+                memcpy(qid, syms[i]->id, dlen + 1);
             } else {
                 memcpy(qid, prefix, plen);
                 qid[plen] = '.';
-                memcpy(qid + plen + 1, node_id, dlen + 1);
+                memcpy(qid + plen + 1, syms[i]->id, dlen + 1);
             }
-            idlist_push(out, qid, node_name ? node_name : "");
-            tj_idx *child_kids = slab_children(slab, node);
-            collect_ids(slab, child_kids, node->num_children, kind, qid, out);
+            idlist_push(out, qid, syms[i]->name ? syms[i]->name : "");
+            collect_ids(syms[i]->children, syms[i]->num_children, kind, qid, out);
             free(qid);
         } else {
-            tj_idx *child_kids = slab_children(slab, node);
-            collect_ids(slab, child_kids, node->num_children, kind, prefix, out);
+            collect_ids(syms[i]->children, syms[i]->num_children, kind, prefix, out);
         }
     }
 }
@@ -534,18 +529,15 @@ static void collect_ids(const parse_slab *slab,
  * @return Heap-allocated array of heap-allocated strings; caller must free
  *         each string and the array.  NULL when no enclosing task exists.
  */
-static char **current_task_scope(const parse_slab *slab,
-                                 const TokenSpan *tokens, int num_tokens,
+static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
                                  LspPos cursor, int *out_n) {
     *out_n = 0;
 
-    tj_node *innermost = tj_node_at(slab, tokens, num_tokens, cursor);
+    tj_node *innermost = tj_node_at(tokens, num_tokens, cursor);
 
     int depth = 0;
-    for (tj_node *sym = innermost; sym != NULL;
-         sym = slab_node(slab, sym->parent_node)) {
-        const char *sym_id = slab_str(slab, sym->id_off);
-        if (sym->keyword == KW_TASK && sym_id && sym_id[0])
+    for (tj_node *sym = innermost; sym != NULL; sym = sym->parent_node) {
+        if (sym->keyword == KW_TASK && sym->id && sym->id[0])
             depth++;
     }
     if (depth == 0) return NULL;
@@ -554,11 +546,9 @@ static char **current_task_scope(const parse_slab *slab,
     if (!result) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
 
     int i = depth;
-    for (tj_node *sym = innermost; sym != NULL;
-         sym = slab_node(slab, sym->parent_node)) {
-        const char *sym_id = slab_str(slab, sym->id_off);
-        if (sym->keyword == KW_TASK && sym_id && sym_id[0])
-            result[--i] = strdup(sym_id);
+    for (tj_node *sym = innermost; sym != NULL; sym = sym->parent_node) {
+        if (sym->keyword == KW_TASK && sym->id && sym->id[0])
+            result[--i] = strdup(sym->id);
     }
 
     *out_n = depth;
@@ -675,15 +665,13 @@ static int id_kind_for_keyword(const char *keyword) {
  * @param id_kind      KW_* kind to collect.
  * @param ids          Destination IdList.
  */
-static void collect_all_ids(const parse_slab *slab,
-                            const tj_idx *kids, int num_kids,
-                            const parse_slab **extra_slabs,
-                            const tj_idx **extra_pools,
+static void collect_all_ids(tj_node *const *symbols, int num_symbols,
+                            tj_node *const **extra_pools,
                             const int *extra_counts, int num_extra,
                             int id_kind, IdList *ids) {
-    collect_ids(slab, kids, num_kids, id_kind, "", ids);
+    collect_ids(symbols, num_symbols, id_kind, "", ids);
     for (int e = 0; e < num_extra; e++)
-        collect_ids(extra_slabs[e], extra_pools[e], extra_counts[e], id_kind, "", ids);
+        collect_ids(extra_pools[e], extra_counts[e], id_kind, "", ids);
 }
 
 /**
@@ -768,12 +756,10 @@ static void emit_id_item(yyjson_mut_doc *doc, yyjson_mut_val *items,
  * @return Number of items added to @p items.
  */
 static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
-                                  const parse_slab *slab,
                                   const TokenSpan *tokens, int num_tokens,
                                   LspPos cursor,
-                                  const tj_idx *kids, int num_kids,
-                                  const parse_slab **extra_slabs,
-                                  const tj_idx **extra_pools,
+                                  tj_node *const *symbols, int num_symbols,
+                                  tj_node *const **extra_pools,
                                   const int *extra_counts, int num_extra,
                                   int id_kind, int *out_incomplete) {
     LspPos first_bang_pos = {0, 0};
@@ -781,35 +767,20 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                                          &first_bang_pos);
     IdList ids = {0};
     char bang_prefix[64] = "";
-    /* bang_prefix renders one '!' per bang plus a NUL; clamp so the run can
-     * never overflow the buffer (also lets the compiler bound the memset). */
-    if (bang_count < 0) bang_count = 0;
-    if (bang_count > (int)sizeof(bang_prefix) - 1)
-        bang_count = (int)sizeof(bang_prefix) - 1;
 
     if (bang_count == 0) {
-        collect_all_ids(slab, kids, num_kids, extra_slabs, extra_pools, extra_counts,
+        collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
                         num_extra, id_kind, &ids);
     } else {
         int scope_n = 0;
-        char **scope = current_task_scope(slab, tokens, num_tokens,
-                                          cursor, &scope_n);
+        char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
 
         if (bang_count <= scope_n) {
-            int path_len = scope_n - bang_count;
-            if (path_len == 0) {
-                /* Climbed all the way to the document root. */
-                collect_ids(slab, kids, num_kids, id_kind, "", &ids);
-            } else {
-                tj_node *found = tj_node_find_path(
-                    slab, kids, num_kids,
-                    (const char **)scope, path_len);
-                if (found) {
-                    tj_idx *found_kids = slab_children(slab, found);
-                    collect_ids(slab, found_kids, found->num_children,
-                                id_kind, "", &ids);
-                }
-            }
+            int ch_n = 0;
+            tj_node *const *ch = tj_node_find_path(
+                symbols, num_symbols,
+                (const char **)scope, scope_n - bang_count, &ch_n);
+            if (ch) collect_ids(ch, ch_n, id_kind, "", &ids);
         }
 
         memset(bang_prefix, '!', (size_t)bang_count);
@@ -857,23 +828,20 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
  * @return Number of items added to @p items.
  */
 static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
-                                const parse_slab *slab,
                                 const TokenSpan *tokens, int num_tokens,
                                 LspPos cursor,
-                                const tj_idx *kids, int num_kids,
-                                const parse_slab **extra_slabs,
-                                const tj_idx **extra_pools,
+                                tj_node *const *symbols, int num_symbols,
+                                tj_node *const **extra_pools,
                                 const int *extra_counts, int num_extra,
                                 int id_kind, int *out_incomplete) {
     if (id_kind == KW_TASK)
-        return build_dep_completions(doc, items, slab, tokens, num_tokens,
-                                     cursor,
-                                     kids, num_kids,
-                                     extra_slabs, extra_pools, extra_counts, num_extra,
+        return build_dep_completions(doc, items, tokens, num_tokens, cursor,
+                                     symbols, num_symbols,
+                                     extra_pools, extra_counts, num_extra,
                                      id_kind, out_incomplete);
 
     IdList ids = {0};
-    collect_all_ids(slab, kids, num_kids, extra_slabs, extra_pools, extra_counts,
+    collect_all_ids(symbols, num_symbols, extra_pools, extra_counts,
                     num_extra, id_kind, &ids);
 
     int count = 0;
@@ -933,12 +901,10 @@ static int build_keyword_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
  *   — Keyword completions when at a statement-start position
  */
 yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
-                                        const parse_slab *slab,
                                         const TokenSpan *tokens, int num_tokens,
                                         LspPos cursor,
-                                        const tj_idx *kids, int num_kids,
-                                        const parse_slab **extra_slabs,
-                                        const tj_idx **extra_pools,
+                                        tj_node *const *symbols, int num_symbols,
+                                        tj_node *const **extra_pools,
                                         const int *extra_counts,
                                         int num_extra,
                                         const char *text) {
@@ -949,9 +915,9 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
 
     /* Gather cursor context: enclosing block stack, partial word, first word */
     int    stack_n    = 0;
-    int   *stack      = block_stack(slab, tokens, num_tokens, cursor, &stack_n);
-    char  *partial    = partial_word(slab, tokens, num_tokens, cursor);
-    char  *first_word = line_first_word(slab, tokens, num_tokens, cursor);
+    int   *stack      = block_stack(tokens, num_tokens, cursor, &stack_n);
+    char  *partial    = partial_word(tokens, num_tokens, cursor);
+    char  *first_word = line_first_word(tokens, num_tokens, cursor);
 
     yyjson_mut_val *items = yyjson_mut_arr(doc);
     int item_count = 0;
@@ -970,16 +936,15 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
      * would incorrectly return e.g. `depends` as the active context.) */
     if (!first_word || !partial[0] || strcmp(first_word, partial) != 0)
     {
-        ActiveContext ac = active_context(slab, tokens, num_tokens, cursor);
+        ActiveContext ac = active_context(tokens, num_tokens, cursor);
         int id_kind = id_kind_for_keyword(ac.keyword);
 
         if (id_kind) {
             item_count = build_id_completions(doc, items,
-                                              slab,
                                               tokens, num_tokens,
                                               cursor,
-                                              kids, num_kids,
-                                              extra_slabs, extra_pools, extra_counts, num_extra,
+                                              symbols, num_symbols,
+                                              extra_pools, extra_counts, num_extra,
                                               id_kind, &is_incomplete);
             free(ac.keyword);
             goto done;  /* Don't mix ID completions with keyword completions */
