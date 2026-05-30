@@ -44,35 +44,28 @@ int symbol_kind_for(int keyword) {
 
 /* ── tj_node tree navigation ─────────────────────────────────────────────── */
 
-tj_node *tj_node_find_path(const parse_slab *slab,
-                            const tj_idx *child_indices, int n,
-                            const char **path, int plen) {
-    if (plen == 0 || n == 0) return NULL;
+tj_node *const *tj_node_find_path(tj_node *const *syms, int n,
+                                  const char **path, int plen,
+                                  int *out_n) {
+    if (plen == 0) { *out_n = n; return syms; }
     for (int i = 0; i < n; i++) {
-        tj_node *node = slab_node(slab, child_indices[i]);
-        if (!node) continue;
-        const char *node_id = slab_str(slab, node->id_off);
-        if (node->keyword == KW_TASK && node_id &&
-                strcmp(node_id, path[0]) == 0) {
-            if (plen == 1) return node;
-            tj_idx *kids = slab_children(slab, node);
-            return tj_node_find_path(slab, kids, node->num_children,
-                                     path + 1, plen - 1);
-        }
+        if (syms[i]->keyword == KW_TASK && syms[i]->id &&
+                strcmp(syms[i]->id, path[0]) == 0)
+            return tj_node_find_path(syms[i]->children, syms[i]->num_children,
+                                     path + 1, plen - 1, out_n);
         /* Transparently traverse project containers so that task scope paths
          * rooted inside a project body resolve correctly. */
-        if (node->keyword == KW_PROJECT) {
-            tj_idx *kids = slab_children(slab, node);
-            tj_node *found = tj_node_find_path(
-                slab, kids, node->num_children, path, plen);
+        if (syms[i]->keyword == KW_PROJECT) {
+            tj_node *const *found = tj_node_find_path(
+                syms[i]->children, syms[i]->num_children, path, plen, out_n);
             if (found) return found;
         }
     }
+    *out_n = 0;
     return NULL;
 }
 
-tj_node *tj_node_at(const parse_slab *slab,
-                    const TokenSpan *tokens, int num_tokens, LspPos pos) {
+tj_node *tj_node_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
     int lo = 0, hi = num_tokens - 1, found = -1;
     while (lo <= hi) {
         int mid = lo + (hi - lo) / 2;
@@ -85,9 +78,9 @@ tj_node *tj_node_at(const parse_slab *slab,
         }
     }
     if (found < 0) return NULL;
-    tj_node *s = slab_node(slab, tokens[found].owner_idx);
+    tj_node *s = tokens[found].owner;
     while (s && pos_cmp(pos, s->range.end) >= 0)
-        s = slab_node(slab, s->parent_node);
+        s = s->parent_node;
     return s;
 }
 
@@ -187,13 +180,11 @@ static void write_range_buf(Buf *b, LspRange r) {
     PUSH_LIT(b, "}}");
 }
 
-static void write_node_buf(Buf *b, const parse_slab *slab, const tj_node *sym) {
-    const char *name = slab_str(slab, sym->name_off);
-    const char *id   = slab_str(slab, sym->id_off);
+static void write_node_buf(Buf *b, const tj_node *sym) {
     PUSH_LIT(b, "{\"name\":");
-    buf_push_json_str(b, name ? name : "");
+    buf_push_json_str(b, sym->name ? sym->name : "");
     PUSH_LIT(b, ",\"detail\":");
-    buf_push_json_str(b, id   ? id   : "");
+    buf_push_json_str(b, sym->id   ? sym->id   : "");
     PUSH_LIT(b, ",\"kind\":");
     buf_push_uint(b, (uint32_t)symbol_kind_for(sym->keyword));
     PUSH_LIT(b, ",\"range\":");
@@ -201,31 +192,22 @@ static void write_node_buf(Buf *b, const parse_slab *slab, const tj_node *sym) {
     PUSH_LIT(b, ",\"selectionRange\":");
     write_range_buf(b, sym->selection_range);
     if (sym->num_children > 0) {
-        tj_idx *kids = slab_children(slab, sym);
         PUSH_LIT(b, ",\"children\":[");
         for (int i = 0; i < sym->num_children; i++) {
             if (i > 0) buf_push(b, ",", 1);
-            tj_node *child = slab_node(slab, kids[i]);
-            if (child) write_node_buf(b, slab, child);
+            write_node_buf(b, sym->children[i]);
         }
         buf_push(b, "]", 1);
     }
     buf_push(b, "}", 1);
 }
 
-char *build_document_symbols_json(const parse_slab *slab, tj_idx root_idx,
-                                   size_t *out_len) {
-    tj_node *root = slab_node(slab, root_idx);
+char *build_document_symbols_json(tj_node *const *syms, int n, size_t *out_len) {
     Buf b = {0};
     buf_push(&b, "[", 1);
-    if (root) {
-        tj_idx *kids = slab_children(slab, root);
-        int n = root->num_children;
-        for (int i = 0; i < n; i++) {
-            if (i > 0) buf_push(&b, ",", 1);
-            tj_node *child = slab_node(slab, kids[i]);
-            if (child) write_node_buf(&b, slab, child);
-        }
+    for (int i = 0; i < n; i++) {
+        if (i > 0) buf_push(&b, ",", 1);
+        write_node_buf(&b, syms[i]);
     }
     buf_push(&b, "]", 1);
     *out_len = b.len;

@@ -33,7 +33,6 @@
  * Values are allocated in @p doc; caller owns @p doc.
  *
  * @param doc          Destination mutable JSON document.
- * @param slab         Parse slab owning the token and node arrays.
  * @param symbols      Top-level symbols of the current document.
  * @param num_symbols  Length of @p symbols.
  * @param tokens       Token spans of the current document.
@@ -46,7 +45,6 @@
  */
 yyjson_mut_val *build_document_highlight_json(
     yyjson_mut_doc *doc,
-    const parse_slab *slab,
     tj_node *const *symbols, int num_symbols,
     const TokenSpan *tokens, int num_tokens,
     LspPos cursor);

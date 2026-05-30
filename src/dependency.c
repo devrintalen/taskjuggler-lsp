@@ -32,17 +32,15 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-int dependency_at_cursor(const parse_slab *slab,
-                         const TokenSpan *tokens, int num_tokens,
+int dependency_at_cursor(const TokenSpan *tokens, int num_tokens,
                          LspPos cursor,
                          tj_node **out_owner, const Dependency **out_dep) {
-    for (tj_node *node = tj_node_at(slab, tokens, num_tokens, cursor);
-         node != NULL; node = slab_node(slab, node->parent_node)) {
-        Dependency *deps = slab_deps(slab, node);
+    for (tj_node *node = tj_node_at(tokens, num_tokens, cursor);
+         node != NULL; node = node->parent_node) {
         for (int i = 0; i < node->num_dependencies; i++) {
-            if (pos_in_range(cursor, deps[i].source_range)) {
+            if (pos_in_range(cursor, node->dependencies[i].source_range)) {
                 if (out_owner) *out_owner = node;
-                if (out_dep)   *out_dep   = &deps[i];
+                if (out_dep)   *out_dep   = &node->dependencies[i];
                 return 1;
             }
         }
@@ -50,11 +48,10 @@ int dependency_at_cursor(const parse_slab *slab,
     return 0;
 }
 
-tj_node *task_decl_at_cursor(const parse_slab *slab,
-                              const TokenSpan *tokens, int num_tokens,
-                              LspPos cursor) {
-    for (tj_node *node = tj_node_at(slab, tokens, num_tokens, cursor);
-         node != NULL; node = slab_node(slab, node->parent_node)) {
+tj_node *task_decl_at_cursor(const TokenSpan *tokens, int num_tokens,
+                             LspPos cursor) {
+    for (tj_node *node = tj_node_at(tokens, num_tokens, cursor);
+         node != NULL; node = node->parent_node) {
         if (node->keyword == KW_TASK &&
                 pos_in_range(cursor, node->selection_range))
             return node;

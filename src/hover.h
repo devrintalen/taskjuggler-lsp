@@ -26,7 +26,7 @@
 
 /**
  * Return a copy of the TokenSpan that spans @p pos, or a token with kind
- * TK_EOF if none.
+ * TK_EOF if none.  Caller must free result.text (if non-NULL).
  *
  * @param tokens      Token spans of the current document.
  * @param num_tokens  Length of @p tokens.
@@ -60,7 +60,6 @@ typedef struct {
  * heap-allocated.  *out_depth holds the brace depth at cursor.
  * The caller is responsible for freeing all kw fields in the stack.
  *
- * @param slab        Parse slab owning the token string pool.
  * @param tokens      Token spans of the current document.
  * @param num_tokens  Length of @p tokens.
  * @param cursor      Cursor position.
@@ -75,8 +74,7 @@ typedef struct {
  * @param out_depth   Receives the brace depth at @p cursor.
  * @return Number of entries written into @p stack.
  */
-int scan_kw_stack(const parse_slab *slab,
-                  const TokenSpan *tokens, int num_tokens, LspPos cursor,
+int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
                   int kind_max, int track_argc,
                   KwStackEntry *stack, int stack_cap,
                   uint32_t *out_depth);
@@ -89,12 +87,11 @@ int scan_kw_stack(const parse_slab *slab,
  * kind (such as the enclosing `project`) are skipped, matching TJP
  * dotted-path semantics.
  *
- * @param slab  Parse slab owning the node and string arrays.
- * @param sym   Target symbol.  May be NULL.
+ * @param sym  Target symbol.  May be NULL.
  * @return Heap-allocated dotted id (empty string if @p sym or its id is
  *         NULL).  Caller must free.
  */
-char *sym_qualified_id(const parse_slab *slab, const tj_node *sym);
+char *sym_qualified_id(const tj_node *sym);
 
 /** @brief Build the hover Markdown for a resolved task node in an assembled
  *  Project tree (full documentation at the definition in hover.c). */
@@ -125,12 +122,9 @@ typedef struct {
  * The returned `range` is the span of the keyword token itself (not its
  * arguments).
  *
- * @param slab        Parse slab owning the token string pool.
  * @param tokens      Token spans of the current document.
  * @param num_tokens  Length of @p tokens.
  * @param cursor      Cursor position.
  * @return The active keyword, or `{NULL, {0}}` when none exists.
  */
-ActiveKeyword active_keyword_at(const parse_slab *slab,
-                                const TokenSpan *tokens, int num_tokens,
-                                LspPos cursor);
+ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos cursor);

@@ -83,28 +83,20 @@ typedef struct {
 void token_free(Token *t);
 
 
-/* ── Slab reference types ────────────────────────────────────────────────── *
+/* ── tj_node ─────────────────────────────────────────────────────────────── *
  *
- * All intra-slab references use plain integer types (no pointers) so that a
- * raw memcpy of a slab's backing arrays produces a valid, self-consistent
- * copy without any pointer-fixup pass.
+ * Generic node type representing a named TaskJuggler declaration:
+ * task, account, resource (and shift), report (and related report-type
+ * declarations), or project.  The node kind is encoded by the `keyword`
+ * field — a raw KW_* / TK_* constant from grammar.tab.h.
  *
- *   tj_idx  — index into a flat node array; -1 == NULL
- *   str_off — byte offset into a string pool; 0 == NULL/empty
- *             (offset 0 is reserved; all stored strings begin at offset >= 1)
+ * Memory ownership: Documents own every tj_node they parse.  When this
+ * Document is freed, the entire owned subtree is freed.  Per-Document
+ * tj_node trees are immutable after parse — cross-Document hoisting
+ * lives in a wholly separate global tree built by server.c, not on
+ * these nodes.
  */
-typedef int32_t  tj_idx;
-typedef uint32_t str_off;
-
-
-/* ── Build-time types (INTERNAL — used only by parser.c and grammar.y) ─── *
- *
- * These pointer-based types are used only during the yyparse() build phase.
- * After parse, parse_slab_compact() converts them into slab-compatible flat
- * arrays.  Handler code must never reference tj_build_node directly.
- */
-
-typedef struct tj_build_node tj_build_node;
+typedef struct tj_node tj_node;
 
 /** Direction of a dependency reference. */
 typedef enum {
@@ -112,130 +104,148 @@ typedef enum {
     DEP_KIND_PRECEDES   /**< `precedes <ref>` — ref waits for this task */
 } DepKind;
 
-typedef struct {
-    DepKind          kind;
-    int              bang_count;
-    char            *path;
-    LspRange         source_range;
-    tj_build_node   *resolved_target;   /**< always NULL in the build phase */
-} dep_build;
+/**
+ * One captured `depends`/`precedes` reference on a task tj_node.
+ *
+ * Populated by the grammar action for `dep_ref` at parse time.  The
+ * resolver (to be reinstated in a follow-up commit) walks each
+ * Project's task tree once per rebuild and fills `resolved_target`
+ * with the matching tj_node; until then it stays NULL.
+ *
+ * Memory ownership: the enclosing tj_node owns `path` (heap-allocated)
+ * and the `dependencies` array.  `resolved_target` is a borrowed
+ * pointer into the project's tj_node tree, never owned here.
+ */
+typedef struct Dependency {
+    DepKind   kind;
+    int       bang_count;       /**< number of leading `!` characters */
+    char     *path;             /**< dotted identifier path, e.g. "foo.bar" */
+    LspRange  source_range;     /**< spans the bang(s) + dotted path in source */
+    tj_node  *resolved_target;  /**< NULL until the resolver runs */
+} Dependency;
 
-typedef struct {
-    int             token_kind;
-    LspPos          start;
-    LspPos          end;
-    char           *text;               /**< heap-allocated strdup of yytext */
-    tj_build_node  *owner;              /**< set by assign_token_owners_build() */
-} tok_span_build;
+struct tj_node {
+    /* ── Identity ── */
+    int        keyword;        /**< KW_ / TK_ constant from grammar.tab.h; 0 for synthetic per-doc roots */
+    char      *id;              /**< TJP identifier, heap-allocated; NULL on synthetic roots */
+    char      *name;            /**< display name (quoted-string), heap-allocated; NULL on synthetic roots */
 
-struct tj_build_node {
-    int              keyword;
-    char            *id;
-    char            *name;
-    LspRange         range;
-    LspRange         selection_range;
-    time_t           start_date;
-    time_t           end_date;
-    int              has_start;
-    int              has_end;
-    dep_build       *dependencies;
-    int              num_dependencies;
-    int              dependencies_cap;
-    tj_build_node   *parent_node;
-    tj_build_node   *parent_doc;
-    tj_build_node  **children;
-    int              num_children;
-    int              children_cap;
+    /* ── Source location ── */
+    LspRange   range;           /**< full declaration including body */
+    LspRange   selection_range; /**< just the identifier (or keyword) token */
+
+    /* ── Task-only attributes (zero on other kinds) ── */
+    time_t     start_date;      /**< explicit `start` date, valid if has_start */
+    time_t     end_date;        /**< explicit `end` date, valid if has_end */
+    int        has_start;       /**< 1 when start_date is populated */
+    int        has_end;         /**< 1 when end_date is populated */
+
+    /* ── Task-only dependencies (zero on other kinds) ──
+     *
+     * Captured at parse time from `depends` / `precedes` attributes,
+     * one entry per dep_ref in source order.  Empty on tasks that
+     * declare no dependencies and on every non-task node.  Owned by
+     * this node; freed by tj_node_free(). */
+    Dependency *dependencies;
+    int         num_dependencies;
+    int         dependencies_cap;
+
+    /* ── Tree links ──
+     *
+     * parent_node    — semantic parent in the global tree.  May cross
+     *                  document boundaries: when this Document is
+     *                  included with a taskprefix, top-level tasks of
+     *                  this Document point at the prefix-target node
+     *                  in the includer's Document.  In-document
+     *                  parents stay within the same Document.
+     *                  NULL on the document's synthetic root.
+     *
+     * parent_doc     — when this node is a top-level entry in its
+     *                  Document (i.e. declared at file scope, not
+     *                  nested inside another declaration), points to
+     *                  the Document's synthetic root (which is what
+     *                  Document.root stores).  NULL otherwise.  Walk
+     *                  parent_node upward until you hit a node with
+     *                  non-NULL parent_doc to find the owning
+     *                  Document.
+     *
+     * children       — locally declared children in source order.
+     *                  Owned by this node; freed by tj_node_free().
+     */
+    tj_node   *parent_node;
+    tj_node   *parent_doc;
+    tj_node  **children;
+    int        num_children;
+    int        children_cap;
 };
 
 /**
- * Recursively free a tj_build_node subtree.
+ * Recursively free a tj_node subtree.  Frees the node's own strings, its
+ * children (recursively, via the owned `children` array), and the node
+ * itself.  Does NOT walk `parent_node` upward.
+ *
  * @param n  Root of the subtree to free.  Safe to call with NULL.
  */
-void tj_build_node_free(tj_build_node *n);
+void tj_node_free(tj_node *n);
 
 /**
- * Append @p child as a child of @p parent, growing the children array.
- */
-void tj_build_node_append_child(tj_build_node *parent, tj_build_node *child);
-
-/**
- * Append a dependency onto @p task's dependencies array.
- */
-void tj_build_node_push_dep(tj_build_node *task, dep_build dep);
-
-
-/* ── Slab-compatible node types (PUBLIC API used by all handlers) ─────── */
-
-/**
- * One captured `depends`/`precedes` reference stored in the parse slab.
+ * Append @p child as a locally declared child of @p parent (growing the
+ * `children` array as needed) and set @p child's `parent_node` to @p parent.
  *
- * `path_off` is an offset into the owning parse_slab's string pool.
- * `resolved_idx` is always -1 in the parse slab; project_slab carries its own
- * resolution state in ProjectDep.
+ * @param parent  Owning node.
+ * @param child   Child to attach (transfer of ownership).
  */
-typedef struct {
-    DepKind   kind;
-    int       bang_count;
-    str_off   path_off;              /**< offset into parse_slab.strings */
-    LspRange  source_range;
-    tj_idx    resolved_idx;          /**< always -1 in parse_slab */
-} Dependency;
+void tj_node_append_child(tj_node *parent, tj_node *child);
 
 /**
- * A lexical token with its source location, stored in the parse slab.
+ * Append a captured dependency reference onto @p task's `dependencies`
+ * array, growing it as needed.  Takes ownership of @p dep.path.
+ * `resolved_target` is initialized to NULL.
  *
- * `text_off` is an offset into the owning parse_slab's string pool; 0 means
- * the text was not captured.  `owner_idx` is the index of the innermost
- * enclosing tj_node, or -1 when the token sits outside every declaration.
+ * @param task  Task tj_node (caller guarantees keyword == KW_TASK).
+ * @param dep   Source-position-bearing Dependency whose `path` is heap-owned.
+ */
+void tj_node_push_dependency(tj_node *task, Dependency dep);
+
+/** Forward declaration; the full struct is defined in diagnostics.h. */
+typedef struct Diagnostic Diagnostic;
+
+/**
+ * A lexical token with its source location.
+ *
+ * Used as a flat, ordered sequence for all cursor-position queries: hover,
+ * completion, signature help, semantic highlighting, folding ranges, etc.
+ *
+ * Populated by the lexer for every token that callers may need to inspect:
+ *   - All KW_* keyword tokens (including TK_DATE, TK_DURATION, TK_STR, …)
+ *   - TK_IDENT, TK_LBRACE, TK_RBRACE, TK_BANG, TK_DOT, TK_COMMA
+ *   - TK_LINE_COMMENT, TK_BLOCK_COMMENT
+ *
+ * `token_kind` holds the raw TK_* / KW_* constant from grammar.tab.h.
+ * `text` is heap-allocated (strdup of yytext); NULL only for tokens where
+ * the text is never needed.  Caller must not modify it; the owning
+ * ParseOutput frees it via parse_output_free().
+ *
+ * `owner` points to the innermost enclosing tj_node in this same
+ * document's per-kind tree (whichever tree the enclosing declaration
+ * lives in).  NULL when the token sits outside every declaration.
  */
 typedef struct {
     int       token_kind;
     LspPos    start;
     LspPos    end;
-    str_off   text_off;              /**< offset into parse_slab.strings; 0 = none */
-    tj_idx    owner_idx;             /**< index into parse_slab.nodes; -1 = no owner */
+    char     *text;
+    tj_node  *owner;
 } TokenSpan;
 
 /**
- * One named TaskJuggler declaration in the parse slab.
- *
- * All string fields are offsets into the owning parse_slab's string pool;
- * 0 means NULL/absent.  All node references are indices into parse_slab.nodes;
- * -1 means NULL/absent.
- *
- * children_start / dep_start are the first index into the shared children[]
- * and deps[] arrays; use num_children / num_dependencies to bound the range.
- * Both are -1 when the count is 0.
- */
-typedef struct {
-    int        keyword;
-
-    str_off    id_off;
-    str_off    name_off;
-
-    LspRange   range;
-    LspRange   selection_range;
-
-    time_t     start_date;
-    time_t     end_date;
-    int        has_start;
-    int        has_end;
-
-    tj_idx     dep_start;            /**< first index in parse_slab.deps[]; -1 if none */
-    int        num_dependencies;
-
-    tj_idx     children_start;       /**< first index in parse_slab.children[]; -1 if none */
-    int        num_children;
-
-    tj_idx     parent_node;          /**< -1 for the synthetic root */
-    tj_idx     parent_doc;           /**< -1 when not a top-level entry */
-} tj_node;
-
-
-/**
- * One entry per `include` directive seen in the source.  All strings are
- * heap-allocated and owned by the parse_slab that holds the IncludeRef.
+ * One entry per `include` directive seen in the source.  `filename` is the
+ * unquoted target as it appeared in the include statement.  The four
+ * `*_prefix` fields carry the matching attribute from the include body
+ * (e.g. `include "bar.tji" { taskprefix t1.t2 }` produces
+ * `task_prefix = "t1.t2"`); each is NULL when the corresponding attribute
+ * was not present.  All strings are heap-allocated and owned by the
+ * ParseOutput / Document that holds the IncludeRef.
  */
 typedef struct {
     char *filename;
@@ -246,120 +256,78 @@ typedef struct {
 } IncludeRef;
 
 /**
- * Header for the mmap-backed page that owns the flat slab arrays.
- * Placed at the very start of the mmap block; `total_mmap_size` is
- * passed to `munmap()` when the slab is freed.
- */
-typedef struct {
-    size_t total_mmap_size;
-} parse_page_header;
-
-/**
  * The complete output of a single parse() call for one document.
  *
- * `page` is non-NULL when the flat arrays are packed into a single
- * mmap-backed block (Phase 2+).  `parse_slab_free()` uses `munmap()`
- * when `page != NULL` and plain `free()` otherwise (transition).
+ * One ParseOutput per parse — its lifetime is tied to the owning Document
+ * (the server creates a fresh one on every didOpen/didChange and frees the
+ * previous one).  All arrays and tj_node subtrees referenced from here are
+ * owned by this struct and freed by parse_output_free().
  *
- * root_idx is the index of the synthetic root node (keyword == 0).
+ * The synthetic `root` is always non-NULL.  Its `keyword` is 0; its
+ * `children` array holds every top-level declaration of the document —
+ * tasks, accounts, resources/shifts, the report family, and the project
+ * block — in source order.  A `project ... { ... }` block's own body
+ * declarations are hoisted to siblings under `root` (the project node
+ * keeps no children); `assign_token_owners()` restores that nesting for
+ * token ownership only.  The tree is immutable after parse —
+ * cross-Document hoisting happens in a separately allocated global tree
+ * built by server.c.
  */
 typedef struct {
-    parse_page_header *page;            /**< NULL on Phase-1 malloc path */
+    tj_node   *root;         /**< synthetic root; children are all top-level declarations in source order */
 
-    tj_node    *nodes;
-    int         num_nodes;
+    TokenSpan *tok_spans;
+    int        num_tok_spans;
+    int        tok_span_cap;
+    int        num_sem_entries; /**< upper bound on semantic-token entries (one per source line covered) */
 
-    tj_idx     *children;            /**< flat children-index array, shared by all nodes */
-    int         num_children_entries;
-
-    Dependency *deps;                /**< flat dependency array, shared by all nodes */
-    int         num_deps;
-
-    TokenSpan  *tok_spans;
-    int         num_tok_spans;
-    int         num_sem_entries;     /**< upper bound on semantic-token entries */
-
-    char       *strings;             /**< NUL-separated string pool; offset 0 reserved */
-    size_t      strings_size;
-
-    tj_idx      root_idx;            /**< index of the synthetic root node */
-
-    IncludeRef *includes;
+    IncludeRef *includes;       /**< one entry per `include` directive */
     int         num_includes;
-} parse_slab;
-
-/* ── Slab accessor inlines ───────────────────────────────────────────────── */
-
-/**
- * Return a pointer to node @p i in @p s, or NULL when @p i == -1.
- */
-static inline tj_node *slab_node(const parse_slab *s, tj_idx i) {
-    return (i >= 0 && i < s->num_nodes) ? &s->nodes[i] : NULL;
-}
-
-/**
- * Return a pointer to the first element of @p n's children range in @p s's
- * flat children array, or NULL when @p n has no children.
- */
-static inline tj_idx *slab_children(const parse_slab *s, const tj_node *n) {
-    return (n && n->children_start >= 0) ? &s->children[n->children_start] : NULL;
-}
-
-/**
- * Return a pointer to the first Dependency in @p n's dep range in @p s's
- * flat deps array, or NULL when @p n has no dependencies.
- */
-static inline Dependency *slab_deps(const parse_slab *s, const tj_node *n) {
-    return (n && n->dep_start >= 0) ? &s->deps[n->dep_start] : NULL;
-}
-
-/**
- * Return the string at offset @p off in @p s's string pool, or NULL when
- * @p off is 0.
- */
-static inline const char *slab_str(const parse_slab *s, str_off off) {
-    return (off == 0) ? NULL : &s->strings[off];
-}
+    int         includes_cap;
+} ParseOutput;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
 /**
- * Parse @p src into a parse_slab.  Single entry point for the lexer +
+ * Parse @p src into a ParseOutput.  Single entry point for the lexer +
  * grammar pipeline.
  *
  * @param src  NUL-terminated TaskJuggler source text.
- * @return Heap-allocated parse_slab.  Free with parse_slab_free().
+ * @return Heap-allocated ParseOutput.  Free with parse_output_free().
  */
-parse_slab *parse(const char *src);
+ParseOutput *parse(const char *src);
 
 /**
- * Release every dynamic allocation owned by @p slab and free @p slab itself.
- * Safe to call with @p slab == NULL.
+ * Release every dynamic allocation owned by @p po and free @p po itself.
+ * Safe to call with @p po == NULL.
  *
- * @param slab  parse_slab to free.
+ * @param po  ParseOutput to free.
  */
-void parse_slab_free(parse_slab *slab);
+void parse_output_free(ParseOutput *po);
 
 /**
- * Append an `include` directive entry from the grammar's build context.
- * Called from grammar.y; accesses the parser-internal global build context.
+ * Append an `include` directive entry to @p po->includes.  The four prefix
+ * pointers may be NULL (attribute not present); when non-NULL each is
+ * deep-copied so the caller retains ownership of its inputs.
  *
- * @param quoted_text     Raw `include` argument (surrounding quotes stripped).
+ * @param po              ParseOutput being populated.
+ * @param quoted_text     Raw `include` argument as it appears in source;
+ *                        the surrounding quotes are stripped before storing.
  * @param task_prefix     Value of `taskprefix` attribute, or NULL.
  * @param resource_prefix Value of `resourceprefix` attribute, or NULL.
  * @param account_prefix  Value of `accountprefix` attribute, or NULL.
  * @param report_prefix   Value of `reportprefix` attribute, or NULL.
  */
-void push_include_to_build(const char *quoted_text,
-                           const char *task_prefix,
-                           const char *resource_prefix,
-                           const char *account_prefix,
-                           const char *report_prefix);
+void push_include(ParseOutput *po, const char *quoted_text,
+                  const char *task_prefix,
+                  const char *resource_prefix,
+                  const char *account_prefix,
+                  const char *report_prefix);
 
 /**
  * Parse a `YYYY-MM-DD` date prefix from a TaskJuggler `TK_DATE` token's
- * text into a UTC `time_t`.  Trailing time and timezone components are
- * accepted but ignored.
+ * text into a UTC `time_t`.  Trailing time and timezone components
+ * (e.g. `-09:00`, `+0100`) are accepted but ignored.
  *
  * @param text  NUL-terminated token text.  May be NULL.
  * @param out   Receives the parsed time_t on success.
