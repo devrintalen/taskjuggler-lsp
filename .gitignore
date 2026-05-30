@@ -1,5 +1,10 @@
 .env
-.claude/
+# Ignore personal Claude Code state, but keep the shared SessionStart hook and
+# its settings so web sessions install dependencies automatically.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+.claude/settings.local.json
 *~
 __pycache__/
 *.pyc
