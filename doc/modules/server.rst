@@ -6,6 +6,15 @@ JSON-RPC transport in ``main.c`` and the per-feature handlers under
 ``src/``. It also owns the document store and drives cross-file
 revalidation.
 
+.. note::
+
+   The threading architecture — the coordinator/worker split, the
+   mutable live store versus the immutable refcounted snapshots, and
+   how ``Document`` / ``doc_snapshot`` / project trees /
+   ``workspace_snapshot`` / ``query_context`` relate — is documented on
+   the :doc:`concurrency` page. Some of the data-flow description below
+   predates that model and is being revised.
+
 Data flow
 ---------
 

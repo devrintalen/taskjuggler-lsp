@@ -76,7 +76,7 @@ extern const int          num_semantic_token_modifiers;
 
 /*
  * The semantic-tokens response and its resultId are no longer cached on the
- * document.  The token data is memoized write-once inside each DocSnapshot
+ * document.  The token data is memoized write-once inside each doc_snapshot
  * (docsnap_sem_tokens, see query_context.h) and the resultId is the
  * document's parse version, so full/delta requests run lock-free against a
  * pinned snapshot and a delta diffs by version against the retained previous

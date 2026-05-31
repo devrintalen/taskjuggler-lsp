@@ -82,21 +82,21 @@ typedef struct Document {
     int          disk_only;
     int          is_cc_root;        /**< 1 when this doc is named directly in compile_commands.json */
 
-    /* Immutable parse output.  `snap` is the current parse's DocSnapshot
+    /* Immutable parse output.  `snap` is the current parse's doc_snapshot
      * (NULL before the first parse — use it as the "has-parse" sentinel);
      * `prev_snap` is the one immediately before it, retained so a
      * semanticTokens/delta request can diff against the version the client
-     * last held.  Both are refcounted: a published WorkspaceSnapshot also
+     * last held.  Both are refcounted: a published workspace_snapshot also
      * holds refs, so a snapshot outlives any in-flight query reading it.
      * Each is released and rotated by doc_install_parse(). */
-    DocSnapshot *snap;
-    DocSnapshot *prev_snap;
+    doc_snapshot *snap;
+    doc_snapshot *prev_snap;
 
     /* Prefixes applied to this Document by the includer's `include` block,
      * one per kind.  Populated by follow_includes() from the includer's
      * captured IncludeRef when this file is pulled in; stay NULL on a
      * canonical .tjp or on orphan .tji files in a .tji-only workspace.
-     * Captured into each WorkspaceSnapshot's WsDoc at build time. */
+     * Captured into each workspace_snapshot's ws_doc at build time. */
     char        *task_prefix;
     char        *account_prefix;
     char        *report_prefix;
@@ -120,7 +120,7 @@ static Document docs[MAX_DOCS];
  * a ref from it), so the pointer itself needs no atomic; only the snapshot's
  * refcount is atomic, for the worker-side release.  NULL until the first
  * revalidate builds one. */
-static WorkspaceSnapshot *g_ws = NULL;
+static workspace_snapshot *g_ws = NULL;
 
 /* Serializes every read/write of docs[] — slots, their fields, and the
  * global trees built from them. */
@@ -143,7 +143,7 @@ static int    g_cc_attempted   = 0;
 static char *normalize_uri(const char *raw_uri);
 static void  load_file_from_disk(const char *path);
 static void  follow_includes(const char *file_path, const ParseOutput *po);
-static WorkspaceSnapshot *build_workspace_snapshot(void);
+static workspace_snapshot *build_workspace_snapshot(void);
 static void  reload_compile_commands(void);
 static void  maybe_reload_compile_commands(void);
 
@@ -153,7 +153,7 @@ static void  maybe_reload_compile_commands(void);
  * include closure (followed via Document.included_uris[]) is deep-copied
  * into a single ProjectNode tree with the includer's per-kind prefix
  * applied (see project_tree.h).  Built fresh by build_workspace_snapshot()
- * into the published WorkspaceSnapshot on every notification.  Nodes of
+ * into the published workspace_snapshot on every notification.  Nodes of
  * every kind share one root: a node's `keyword` identifies its kind, so
  * walkers must filter on it to respect TaskJuggler's separate task /
  * account / resource / report id namespaces.
@@ -165,7 +165,7 @@ static void  maybe_reload_compile_commands(void);
  * per-document task under the cursor to its clone here (via
  * project_node_for_doc_task) and resolve against this tree.
  *
- * Each WsDoc records the index of the project that claimed it during the
+ * Each ws_doc records the index of the project that claimed it during the
  * snapshot's include BFS; handlers route cross-file lookups through that
  * membership.  Editor-only files outside every compile_commands closure
  * each form their own singleton project. */
@@ -207,9 +207,9 @@ static Document *doc_alloc(const char *uri) {
     return NULL;
 }
 
-/** Release both DocSnapshots held by @p d (the live store's refs), nulling
+/** Release both doc_snapshots held by @p d (the live store's refs), nulling
  *  each so the slot is reusable.  A snapshot only frees once any
- *  WorkspaceSnapshot and in-flight query also release their refs. */
+ *  workspace_snapshot and in-flight query also release their refs. */
 static void doc_clear_parse_state(Document *d) {
     docsnap_release(d->snap);
     d->snap = NULL;
@@ -217,14 +217,14 @@ static void doc_clear_parse_state(Document *d) {
     d->prev_snap = NULL;
 }
 
-/** Build a fresh DocSnapshot from @p po (moving its tree and token spans in)
+/** Build a fresh doc_snapshot from @p po (moving its tree and token spans in)
  *  and rotate it onto @p d: the outgoing current snapshot becomes prev_snap
  *  (replacing the one before it), so a semanticTokens/delta request can still
  *  diff against the version the client last held.  Includes are not part of
  *  the snapshot — callers consume them via follow_includes() before calling
  *  here; parse_output_free() releases the leftover include array and shell. */
 static void doc_install_parse(Document *d, ParseOutput *po) {
-    DocSnapshot *fresh = NULL;
+    doc_snapshot *fresh = NULL;
     if (po) {
         uint64_t version = atomic_fetch_add(&d->doc_version, 1);
         fresh = docsnap_new(d->uri, d->text,
@@ -681,7 +681,7 @@ static ProjectNode *find_node_by_dotted_path(ProjectNode *start, const char *pat
 
 /* ── Workspace snapshot build ──────────────────────────────────────────── */
 
-/* docs[] slot index -> WsDoc index in the snapshot being built, or -1 when
+/* docs[] slot index -> ws_doc index in the snapshot being built, or -1 when
  * the slot is unused / unparsed.  Set up once per build_workspace_snapshot()
  * call and consulted by the include BFS to stamp project membership. */
 static int ws_doc_index_of(const int *slot_to_wsdoc, const Document *d) {
@@ -693,7 +693,7 @@ static int ws_doc_index_of(const int *slot_to_wsdoc, const Document *d) {
  *  by the node's own `keyword` to pick both the prefix and the namespace the
  *  prefix path is resolved within; the project block is document-local
  *  metadata and is skipped. */
-static void copy_document_into_project(WorkspaceSnapshot *ws, int pidx, Document *d) {
+static void copy_document_into_project(workspace_snapshot *ws, int pidx, Document *d) {
     if (!d->snap || !d->snap->root) return;
     ProjectNode *proot = &ws->projects[pidx]->root;
     tj_node *root = d->snap->root;
@@ -723,9 +723,9 @@ static void copy_document_into_project(WorkspaceSnapshot *ws, int pidx, Document
 
 /** BFS from @p root along included_uris[], copying every reachable Document's
  *  top-level into project @p pidx with prefixes applied, and stamping each
- *  visited doc's WsDoc.project_index to @p pidx unless a prior project
+ *  visited doc's ws_doc.project_index to @p pidx unless a prior project
  *  already claimed it. */
-static void project_populate_from_root(WorkspaceSnapshot *ws, int pidx,
+static void project_populate_from_root(workspace_snapshot *ws, int pidx,
                                        Document *root, const int *slot_to_wsdoc) {
     /* Queue holds borrowed Document pointers; visited[] dedupes within
      * this BFS so a diamond include doesn't double-copy. */
@@ -784,15 +784,15 @@ cleanup:
     #undef PUSH
 }
 
-/** Build an immutable WorkspaceSnapshot from the current docs[]: one WsDoc
- *  per parsed in-use document (referencing its DocSnapshot and capturing the
+/** Build an immutable workspace_snapshot from the current docs[]: one ws_doc
+ *  per parsed in-use document (referencing its doc_snapshot and capturing the
  *  include-prefixes in force now), one project per is_cc_root document with
  *  its include closure assembled, and one singleton "orphan" project for
  *  every remaining document not reached by any closure.  Orphans exist so
  *  editor-opened files outside the compile_commands.json closure still get
  *  in-file LSP behavior (completion, hover, etc.) without bleeding into other
  *  projects' cross-file pools.  Returned with refcount 1. */
-static WorkspaceSnapshot *build_workspace_snapshot(void) {
+static workspace_snapshot *build_workspace_snapshot(void) {
     int slot_to_wsdoc[MAX_DOCS];
     int ndoc = 0;
     for (int i = 0; i < MAX_DOCS; i++) {
@@ -802,14 +802,14 @@ static WorkspaceSnapshot *build_workspace_snapshot(void) {
             slot_to_wsdoc[i] = -1;
     }
 
-    WorkspaceSnapshot *ws = ws_alloc(ndoc);
+    workspace_snapshot *ws = ws_alloc(ndoc);
 
-    /* Populate each WsDoc: ref the live snapshot, copy the prefixes. */
+    /* Populate each ws_doc: ref the live snapshot, copy the prefixes. */
     for (int i = 0; i < MAX_DOCS; i++) {
         int wsd = slot_to_wsdoc[i];
         if (wsd < 0) continue;
         Document *d = &docs[i];
-        WsDoc    *w = &ws->docs[wsd];
+        ws_doc    *w = &ws->docs[wsd];
         w->snap            = docsnap_acquire(d->snap);
         w->task_prefix     = d->task_prefix     ? strdup(d->task_prefix)     : NULL;
         w->account_prefix  = d->account_prefix  ? strdup(d->account_prefix)  : NULL;
@@ -988,7 +988,7 @@ static int doc_has_project_block(const Document *d) {
  *  references across every task in the document.  @p ws is the freshly
  *  published snapshot, consulted for project membership and count.
  *  Caller must hold docs_mutex. */
-static void dump_docs_to_stderr(const char *trigger, const WorkspaceSnapshot *ws) {
+static void dump_docs_to_stderr(const char *trigger, const workspace_snapshot *ws) {
     int total = 0, editor = 0, disk = 0;
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
@@ -1001,7 +1001,7 @@ static void dump_docs_to_stderr(const char *trigger, const WorkspaceSnapshot *ws
             trigger, total, editor, disk, ws ? ws->num_projects : 0);
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
-        /* Find this doc's WsDoc (by snapshot identity) to report its project. */
+        /* Find this doc's ws_doc (by snapshot identity) to report its project. */
         const char *pid = "(none)";
         if (ws && docs[i].snap) {
             for (int w = 0; w < ws->num_docs; w++) {
@@ -1031,8 +1031,8 @@ static void dump_docs_to_stderr(const char *trigger, const WorkspaceSnapshot *ws
  * in-flight query may still be reading — it survives until that query
  * releases its ref).  Coordinator-only. */
 static void publish_workspace_snapshot(void) {
-    WorkspaceSnapshot *fresh = build_workspace_snapshot();
-    WorkspaceSnapshot *old   = g_ws;
+    workspace_snapshot *fresh = build_workspace_snapshot();
+    workspace_snapshot *old   = g_ws;
     g_ws = fresh;
     ws_release(old);
 }
@@ -1607,8 +1607,8 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
  * per snapshot (two requests against the same parse share one id) and lets a
  * delta diff by version with no write-back, so these run lock-free against
  * the pinned snapshot like any other query.  The token data itself is
- * memoized inside the DocSnapshot (docsnap_sem_tokens). */
-static void sem_tokens_result_id(DocSnapshot *s, char *buf, size_t buflen) {
+ * memoized inside the doc_snapshot (docsnap_sem_tokens). */
+static void sem_tokens_result_id(doc_snapshot *s, char *buf, size_t buflen) {
     snprintf(buf, buflen, "%" PRIu64, s->doc_version);
 }
 
@@ -1646,7 +1646,7 @@ static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yy
      * snapshot's parse version): either the current parse (no change since)
      * or the immediately previous one retained on the query_context.  Diff
      * against that base; otherwise fall back to a full response. */
-    DocSnapshot *base = NULL;
+    doc_snapshot *base = NULL;
     if (previous_result_id) {
         uint64_t prev_version = strtoull(previous_result_id, NULL, 10);
         if (prev_version == d->snap->doc_version)
@@ -1874,10 +1874,10 @@ static const char *request_primary_uri(yyjson_val *params) {
 
 /* Build the query_context for one query under docs_mutex by pinning the
  * currently published workspace snapshot (an O(1) refcount bump) and pointing
- * borrowed query_doc views at its WsDocs.  When @p want_all_docs is set
+ * borrowed query_doc views at its ws_docs.  When @p want_all_docs is set
  * (workspace/symbol) every document is included and there is no primary;
  * otherwise the context holds the primary document plus its same-project
- * siblings.  The primary's previous DocSnapshot is also ref'd for
+ * siblings.  The primary's previous doc_snapshot is also ref'd for
  * semanticTokens/delta.  Caller must hold docs_mutex. */
 static query_context *build_query_context_locked(const char *primary_uri,
                                                  int want_all_docs) {
@@ -1892,15 +1892,15 @@ static query_context *build_query_context_locked(const char *primary_uri,
         qc->prev_snap = docsnap_acquire(primary_doc->prev_snap);
     const char *primary_canon = primary_doc ? primary_doc->uri : NULL;
 
-    WorkspaceSnapshot *ws = ws_acquire(g_ws);
+    workspace_snapshot *ws = ws_acquire(g_ws);
     qc->ws = ws;
     if (!ws) return qc;   /* no snapshot yet: empty context, handlers return null */
 
-    /* Locate the primary WsDoc and its project. */
+    /* Locate the primary ws_doc and its project. */
     int primary_proj = -1;
     if (primary_canon) {
         for (int i = 0; i < ws->num_docs; i++) {
-            DocSnapshot *s = ws->docs[i].snap;
+            doc_snapshot *s = ws->docs[i].snap;
             if (s && s->uri && strcmp(s->uri, primary_canon) == 0) {
                 primary_proj = ws->docs[i].project_index;
                 break;
@@ -1915,8 +1915,8 @@ static query_context *build_query_context_locked(const char *primary_uri,
 
     int n = 0;
     for (int i = 0; i < ws->num_docs; i++) {
-        WsDoc       *w = &ws->docs[i];
-        DocSnapshot *s = w->snap;
+        ws_doc       *w = &ws->docs[i];
+        doc_snapshot *s = w->snap;
         if (!s) continue;
         int is_primary = (primary_canon && s->uri && strcmp(s->uri, primary_canon) == 0);
         if (!is_primary && !want_all_docs) {

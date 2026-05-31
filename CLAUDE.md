@@ -131,7 +131,7 @@ cross-file edge.
 After any document-changing notification, `server.c` runs
 `revalidate_all_docs()`: it polls `compile_commands.json` for on-disk
 changes, calls `build_workspace_snapshot()` to assemble a fresh
-immutable `WorkspaceSnapshot` from the current `docs[]`, atomically
+immutable `workspace_snapshot` from the current `docs[]`, atomically
 swaps it in as the published `g_ws` (releasing the previous one), then
 republishes (currently empty) diagnostics on every editor-managed
 document.
@@ -140,21 +140,21 @@ Snapshots are refcounted and immutable, so a query that pinned the old
 snapshot keeps reading a consistent revision until it releases its ref;
 the old snapshot is freed only then. Two layers (`src/query_context.{h,c}`):
 
-- `DocSnapshot` — one document's frozen parse output (`tj_node` tree,
+- `doc_snapshot` — one document's frozen parse output (`tj_node` tree,
   token spans, source text), created once per parse and **shared by
-  ref**: editing document A produces a new `DocSnapshot` for A while
+  ref**: editing document A produces a new `doc_snapshot` for A while
   every other document's snapshot is re-referenced unchanged. Each
   `Document` holds its current `snap` plus the immediately previous
   `prev_snap` (retained so `semanticTokens/delta` can diff against the
-  version the client last held). A `DocSnapshot` also carries a
+  version the client last held). A `doc_snapshot` also carries a
   write-once, compare-exchange–published memo for its semantic-token
   data; the `resultId` is the document's parse version (`doc_version`).
-- `WorkspaceSnapshot` — a `WsDoc` per parsed document (its `DocSnapshot`
+- `workspace_snapshot` — a `ws_doc` per parsed document (its `doc_snapshot`
   ref plus the include-prefixes in force this revision) and a
-  `WsProject` per assembled project. Each `WsProject` owns one synthetic
+  `ws_project` per assembled project. Each `ws_project` owns one synthetic
   `ProjectNode` root over all kinds, populated by deep-copying every
   member document's top-level entries under the includer's prefix
-  target. The include BFS stamps each `WsDoc.project_index`; handlers
+  target. The include BFS stamps each `ws_doc.project_index`; handlers
   scope cross-file lookups to siblings sharing the requester's project,
   so two unrelated `.tjp`s in the same workspace stay independent.
 
@@ -194,6 +194,13 @@ under GPLv2 as a realistic fixture.
 ## Code Style Conventions
 
 Use snake_case rather than camelCase for multi-word identifiers.
+
+This applies to data types as well: new `struct` / `enum` / `typedef`
+names use snake_case (e.g. `doc_snapshot`, `workspace_snapshot`,
+`query_context`), not CamelCase. A number of older types predate this
+rule and remain CamelCase (`Document`, `Job`, `ProjectNode`,
+`TokenSpan`, `ParseOutput`, …); leave those as they are unless you are
+already refactoring them, but do not introduce new CamelCase types.
 
 Use K&R C style for code.
 

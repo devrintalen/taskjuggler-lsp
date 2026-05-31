@@ -31,7 +31,7 @@
  * Immutable, refcounted workspace snapshots.
  *
  * Read-only query handlers never see the live document store.  Instead the
- * coordinator publishes an immutable WorkspaceSnapshot after every
+ * coordinator publishes an immutable workspace_snapshot after every
  * document-changing notification (built under docs_mutex), and each query
  * pins the current snapshot by bumping one atomic refcount — an O(1) clone,
  * not the O(nodes) deep copy the earlier query_context did.  A concurrent
@@ -41,34 +41,34 @@
  *
  * Two refcounted layers:
  *
- *   DocSnapshot      — one document's frozen parse output (tj_node tree,
+ *   doc_snapshot      — one document's frozen parse output (tj_node tree,
  *                      token spans, source text).  Created once per parse and
  *                      shared by ref: editing document A produces a new
- *                      DocSnapshot for A while every other document's snapshot
+ *                      doc_snapshot for A while every other document's snapshot
  *                      is re-referenced unchanged.  Carries a write-once memo
  *                      for its semantic-token data.
  *
- *   WorkspaceSnapshot — the cross-file view: a WsDoc per in-use document
- *                      (referencing its DocSnapshot plus the include-prefixes
- *                      in force this revision) and a WsProject per assembled
+ *   workspace_snapshot — the cross-file view: a ws_doc per in-use document
+ *                      (referencing its doc_snapshot plus the include-prefixes
+ *                      in force this revision) and a ws_project per assembled
  *                      project (the deep-copied ProjectNode resolution tree
  *                      with its atomic dependency memos).
  *
  * State-mutating lifecycle methods (initialize / shutdown) do not touch a
  * snapshot and run inline on the coordinator; every other query — including
- * semanticTokens, whose data and result id now live in the DocSnapshot — runs
+ * semanticTokens, whose data and result id now live in the doc_snapshot — runs
  * on a worker against a pinned snapshot with no lock held.
  */
 
 /* ── Semantic-token data memo ────────────────────────────────────────────── */
 
-/** Computed LSP semantic-token data for one DocSnapshot: the flat five-int
+/** Computed LSP semantic-token data for one doc_snapshot: the flat five-int
  *  encoded buffer plus its entry count.  Heap-allocated once and published
- *  into DocSnapshot.sem_memo by compare-exchange. */
-typedef struct SemTokenData {
+ *  into doc_snapshot.sem_memo by compare-exchange. */
+typedef struct sem_token_data {
     uint32_t *data;   /**< owned; flat uint32 buffer (count entries) */
     size_t    count;  /**< number of uint32 entries (multiple of 5) */
-} SemTokenData;
+} sem_token_data;
 
 /* ── Per-document snapshot ───────────────────────────────────────────────── */
 
@@ -78,7 +78,7 @@ typedef struct SemTokenData {
  * tree and token spans are moved out of a ParseOutput at creation, so the
  * TokenSpan.owner pointers already address nodes within `root`.
  */
-typedef struct DocSnapshot {
+typedef struct doc_snapshot {
     _Atomic int  refcount;
     uint64_t     doc_version;     /**< monotonic parse stamp; also the semantic-tokens resultId */
 
@@ -90,24 +90,24 @@ typedef struct DocSnapshot {
     int          num_tok_spans;
     int          num_sem_entries;
 
-    _Atomic(SemTokenData *) sem_memo;  /**< NULL until first request; CAS-published */
-} DocSnapshot;
+    _Atomic(sem_token_data *) sem_memo;  /**< NULL until first request; CAS-published */
+} doc_snapshot;
 
 /**
- * Create a DocSnapshot taking ownership of @p root and @p tok_spans (the
+ * Create a doc_snapshot taking ownership of @p root and @p tok_spans (the
  * fields moved out of a ParseOutput) and deep-copying @p uri / @p text.
  * Returned with refcount 1.
  */
-DocSnapshot *docsnap_new(const char *uri, const char *text,
+doc_snapshot *docsnap_new(const char *uri, const char *text,
                          tj_node *root, TokenSpan *tok_spans,
                          int num_tok_spans, int num_sem_entries,
                          uint64_t doc_version);
 
 /** Bump the refcount and return @p s (NULL-safe, returns NULL). */
-DocSnapshot *docsnap_acquire(DocSnapshot *s);
+doc_snapshot *docsnap_acquire(doc_snapshot *s);
 
 /** Drop one ref; free @p s and everything it owns when the last ref goes. */
-void docsnap_release(DocSnapshot *s);
+void docsnap_release(doc_snapshot *s);
 
 /**
  * Return @p s's semantic-token data, computing and memoizing it on first
@@ -116,55 +116,55 @@ void docsnap_release(DocSnapshot *s);
  * buffer and adopt the winner's.  The returned pointer is owned by @p s and
  * valid for its lifetime.
  */
-void docsnap_sem_tokens(DocSnapshot *s, const uint32_t **out_data, size_t *out_count);
+void docsnap_sem_tokens(doc_snapshot *s, const uint32_t **out_data, size_t *out_count);
 
 /* ── Workspace snapshot ──────────────────────────────────────────────────── */
 
-/** One document's place in a WorkspaceSnapshot: its (ref'd) DocSnapshot, the
+/** One document's place in a workspace_snapshot: its (ref'd) doc_snapshot, the
  *  include-prefixes applied to it this revision (owned copies), and the index
  *  of the project it belongs to. */
-typedef struct WsDoc {
-    DocSnapshot *snap;            /**< ref'd; +1 held by the owning WorkspaceSnapshot */
+typedef struct ws_doc {
+    doc_snapshot *snap;            /**< ref'd; +1 held by the owning workspace_snapshot */
     char        *task_prefix;     /**< owned; may be NULL */
     char        *account_prefix;
     char        *report_prefix;
     char        *resource_prefix;
-    int          project_index;   /**< index into WorkspaceSnapshot.projects, or -1 */
-} WsDoc;
+    int          project_index;   /**< index into workspace_snapshot.projects, or -1 */
+} ws_doc;
 
 /** One assembled project: its canonical id and the synthetic root of the
  *  deep-copied cross-file ProjectNode resolution tree.  Heap-allocated
  *  individually so `root`'s address is stable (children link back to it via
  *  parent_node). */
-typedef struct WsProject {
+typedef struct ws_project {
     char        *id;              /**< owned; canonical .tjp URI or doc URI */
     ProjectNode  root;            /**< embedded synthetic root over all kinds */
-} WsProject;
+} ws_project;
 
 /** Immutable, refcounted cross-file view of the whole workspace. */
-typedef struct WorkspaceSnapshot {
+typedef struct workspace_snapshot {
     _Atomic int  refcount;
-    WsDoc       *docs;            /**< owned array[num_docs] */
+    ws_doc       *docs;            /**< owned array[num_docs] */
     int          num_docs;
-    WsProject  **projects;        /**< owned array of owned WsProject* */
+    ws_project  **projects;        /**< owned array of owned ws_project* */
     int          num_projects;
     int          projects_cap;
-} WorkspaceSnapshot;
+} workspace_snapshot;
 
-/** Allocate a WorkspaceSnapshot with @p num_docs zeroed WsDoc slots (caller
+/** Allocate a workspace_snapshot with @p num_docs zeroed ws_doc slots (caller
  *  fills them) and an empty project list.  Returned with refcount 1. */
-WorkspaceSnapshot *ws_alloc(int num_docs);
+workspace_snapshot *ws_alloc(int num_docs);
 
-/** Append a new empty WsProject with id @p id (deep-copied) and return its
+/** Append a new empty ws_project with id @p id (deep-copied) and return its
  *  index; the caller populates its `root` tree. */
-int ws_add_project(WorkspaceSnapshot *ws, const char *id);
+int ws_add_project(workspace_snapshot *ws, const char *id);
 
 /** Bump the refcount and return @p ws (NULL-safe, returns NULL). */
-WorkspaceSnapshot *ws_acquire(WorkspaceSnapshot *ws);
+workspace_snapshot *ws_acquire(workspace_snapshot *ws);
 
-/** Drop one ref; free @p ws, its project trees, and release every WsDoc's
- *  DocSnapshot ref when the last ref goes. */
-void ws_release(WorkspaceSnapshot *ws);
+/** Drop one ref; free @p ws, its project trees, and release every ws_doc's
+ *  doc_snapshot ref when the last ref goes. */
+void ws_release(workspace_snapshot *ws);
 
 /* ── Per-query context ───────────────────────────────────────────────────── */
 
@@ -188,20 +188,20 @@ typedef struct query_doc {
     int          num_sem_entries;
 
     int          is_primary;      /**< 1 for the requested document */
-    DocSnapshot *snap;            /**< borrowed backing snapshot (sem-token memo + version) */
+    doc_snapshot *snap;            /**< borrowed backing snapshot (sem-token memo + version) */
 } query_doc;
 
 /**
  * A query's pinned, lock-free view of the workspace.  Holds one ref on the
- * WorkspaceSnapshot (which transitively pins every DocSnapshot and project
+ * workspace_snapshot (which transitively pins every doc_snapshot and project
  * tree it reads) plus, for semanticTokens/delta, one ref on the immediately
- * previous DocSnapshot of the primary document.  The query_doc array borrows
+ * previous doc_snapshot of the primary document.  The query_doc array borrows
  * into the snapshot; only the array itself and the two refs are released by
  * query_context_free.
  */
 typedef struct query_context {
-    WorkspaceSnapshot *ws;          /**< 1 ref; pins docs + project trees. */
-    DocSnapshot       *prev_snap;   /**< 1 ref; primary's previous parse, for delta. May be NULL. */
+    workspace_snapshot *ws;          /**< 1 ref; pins docs + project trees. */
+    doc_snapshot       *prev_snap;   /**< 1 ref; primary's previous parse, for delta. May be NULL. */
 
     query_doc   *docs;              /**< owned array; entries borrow into `ws`. */
     int          num_docs;

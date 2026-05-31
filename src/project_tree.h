@@ -28,7 +28,7 @@
 /*
  * The assembled per-Project tree.
  *
- * A WorkspaceSnapshot builds one ProjectNode tree per project on every
+ * A workspace_snapshot builds one ProjectNode tree per project on every
  * notification by deep-copying each member document's top-level declarations
  * under the includer's prefix target.  Unlike the per-document tj_node trees
  * (which are immutable after parse and own no cross-file edges), a

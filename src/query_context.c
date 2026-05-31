@@ -29,13 +29,13 @@ static char *dup_or_null(const char *s) {
     return s ? strdup(s) : NULL;
 }
 
-/* ── DocSnapshot ─────────────────────────────────────────────────────────── */
+/* ── doc_snapshot ─────────────────────────────────────────────────────────── */
 
-DocSnapshot *docsnap_new(const char *uri, const char *text,
+doc_snapshot *docsnap_new(const char *uri, const char *text,
                          tj_node *root, TokenSpan *tok_spans,
                          int num_tok_spans, int num_sem_entries,
                          uint64_t doc_version) {
-    DocSnapshot *s = calloc(1, sizeof(DocSnapshot));
+    doc_snapshot *s = calloc(1, sizeof(doc_snapshot));
     if (!s) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     atomic_init(&s->refcount, 1);
     s->doc_version     = doc_version;
@@ -49,12 +49,12 @@ DocSnapshot *docsnap_new(const char *uri, const char *text,
     return s;
 }
 
-DocSnapshot *docsnap_acquire(DocSnapshot *s) {
+doc_snapshot *docsnap_acquire(doc_snapshot *s) {
     if (s) atomic_fetch_add_explicit(&s->refcount, 1, memory_order_relaxed);
     return s;
 }
 
-void docsnap_release(DocSnapshot *s) {
+void docsnap_release(doc_snapshot *s) {
     if (!s) return;
     if (atomic_fetch_sub_explicit(&s->refcount, 1, memory_order_acq_rel) != 1)
         return;
@@ -66,7 +66,7 @@ void docsnap_release(DocSnapshot *s) {
     free(s->uri);
     free(s->text);
 
-    SemTokenData *memo = atomic_load_explicit(&s->sem_memo, memory_order_acquire);
+    sem_token_data *memo = atomic_load_explicit(&s->sem_memo, memory_order_acquire);
     if (memo) {
         free(memo->data);
         free(memo);
@@ -74,14 +74,14 @@ void docsnap_release(DocSnapshot *s) {
     free(s);
 }
 
-void docsnap_sem_tokens(DocSnapshot *s, const uint32_t **out_data, size_t *out_count) {
-    SemTokenData *memo = atomic_load_explicit(&s->sem_memo, memory_order_acquire);
+void docsnap_sem_tokens(doc_snapshot *s, const uint32_t **out_data, size_t *out_count) {
+    sem_token_data *memo = atomic_load_explicit(&s->sem_memo, memory_order_acquire);
     if (!memo) {
         /* Compute a fresh buffer and try to publish it.  The token data is a
          * pure function of the immutable token spans, so concurrent first
          * callers all compute identical results; compare-exchange lets one
          * win and the losers free their buffer and adopt the winner's. */
-        SemTokenData *fresh = malloc(sizeof(SemTokenData));
+        sem_token_data *fresh = malloc(sizeof(sem_token_data));
         if (!fresh) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         fresh->data  = NULL;
         fresh->count = 0;
@@ -89,7 +89,7 @@ void docsnap_sem_tokens(DocSnapshot *s, const uint32_t **out_data, size_t *out_c
                                      s->num_sem_entries,
                                      &fresh->data, &fresh->count);
 
-        SemTokenData *expected = NULL;
+        sem_token_data *expected = NULL;
         if (atomic_compare_exchange_strong_explicit(&s->sem_memo, &expected, fresh,
                                                      memory_order_acq_rel,
                                                      memory_order_acquire)) {
@@ -104,15 +104,15 @@ void docsnap_sem_tokens(DocSnapshot *s, const uint32_t **out_data, size_t *out_c
     *out_count = memo->count;
 }
 
-/* ── WorkspaceSnapshot ───────────────────────────────────────────────────── */
+/* ── workspace_snapshot ───────────────────────────────────────────────────── */
 
-WorkspaceSnapshot *ws_alloc(int num_docs) {
-    WorkspaceSnapshot *ws = calloc(1, sizeof(WorkspaceSnapshot));
+workspace_snapshot *ws_alloc(int num_docs) {
+    workspace_snapshot *ws = calloc(1, sizeof(workspace_snapshot));
     if (!ws) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     atomic_init(&ws->refcount, 1);
     ws->num_docs = num_docs;
     if (num_docs > 0) {
-        ws->docs = calloc((size_t)num_docs, sizeof(WsDoc));
+        ws->docs = calloc((size_t)num_docs, sizeof(ws_doc));
         if (!ws->docs) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         for (int i = 0; i < num_docs; i++)
             ws->docs[i].project_index = -1;
@@ -120,15 +120,15 @@ WorkspaceSnapshot *ws_alloc(int num_docs) {
     return ws;
 }
 
-int ws_add_project(WorkspaceSnapshot *ws, const char *id) {
+int ws_add_project(workspace_snapshot *ws, const char *id) {
     if (ws->num_projects >= ws->projects_cap) {
         int nc = ws->projects_cap ? ws->projects_cap * 2 : 4;
-        WsProject **tmp = realloc(ws->projects, (size_t)nc * sizeof(WsProject *));
+        ws_project **tmp = realloc(ws->projects, (size_t)nc * sizeof(ws_project *));
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         ws->projects     = tmp;
         ws->projects_cap = nc;
     }
-    WsProject *p = calloc(1, sizeof(WsProject));
+    ws_project *p = calloc(1, sizeof(ws_project));
     if (!p) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     p->id = dup_or_null(id);
     int index = ws->num_projects;
@@ -136,12 +136,12 @@ int ws_add_project(WorkspaceSnapshot *ws, const char *id) {
     return index;
 }
 
-WorkspaceSnapshot *ws_acquire(WorkspaceSnapshot *ws) {
+workspace_snapshot *ws_acquire(workspace_snapshot *ws) {
     if (ws) atomic_fetch_add_explicit(&ws->refcount, 1, memory_order_relaxed);
     return ws;
 }
 
-void ws_release(WorkspaceSnapshot *ws) {
+void ws_release(workspace_snapshot *ws) {
     if (!ws) return;
     if (atomic_fetch_sub_explicit(&ws->refcount, 1, memory_order_acq_rel) != 1)
         return;
@@ -156,7 +156,7 @@ void ws_release(WorkspaceSnapshot *ws) {
     free(ws->docs);
 
     for (int i = 0; i < ws->num_projects; i++) {
-        WsProject *p = ws->projects[i];
+        ws_project *p = ws->projects[i];
         if (!p) continue;
         project_node_free_children(&p->root);
         free(p->id);
