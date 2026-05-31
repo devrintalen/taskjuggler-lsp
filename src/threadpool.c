@@ -23,12 +23,10 @@
 
 #include <pthread.h>
 
-/* TODO(workspace-snapshot): one query worker for now.  The snapshot +
- * immutable-parse-result machinery that previously let query workers
- * run lock-free was retired during the tj_node refactor; while
- * server_dispatch_query() serialises under docs_mutex, raising the
- * worker count buys nothing.  See job_queue.h for context. */
-#define NUM_QUERY_WORKERS 1
+/* Query workers run lock-free against the per-Job query_context the
+ * coordinator clones for them (see query_context.h), so they can run
+ * truly in parallel. */
+#define NUM_QUERY_WORKERS 4
 
 /* Single arrival-ordered FIFO populated by the reader.  The
  * coordinator pops from it in order, which is what enforces the LSP
@@ -46,17 +44,13 @@ static pthread_t coordinator_thread;
 static pthread_t query_threads[NUM_QUERY_WORKERS];
 static int       pool_started = 0;
 
-/* Coordinator thread.  Pops jobs from work_queue in arrival order and
- * dispatches each inline so the LSP "messages processed in arrival
- * order" rule is preserved.
- *
- * TODO(workspace-snapshot): the previous design split queries onto a
- * separate worker pool and used a refcounted snapshot taken here so
- * query workers could run lock-free.  That machinery was retired
- * during the tj_node refactor.  request_queue and the worker thread
- * are still allocated below so the public threadpool API does not
- * need to churn; once snapshotting returns, restore the split and
- * re-enable query parallelism. */
+/* Coordinator thread.  Pops jobs from work_queue in arrival order so the
+ * LSP "messages processed in arrival order" rule is preserved.
+ * Notifications and already-cancelled jobs run inline here.  For queries,
+ * server_coordinate_query() either dispatches an inline method itself
+ * (returning 1, so we free the Job) or clones a query_context, attaches it
+ * to the Job, and hands it to the query-worker pool (returning 0, so the
+ * pool now owns the Job). */
 static void *coordinator(void *arg) {
     (void)arg;
     while (1) {
@@ -64,18 +58,25 @@ static void *coordinator(void *arg) {
         if (!job) break;
         if (job->is_notification) {
             server_dispatch_notification(job);
+            job_free(job);
         } else if (job->is_cancelled) {
             server_dispatch_cancelled(job);
+            job_free(job);
+        } else if (server_coordinate_query(job)) {
+            /* Handled inline under docs_mutex; nothing handed off. */
+            job_free(job);
         } else {
-            server_dispatch_query(job);
+            /* Context cloned; hand ownership to the query-worker pool. */
+            job_queue_push(request_queue, job);
         }
-        job_free(job);
     }
     job_queue_close(request_queue);
     return NULL;
 }
 
-/* Query worker.  Currently idle — see coordinator() TODO. */
+/* Query worker.  Runs handlers lock-free against the Job's pre-cloned
+ * query_context.  A $/cancelRequest may have marked the Job after the
+ * coordinator queued it; honour the flag before running. */
 static void *query_worker(void *arg) {
     (void)arg;
     while (1) {
@@ -84,7 +85,7 @@ static void *query_worker(void *arg) {
         if (job->is_cancelled) {
             server_dispatch_cancelled(job);
         } else {
-            server_dispatch_query(job);
+            server_run_query(job);
         }
         job_free(job);
     }

@@ -207,6 +207,55 @@ void tj_node_append_child(tj_node *parent, tj_node *child);
  */
 void tj_node_push_dependency(tj_node *task, Dependency dep);
 
+/**
+ * Old→new node mapping produced by tj_node_deep_copy().
+ *
+ * Deep-copying a tj_node tree relocates every node to a fresh address, so
+ * pointers that referenced the source tree (notably TokenSpan.owner) must
+ * be rewritten to the corresponding clone.  tj_node_deep_copy() records one
+ * entry per copied node; tj_node_map_lookup() translates a source pointer
+ * to its clone via binary search (the entries are sorted by `from` once the
+ * deep copy completes).
+ */
+typedef struct {
+    const tj_node *from;   /**< node in the source tree */
+    tj_node       *to;     /**< its clone in the copied tree */
+} tj_node_map_entry;
+
+typedef struct {
+    tj_node_map_entry *entries;
+    int                count;
+    int                cap;
+} tj_node_map;
+
+/**
+ * Deep-copy a tj_node subtree into a freshly allocated, fully independent
+ * tree.  Copies every owned string (id, name, dependency paths) and the
+ * dependency array (with `resolved_target` reset to NULL); `parent_node`
+ * links are rewired within the clone and the returned root's `parent_node`
+ * is NULL.  `parent_doc` is set on the root's direct children (mirroring
+ * parse-time linkage) and NULL elsewhere.
+ *
+ * When @p map is non-NULL it is populated with one entry per copied node so
+ * callers can relocate external pointers (e.g. TokenSpan.owner) into the
+ * clone; pass the same map to tj_node_map_lookup().  The map is sorted by
+ * `from` before this function returns.
+ *
+ * @param src  Source subtree.  NULL returns NULL.
+ * @param map  Optional pointer map to populate; may be NULL.
+ * @return Newly allocated independent subtree; free with tj_node_free().
+ */
+tj_node *tj_node_deep_copy(const tj_node *src, tj_node_map *map);
+
+/**
+ * Translate a source-tree node pointer to its clone using a map populated
+ * by tj_node_deep_copy().  Returns NULL when @p from is NULL or absent.
+ */
+tj_node *tj_node_map_lookup(const tj_node_map *map, const tj_node *from);
+
+/** Release the backing storage of @p map (not the nodes it references). */
+void     tj_node_map_free(tj_node_map *map);
+
 /** Forward declaration; the full struct is defined in diagnostics.h. */
 typedef struct Diagnostic Diagnostic;
 

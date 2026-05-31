@@ -21,17 +21,19 @@
 /* For the data-flow overview, document lifecycle, and query-dispatch
  * table, see doc/modules/server.rst.
  *
- * TODO(workspace-snapshot): query workers used to operate on a refcounted
- * workspace snapshot so they did not block notifications.  That model
- * relied on per-Document ParseResult refcounting and was retired during
- * the tj_node refactor.  Until a replacement lands, server_dispatch_query
- * acquires docs_mutex for the full handler so the live docs[] array stays
- * consistent under it.
+ * Concurrency model: the coordinator thread owns the live document store.
+ * Notifications and the inline query methods (initialize / shutdown /
+ * semanticTokens) mutate it under docs_mutex on the coordinator.  Every
+ * other query is served by cloning a query_context (a frozen, fully-owned
+ * copy of the documents and project tree the handler needs) under
+ * docs_mutex, then running the handler on a worker thread with no lock
+ * held.  See query_context.h.
  */
 
 #include "server.h"
 #include "parser.h"
 #include "project_tree.h"
+#include "query_context.h"
 #include "grammar.tab.h"   /* KW_* keyword constants for per-kind routing */
 #include "job_queue.h"
 #include "threadpool.h"
@@ -678,7 +680,9 @@ static ProjectNode *find_node_by_dotted_path(ProjectNode *start, const char *pat
     char *copy = strdup(path);
     if (!copy) return NULL;
     ProjectNode *cur = start;
-    for (char *seg = strtok(copy, "."); seg && cur; seg = strtok(NULL, ".")) {
+    char *save = NULL;
+    for (char *seg = strtok_r(copy, ".", &save); seg && cur;
+         seg = strtok_r(NULL, ".", &save)) {
         ProjectNode *next = NULL;
         for (int i = 0; i < cur->num_children && !next; i++) {
             ProjectNode *child = cur->children[i];
@@ -1411,16 +1415,19 @@ static void handle_didclose(yyjson_val *params) {
 
 /* ── Read-only query handlers ─────────────────────────────────────────────
  *
- * Each handler takes `d` (the primary Document, already located by the
- * dispatcher under docs_mutex) and returns the response JSON.  Caller
- * holds docs_mutex; no further locking is needed because the previous
- * snapshot machinery was retired.
+ * Each handler takes `d` (the primary query_doc, cloned from the live store
+ * by server_coordinate_query() under docs_mutex) and returns the response
+ * JSON.  Handlers run on a query worker with no lock held: every pointer
+ * they touch lives inside the Job's private query_context, so a concurrent
+ * notification mutating the live store cannot disturb them.  Cross-document
+ * handlers also receive `qc` for its sibling-document pools and project
+ * tree.
  */
 
 /** A document's top-level symbol pool: the children of its synthetic
  *  `root`, in source order, or an empty pool when @p d has no parse.
  *  The pointers are borrowed from @p d — never freed by the caller. */
-static void doc_symbol_pool(const Document *d, tj_node *const **out_top, int *out_n) {
+static void doc_symbol_pool(const query_doc *d, tj_node *const **out_top, int *out_n) {
     if (d && d->root) {
         *out_top = (tj_node *const *)d->root->children;
         *out_n   = d->root->num_children;
@@ -1431,7 +1438,7 @@ static void doc_symbol_pool(const Document *d, tj_node *const **out_top, int *ou
 }
 
 static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                               yyjson_val *params, Document *d) {
+                                               yyjson_val *params, const query_doc *d) {
     (void)params;
     if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
@@ -1450,26 +1457,28 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
     return make_response(doc, id, raw);
 }
 
-/* Map a per-document task tj_node to its clone in @p d's assembled
+/* Map a per-document task tj_node to its clone in @p qc's assembled
  * Project tree.  Cursor lookups (dependency_at_cursor / task_decl_at_cursor)
  * return per-document nodes, but cross-file resolution lives in the
  * ProjectNode tree, so callers bridge through here first.
  *
  * The per-document task's unprefixed dotted id (its in-file ancestry) is
  * appended to @p d's task prefix target inside the Project tree.  Returns
- * NULL when @p d has no project, the prefix target is missing, or the path
- * does not resolve. */
-static ProjectNode *project_node_for_doc_task(const Document *d,
+ * NULL when @p qc has no project tree, the prefix target is missing, or the
+ * path does not resolve. */
+static ProjectNode *project_node_for_doc_task(const query_context *qc,
+                                              const query_doc *d,
                                               const tj_node *per_doc_task) {
-    if (!d || !d->primary_project || !per_doc_task) return NULL;
-    Project *p = d->primary_project;
+    if (!qc || !qc->project_root || !d || !per_doc_task) return NULL;
 
     char *qid = sym_qualified_id(per_doc_task);   /* unprefixed in-file path */
     if (!qid || !qid[0]) { free(qid); return NULL; }
 
-    ProjectNode *cur = find_node_by_dotted_path(&p->root, d->task_prefix,
+    ProjectNode *cur = find_node_by_dotted_path(qc->project_root, d->task_prefix,
                                                 NODE_KIND_TASK);
-    for (char *seg = strtok(qid, "."); seg && cur; seg = strtok(NULL, ".")) {
+    char *save = NULL;
+    for (char *seg = strtok_r(qid, ".", &save); seg && cur;
+         seg = strtok_r(NULL, ".", &save)) {
         ProjectNode *next = NULL;
         for (int i = 0; i < cur->num_children && !next; i++) {
             ProjectNode *child = cur->children[i];
@@ -1484,7 +1493,7 @@ static ProjectNode *project_node_for_doc_task(const Document *d,
 }
 
 static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
-                                             yyjson_val *params, Document *d) {
+                                             yyjson_val *params, const query_doc *d) {
     (void)params;
     if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
@@ -1498,7 +1507,7 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
-                                         yyjson_val *params, Document *d) {
+                                         yyjson_val *params, const query_doc *d) {
     (void)params;
     if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
@@ -1512,7 +1521,8 @@ static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
-                                     yyjson_val *params, Document *d) {
+                                     yyjson_val *params, const query_context *qc,
+                                     const query_doc *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
@@ -1529,16 +1539,16 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
      * when the cursor is not on a dependency or the reference is unresolved. */
     tj_node          *owner = NULL;
     const Dependency *dep   = NULL;
-    if (d->primary_project &&
+    if (qc->project_root &&
         dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
                              &owner, &dep)) {
-        ProjectNode *merged_owner = project_node_for_doc_task(d, owner);
+        ProjectNode *merged_owner = project_node_for_doc_task(qc, d, owner);
         ProjectNode *target = NULL;
         if (merged_owner) {
             int ordinal = (int)(dep - owner->dependencies);
             if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
                 target = project_dep_resolve(merged_owner, ordinal,
-                                             &d->primary_project->root);
+                                             qc->project_root);
         }
         if (target) {
             char *value = project_node_hover_markdown(target);
@@ -1575,7 +1585,7 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id,
-                                              yyjson_val *params, Document *d) {
+                                              yyjson_val *params, const query_doc *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
@@ -1651,18 +1661,19 @@ static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yy
 }
 
 static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params, Document *d) {
+                                          yyjson_val *params, const query_context *qc,
+                                          const query_doc *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
     if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-    if (!d->primary_project) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!qc->project_root) return make_response(doc, id, yyjson_mut_null(doc));
 
     tj_node *task = task_decl_at_cursor(d->tok_spans, d->num_tok_spans, pos);
-    ProjectNode *wanted = project_node_for_doc_task(d, task);
+    ProjectNode *wanted = project_node_for_doc_task(qc, d, task);
     yyjson_mut_val *result = build_references_json(doc,
-                                                    &d->primary_project->root,
+                                                    qc->project_root,
                                                     wanted);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1670,7 +1681,7 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
 
 static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
                                                   yyjson_val *id,
-                                                  yyjson_val *params, Document *d) {
+                                                  yyjson_val *params, const query_doc *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
     if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
@@ -1689,25 +1700,26 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
 }
 
 static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params, Document *d) {
+                                          yyjson_val *params, const query_context *qc,
+                                          const query_doc *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
     if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-    if (!d->primary_project) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!qc->project_root) return make_response(doc, id, yyjson_mut_null(doc));
 
     tj_node          *owner = NULL;
     const Dependency *dep   = NULL;
     yyjson_mut_val   *result = NULL;
     if (dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
                              &owner, &dep)) {
-        ProjectNode *merged_owner = project_node_for_doc_task(d, owner);
+        ProjectNode *merged_owner = project_node_for_doc_task(qc, d, owner);
         if (merged_owner) {
             int ordinal = (int)(dep - owner->dependencies);
             if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
                 result = build_definition_json(doc, merged_owner, ordinal,
-                                               &d->primary_project->root);
+                                               qc->project_root);
         }
     }
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
@@ -1715,7 +1727,8 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params, Document *d) {
+                                          yyjson_val *params, const query_context *qc,
+                                          const query_doc *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
     if (!tdp) tdp = params;
@@ -1724,24 +1737,17 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
     if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
-    /* Gather top-level nodes of every other Document in the requester's
-     * project as extra pools.  Skips:
-     *   - the requester itself (its symbols are in `self_top`)
-     *   - docs in a different project (cross-project bleed)
-     * Orphans are singleton projects, so the loop naturally yields no
-     * extras for them — correct behavior.  disk_only project members
-     * ARE included: a .tji pulled in via include is a legitimate
-     * cross-file completion source. */
+    /* Every non-primary doc in the context is a sibling in the requester's
+     * project (the clone step already restricted membership), so each one's
+     * top-level pool is an extra cross-file completion source.  Orphans
+     * have no siblings, so the loop naturally yields no extras for them. */
     tj_node *const *extra_pools[MAX_DOCS];
     int             extra_counts[MAX_DOCS];
     int             num_extra = 0;
-    for (int i = 0; i < MAX_DOCS && num_extra < MAX_DOCS; i++) {
-        if (!docs[i].in_use) continue;
-        if (&docs[i] == d) continue;
-        if (!d->primary_project) continue;
-        if (docs[i].primary_project != d->primary_project) continue;
+    for (int i = 0; i < qc->num_docs && num_extra < MAX_DOCS; i++) {
+        if (qc->docs[i].is_primary) continue;
         tj_node *const *top; int n;
-        doc_symbol_pool(&docs[i], &top, &n);
+        doc_symbol_pool(&qc->docs[i], &top, &n);
         if (!top) continue;
         extra_pools[num_extra]  = top;
         extra_counts[num_extra] = n;
@@ -1765,17 +1771,18 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                                yyjson_val *params) {
+                                                yyjson_val *params,
+                                                const query_context *qc) {
     const char *query = params ? json_str(params, "query") : NULL;
     if (!query) query = "";
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use || !docs[i].root) continue;
+    for (int i = 0; i < qc->num_docs; i++) {
+        if (!qc->docs[i].root) continue;
         tj_node *const *top; int n;
-        doc_symbol_pool(&docs[i], &top, &n);
+        doc_symbol_pool(&qc->docs[i], &top, &n);
         if (!top) continue;
-        collect_workspace_symbols(doc, query, top, n, docs[i].uri, arr);
+        collect_workspace_symbols(doc, query, top, n, qc->docs[i].uri, arr);
     }
     return make_response(doc, id, arr);
 }
@@ -1840,67 +1847,154 @@ void server_dispatch_cancelled(Job *job) {
     yyjson_mut_doc_free(out_doc);
 }
 
-void server_dispatch_query(Job *job) {
+/* Pull the request's primary document URI out of `params`, accepting both
+ * the flat `textDocument` form and the nested `textDocumentPosition` form. */
+static const char *request_primary_uri(yyjson_val *params) {
+    if (!params) return NULL;
+    yyjson_val *td = yyjson_obj_get(params, "textDocument");
+    if (td) {
+        const char *uri = json_str(td, "uri");
+        if (uri) return uri;
+    }
+    yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
+    if (tdp) {
+        td = yyjson_obj_get(tdp, "textDocument");
+        if (td) return json_str(td, "uri");
+    }
+    return NULL;
+}
+
+/* Clone the query_context for one query under docs_mutex.  When
+ * @p want_all_docs is set (workspace/symbol) every in-use document is
+ * included and there is no primary; otherwise the context holds the primary
+ * document plus its same-project siblings.  Caller must hold docs_mutex. */
+static query_context *build_query_context_locked(const char *primary_uri,
+                                                 int want_all_docs) {
+    Document *primary = primary_uri ? doc_find(primary_uri) : NULL;
+    Project  *proj    = primary ? primary->primary_project : NULL;
+
+    query_doc_src srcs[MAX_DOCS];
+    int n           = 0;
+    int primary_idx = -1;
+
+    for (int i = 0; i < MAX_DOCS && n < MAX_DOCS; i++) {
+        Document *cand = &docs[i];
+        if (!cand->in_use) continue;
+        int is_primary = (cand == primary);
+        if (!is_primary && !want_all_docs) {
+            /* Same-project siblings only; orphans (proj == NULL) get none. */
+            if (!proj || cand->primary_project != proj) continue;
+        }
+        srcs[n] = (query_doc_src){
+            .uri             = cand->uri,
+            .text            = cand->text,
+            .task_prefix     = cand->task_prefix,
+            .account_prefix  = cand->account_prefix,
+            .report_prefix   = cand->report_prefix,
+            .resource_prefix = cand->resource_prefix,
+            .root            = cand->root,
+            .tok_spans       = cand->tok_spans,
+            .num_tok_spans   = cand->num_tok_spans,
+            .num_sem_entries = cand->num_sem_entries,
+            .is_primary      = is_primary,
+        };
+        if (is_primary) primary_idx = n;
+        n++;
+    }
+
+    const ProjectNode *project_root = proj ? &proj->root : NULL;
+    const char        *project_id   = proj ? proj->id    : NULL;
+    return query_context_build(srcs, n, primary_idx, project_root, project_id);
+}
+
+/* Methods that mutate live state (initialize/shutdown) or depend on
+ * sequential write-back (semanticTokens) run inline on the coordinator
+ * rather than against a clone. */
+static int is_inline_query_method(const char *m) {
+    return strcmp(m, "initialize") == 0
+        || strcmp(m, "shutdown") == 0
+        || strcmp(m, "textDocument/semanticTokens/full") == 0
+        || strcmp(m, "textDocument/semanticTokens/full/delta") == 0;
+}
+
+int server_coordinate_query(Job *job) {
     yyjson_val *root    = yyjson_doc_get_root(job->request_doc);
     yyjson_val *id_item = yyjson_obj_get(root, "id");
     yyjson_val *method  = yyjson_obj_get(root, "method");
     yyjson_val *params  = yyjson_obj_get(root, "params");
     const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
 
+    if (is_inline_query_method(m)) {
+        yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
+        yyjson_mut_val *resp = NULL;
+
+        pthread_mutex_lock(&docs_mutex);
+        const char *primary_uri = request_primary_uri(params);
+        Document   *primary     = primary_uri ? doc_find(primary_uri) : NULL;
+        if (strcmp(m, "initialize") == 0) {
+            resp = handle_initialize(out_doc, id_item, params);
+        } else if (strcmp(m, "shutdown") == 0) {
+            resp = handle_shutdown(out_doc, id_item);
+        } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
+            resp = handle_semantic_tokens_full(out_doc, id_item, params, primary);
+        } else {
+            resp = handle_semantic_tokens_full_delta(out_doc, id_item, params, primary);
+        }
+        pthread_mutex_unlock(&docs_mutex);
+
+        if (resp) send_response(out_doc, resp);
+        yyjson_mut_doc_free(out_doc);
+        return 1;   /* handled inline; coordinator frees the Job */
+    }
+
+    /* Every other query is served from a private clone.  Build it under the
+     * lock and let the coordinator hand the Job to the worker pool. */
+    int want_all_docs = (strcmp(m, "workspace/symbol") == 0);
+
+    pthread_mutex_lock(&docs_mutex);
+    const char *primary_uri = request_primary_uri(params);
+    job->context = build_query_context_locked(primary_uri, want_all_docs);
+    pthread_mutex_unlock(&docs_mutex);
+
+    return 0;   /* ownership transferred to the worker pool */
+}
+
+void server_run_query(Job *job) {
+    yyjson_val *root    = yyjson_doc_get_root(job->request_doc);
+    yyjson_val *id_item = yyjson_obj_get(root, "id");
+    yyjson_val *method  = yyjson_obj_get(root, "method");
+    yyjson_val *params  = yyjson_obj_get(root, "params");
+    const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
+
+    const query_context *qc = job->context;
+    const query_doc     *d  = query_context_primary(qc);
+
     yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *resp = NULL;
 
-    /* Locate the primary Document (if any) so handlers receive a stable
-     * pointer.  Held docs_mutex covers both lookup and handler execution. */
-    pthread_mutex_lock(&docs_mutex);
-
-    const char *primary_uri = NULL;
-    if (params) {
-        yyjson_val *td = yyjson_obj_get(params, "textDocument");
-        if (td) primary_uri = json_str(td, "uri");
-        if (!primary_uri) {
-            yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
-            if (tdp) {
-                td = yyjson_obj_get(tdp, "textDocument");
-                if (td) primary_uri = json_str(td, "uri");
-            }
-        }
-    }
-    Document *primary = primary_uri ? doc_find(primary_uri) : NULL;
-
-    if (strcmp(m, "initialize") == 0) {
-        resp = handle_initialize(out_doc, id_item, params);
-    } else if (strcmp(m, "shutdown") == 0) {
-        resp = handle_shutdown(out_doc, id_item);
-    } else if (strcmp(m, "textDocument/documentSymbol") == 0) {
-        resp = handle_document_symbol(out_doc, id_item, params, primary);
+    if (strcmp(m, "textDocument/documentSymbol") == 0) {
+        resp = handle_document_symbol(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/foldingRange") == 0) {
-        resp = handle_folding_range(out_doc, id_item, params, primary);
+        resp = handle_folding_range(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/codeLens") == 0) {
-        resp = handle_code_lens(out_doc, id_item, params, primary);
+        resp = handle_code_lens(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/hover") == 0) {
-        resp = handle_hover(out_doc, id_item, params, primary);
+        resp = handle_hover(out_doc, id_item, params, qc, d);
     } else if (strcmp(m, "textDocument/signatureHelp") == 0) {
-        resp = handle_signature_help(out_doc, id_item, params, primary);
+        resp = handle_signature_help(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/references") == 0) {
-        resp = handle_references(out_doc, id_item, params, primary);
+        resp = handle_references(out_doc, id_item, params, qc, d);
     } else if (strcmp(m, "textDocument/documentHighlight") == 0) {
-        resp = handle_document_highlight(out_doc, id_item, params, primary);
+        resp = handle_document_highlight(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/definition") == 0) {
-        resp = handle_definition(out_doc, id_item, params, primary);
+        resp = handle_definition(out_doc, id_item, params, qc, d);
     } else if (strcmp(m, "textDocument/completion") == 0) {
-        resp = handle_completion(out_doc, id_item, params, primary);
+        resp = handle_completion(out_doc, id_item, params, qc, d);
     } else if (strcmp(m, "workspace/symbol") == 0) {
-        resp = handle_workspace_symbol(out_doc, id_item, params);
-    } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
-        resp = handle_semantic_tokens_full(out_doc, id_item, params, primary);
-    } else if (strcmp(m, "textDocument/semanticTokens/full/delta") == 0) {
-        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params, primary);
+        resp = handle_workspace_symbol(out_doc, id_item, params, qc);
     } else if (id_item) {
         resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
     }
-
-    pthread_mutex_unlock(&docs_mutex);
 
     if (resp) send_response(out_doc, resp);
     yyjson_mut_doc_free(out_doc);

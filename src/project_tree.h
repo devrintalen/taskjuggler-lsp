@@ -106,6 +106,20 @@ struct ProjectNode {
 ProjectNode *project_node_from_tj(const tj_node *src, const char *source_uri);
 
 /**
+ * Deep-copy a ProjectNode subtree into a freshly allocated, fully
+ * independent tree.  Copies every owned string (id, name, source_uri, and
+ * dependency paths); `parent_node` links are rewired within the clone and
+ * the returned root's `parent_node` is NULL.  Every dependency is reset to
+ * DEP_UNRESOLVED with `resolved_target` / `target_uri` cleared so the clone
+ * re-resolves lazily against its own nodes — making dependency memoization
+ * thread-private to the owning query worker.
+ *
+ * @param src  Source subtree.  NULL returns NULL.
+ * @return Newly allocated independent subtree; free with project_node_free().
+ */
+ProjectNode *project_node_deep_copy(const ProjectNode *src);
+
+/**
  * Append @p child under @p parent (growing the children array) and set
  * @p child's `parent_node` to @p parent.
  */

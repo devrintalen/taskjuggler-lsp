@@ -38,24 +38,26 @@
  * including state-mutating lifecycle ones like initialize/shutdown —
  * are queries.
  *
- * TODO(workspace-snapshot): The previous design captured a refcounted
- * WorkspaceSnapshot at dispatch time so query workers could run lock-
- * free.  The snapshot model was tied to per-Document ParseResult
- * refcounts and was retired during the tj_node refactor.  Until a
- * replacement snapshotting strategy lands, server_dispatch_query()
- * serialises every handler under docs_mutex.
+ * `context` is the frozen query_context the coordinator clones (under
+ * docs_mutex) before handing a query Job to a worker, so the worker runs
+ * its handler lock-free against private memory.  NULL for notifications and
+ * for inline-dispatched query methods (initialize / shutdown /
+ * semanticTokens); owned by the Job and released by job_free().
  *
  * `id` / `has_id` carry the JSON-RPC request id as a first-class field
  * on the Job so $/cancelRequest can mark queued Jobs.  Notifications
  * and string/null ids leave `has_id = 0`.
  */
+struct query_context;
+
 typedef struct Job {
-    yyjson_doc *request_doc;
-    int         is_notification;
-    int         is_cancelled;
-    int         has_id;
-    int64_t     id;
-    struct Job *next;
+    yyjson_doc            *request_doc;
+    int                    is_notification;
+    int                    is_cancelled;
+    int                    has_id;
+    int64_t                id;
+    struct query_context  *context;
+    struct Job            *next;
 } Job;
 
 /** Opaque thread-safe FIFO of Job pointers. */

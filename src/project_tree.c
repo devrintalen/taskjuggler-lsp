@@ -75,6 +75,40 @@ ProjectNode *project_node_from_tj(const tj_node *src, const char *source_uri) {
     return dst;
 }
 
+static void copy_project_dependencies(ProjectNode *dst, const ProjectNode *src) {
+    if (src->num_dependencies <= 0) return;
+    dst->dependencies = calloc((size_t)src->num_dependencies, sizeof(ProjectDep));
+    if (!dst->dependencies) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    for (int i = 0; i < src->num_dependencies; i++) {
+        const ProjectDep *s = &src->dependencies[i];
+        ProjectDep       *d = &dst->dependencies[i];
+        d->kind            = s->kind;
+        d->bang_count      = s->bang_count;
+        d->path            = s->path ? strdup(s->path) : NULL;
+        d->source_range    = s->source_range;
+        d->resolved_target = NULL;
+        d->target_uri      = NULL;
+        d->state           = DEP_UNRESOLVED;
+    }
+    dst->num_dependencies = src->num_dependencies;
+}
+
+ProjectNode *project_node_deep_copy(const ProjectNode *src) {
+    if (!src) return NULL;
+    ProjectNode *dst = calloc(1, sizeof(ProjectNode));
+    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    dst->keyword         = src->keyword;
+    dst->id              = src->id         ? strdup(src->id)         : NULL;
+    dst->name            = src->name       ? strdup(src->name)       : NULL;
+    dst->range           = src->range;
+    dst->selection_range = src->selection_range;
+    dst->source_uri      = src->source_uri ? strdup(src->source_uri) : NULL;
+    copy_project_dependencies(dst, src);
+    for (int i = 0; i < src->num_children; i++)
+        project_node_append_child(dst, project_node_deep_copy(src->children[i]));
+    return dst;
+}
+
 /* ── Teardown ───────────────────────────────────────────────────────────── */
 
 void project_node_free(ProjectNode *node) {
@@ -112,7 +146,8 @@ static void split_dotted_path(const char *path, char ***out_segs, int *out_n) {
     if (!*out_segs) return;
     char *tmp = strdup(path);
     if (!tmp) { free(*out_segs); *out_segs = NULL; return; }
-    for (char *tok = strtok(tmp, "."); tok; tok = strtok(NULL, "."))
+    char *save = NULL;
+    for (char *tok = strtok_r(tmp, ".", &save); tok; tok = strtok_r(NULL, ".", &save))
         (*out_segs)[(*out_n)++] = strdup(tok);
     free(tmp);
 }
