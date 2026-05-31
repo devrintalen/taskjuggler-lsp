@@ -19,6 +19,7 @@
 /** @file */
 
 #include "query_context.h"
+#include "semantic_tokens.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,74 +29,145 @@ static char *dup_or_null(const char *s) {
     return s ? strdup(s) : NULL;
 }
 
-/* Clone one document's read state into @p dst, deep-copying the tj_node tree
- * and relocating each cloned TokenSpan.owner into that copy via the pointer
- * map produced by tj_node_deep_copy(). */
-static void query_doc_clone(query_doc *dst, const query_doc_src *src) {
-    dst->uri             = dup_or_null(src->uri);
-    dst->text            = dup_or_null(src->text);
-    dst->task_prefix     = dup_or_null(src->task_prefix);
-    dst->account_prefix  = dup_or_null(src->account_prefix);
-    dst->report_prefix   = dup_or_null(src->report_prefix);
-    dst->resource_prefix = dup_or_null(src->resource_prefix);
-    dst->num_sem_entries = src->num_sem_entries;
-    dst->is_primary      = src->is_primary;
+/* ── DocSnapshot ─────────────────────────────────────────────────────────── */
 
-    tj_node_map map = {0};
-    dst->root = tj_node_deep_copy(src->root, &map);
+DocSnapshot *docsnap_new(const char *uri, const char *text,
+                         tj_node *root, TokenSpan *tok_spans,
+                         int num_tok_spans, int num_sem_entries,
+                         uint64_t doc_version) {
+    DocSnapshot *s = calloc(1, sizeof(DocSnapshot));
+    if (!s) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    atomic_init(&s->refcount, 1);
+    s->doc_version     = doc_version;
+    s->uri             = dup_or_null(uri);
+    s->text            = dup_or_null(text);
+    s->root            = root;        /* ownership moved in */
+    s->tok_spans       = tok_spans;   /* ownership moved in */
+    s->num_tok_spans   = num_tok_spans;
+    s->num_sem_entries = num_sem_entries;
+    atomic_init(&s->sem_memo, NULL);
+    return s;
+}
 
-    dst->num_tok_spans = src->num_tok_spans;
-    if (src->num_tok_spans > 0 && src->tok_spans) {
-        dst->tok_spans = malloc((size_t)src->num_tok_spans * sizeof(TokenSpan));
-        if (!dst->tok_spans) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        for (int i = 0; i < src->num_tok_spans; i++) {
-            const TokenSpan *s = &src->tok_spans[i];
-            TokenSpan       *d = &dst->tok_spans[i];
-            d->token_kind = s->token_kind;
-            d->start      = s->start;
-            d->end        = s->end;
-            d->text       = s->text ? strdup(s->text) : NULL;
-            d->owner      = tj_node_map_lookup(&map, s->owner);
+DocSnapshot *docsnap_acquire(DocSnapshot *s) {
+    if (s) atomic_fetch_add_explicit(&s->refcount, 1, memory_order_relaxed);
+    return s;
+}
+
+void docsnap_release(DocSnapshot *s) {
+    if (!s) return;
+    if (atomic_fetch_sub_explicit(&s->refcount, 1, memory_order_acq_rel) != 1)
+        return;
+
+    tj_node_free(s->root);
+    for (int i = 0; i < s->num_tok_spans; i++)
+        free(s->tok_spans[i].text);
+    free(s->tok_spans);
+    free(s->uri);
+    free(s->text);
+
+    SemTokenData *memo = atomic_load_explicit(&s->sem_memo, memory_order_acquire);
+    if (memo) {
+        free(memo->data);
+        free(memo);
+    }
+    free(s);
+}
+
+void docsnap_sem_tokens(DocSnapshot *s, const uint32_t **out_data, size_t *out_count) {
+    SemTokenData *memo = atomic_load_explicit(&s->sem_memo, memory_order_acquire);
+    if (!memo) {
+        /* Compute a fresh buffer and try to publish it.  The token data is a
+         * pure function of the immutable token spans, so concurrent first
+         * callers all compute identical results; compare-exchange lets one
+         * win and the losers free their buffer and adopt the winner's. */
+        SemTokenData *fresh = malloc(sizeof(SemTokenData));
+        if (!fresh) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        fresh->data  = NULL;
+        fresh->count = 0;
+        compute_semantic_tokens_data(s->tok_spans, s->num_tok_spans,
+                                     s->num_sem_entries,
+                                     &fresh->data, &fresh->count);
+
+        SemTokenData *expected = NULL;
+        if (atomic_compare_exchange_strong_explicit(&s->sem_memo, &expected, fresh,
+                                                     memory_order_acq_rel,
+                                                     memory_order_acquire)) {
+            memo = fresh;
+        } else {
+            free(fresh->data);
+            free(fresh);
+            memo = expected;
         }
     }
-
-    tj_node_map_free(&map);
+    *out_data  = memo->data;
+    *out_count = memo->count;
 }
 
-static void query_doc_free_fields(query_doc *d) {
-    free(d->uri);
-    free(d->text);
-    free(d->task_prefix);
-    free(d->account_prefix);
-    free(d->report_prefix);
-    free(d->resource_prefix);
-    tj_node_free(d->root);
-    for (int i = 0; i < d->num_tok_spans; i++)
-        free(d->tok_spans[i].text);
-    free(d->tok_spans);
-}
+/* ── WorkspaceSnapshot ───────────────────────────────────────────────────── */
 
-query_context *query_context_build(const query_doc_src *srcs, int num_docs,
-                                   int primary_idx,
-                                   const ProjectNode *project_root,
-                                   const char *project_id) {
-    query_context *qc = calloc(1, sizeof(query_context));
-    if (!qc) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-
-    qc->primary_idx  = primary_idx;
-    qc->project_root = project_node_deep_copy(project_root);
-    qc->project_id   = dup_or_null(project_id);
-
+WorkspaceSnapshot *ws_alloc(int num_docs) {
+    WorkspaceSnapshot *ws = calloc(1, sizeof(WorkspaceSnapshot));
+    if (!ws) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    atomic_init(&ws->refcount, 1);
+    ws->num_docs = num_docs;
     if (num_docs > 0) {
-        qc->docs = calloc((size_t)num_docs, sizeof(query_doc));
-        if (!qc->docs) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        ws->docs = calloc((size_t)num_docs, sizeof(WsDoc));
+        if (!ws->docs) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         for (int i = 0; i < num_docs; i++)
-            query_doc_clone(&qc->docs[i], &srcs[i]);
-        qc->num_docs = num_docs;
+            ws->docs[i].project_index = -1;
     }
-
-    return qc;
+    return ws;
 }
+
+int ws_add_project(WorkspaceSnapshot *ws, const char *id) {
+    if (ws->num_projects >= ws->projects_cap) {
+        int nc = ws->projects_cap ? ws->projects_cap * 2 : 4;
+        WsProject **tmp = realloc(ws->projects, (size_t)nc * sizeof(WsProject *));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        ws->projects     = tmp;
+        ws->projects_cap = nc;
+    }
+    WsProject *p = calloc(1, sizeof(WsProject));
+    if (!p) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    p->id = dup_or_null(id);
+    int index = ws->num_projects;
+    ws->projects[ws->num_projects++] = p;
+    return index;
+}
+
+WorkspaceSnapshot *ws_acquire(WorkspaceSnapshot *ws) {
+    if (ws) atomic_fetch_add_explicit(&ws->refcount, 1, memory_order_relaxed);
+    return ws;
+}
+
+void ws_release(WorkspaceSnapshot *ws) {
+    if (!ws) return;
+    if (atomic_fetch_sub_explicit(&ws->refcount, 1, memory_order_acq_rel) != 1)
+        return;
+
+    for (int i = 0; i < ws->num_docs; i++) {
+        docsnap_release(ws->docs[i].snap);
+        free(ws->docs[i].task_prefix);
+        free(ws->docs[i].account_prefix);
+        free(ws->docs[i].report_prefix);
+        free(ws->docs[i].resource_prefix);
+    }
+    free(ws->docs);
+
+    for (int i = 0; i < ws->num_projects; i++) {
+        WsProject *p = ws->projects[i];
+        if (!p) continue;
+        project_node_free_children(&p->root);
+        free(p->id);
+        free(p);
+    }
+    free(ws->projects);
+
+    free(ws);
+}
+
+/* ── query_context ───────────────────────────────────────────────────────── */
 
 const query_doc *query_context_primary(const query_context *qc) {
     if (!qc || qc->primary_idx < 0 || qc->primary_idx >= qc->num_docs)
@@ -105,10 +177,8 @@ const query_doc *query_context_primary(const query_context *qc) {
 
 void query_context_free(query_context *qc) {
     if (!qc) return;
-    for (int i = 0; i < qc->num_docs; i++)
-        query_doc_free_fields(&qc->docs[i]);
     free(qc->docs);
-    project_node_free(qc->project_root);
-    free(qc->project_id);
+    docsnap_release(qc->prev_snap);
+    ws_release(qc->ws);
     free(qc);
 }

@@ -23,106 +23,197 @@
 #include "parser.h"
 #include "project_tree.h"
 
+#include <stdatomic.h>
+#include <stddef.h>
+#include <stdint.h>
+
 /*
- * Query context: a frozen, self-contained snapshot of exactly the document
- * and project state a read-only query handler needs, cloned out of the live
- * document store under docs_mutex at job-dispatch time.
+ * Immutable, refcounted workspace snapshots.
  *
- * The coordinator thread builds one query_context per query job while
- * holding docs_mutex, attaches it to the Job, releases the lock, and hands
- * the job to a query worker.  The worker runs the handler entirely against
- * the query_context with no lock held, then frees it.  Because every field
- * is deep-copied and owned here, a concurrent notification mutating the live
- * store cannot disturb an in-flight query.
+ * Read-only query handlers never see the live document store.  Instead the
+ * coordinator publishes an immutable WorkspaceSnapshot after every
+ * document-changing notification (built under docs_mutex), and each query
+ * pins the current snapshot by bumping one atomic refcount — an O(1) clone,
+ * not the O(nodes) deep copy the earlier query_context did.  A concurrent
+ * notification builds a *new* snapshot and atomically swaps the published
+ * pointer; the old snapshot is freed only when its last in-flight query
+ * releases it, so a query always reads one self-consistent revision.
  *
- * State-mutating methods (initialize / shutdown) and the semanticTokens
- * methods (which write back result ids and depend on sequential
- * accumulation) do NOT use a query_context; the coordinator dispatches them
- * inline under docs_mutex against the live store.
+ * Two refcounted layers:
+ *
+ *   DocSnapshot      — one document's frozen parse output (tj_node tree,
+ *                      token spans, source text).  Created once per parse and
+ *                      shared by ref: editing document A produces a new
+ *                      DocSnapshot for A while every other document's snapshot
+ *                      is re-referenced unchanged.  Carries a write-once memo
+ *                      for its semantic-token data.
+ *
+ *   WorkspaceSnapshot — the cross-file view: a WsDoc per in-use document
+ *                      (referencing its DocSnapshot plus the include-prefixes
+ *                      in force this revision) and a WsProject per assembled
+ *                      project (the deep-copied ProjectNode resolution tree
+ *                      with its atomic dependency memos).
+ *
+ * State-mutating lifecycle methods (initialize / shutdown) do not touch a
+ * snapshot and run inline on the coordinator; every other query — including
+ * semanticTokens, whose data and result id now live in the DocSnapshot — runs
+ * on a worker against a pinned snapshot with no lock held.
  */
+
+/* ── Semantic-token data memo ────────────────────────────────────────────── */
+
+/** Computed LSP semantic-token data for one DocSnapshot: the flat five-int
+ *  encoded buffer plus its entry count.  Heap-allocated once and published
+ *  into DocSnapshot.sem_memo by compare-exchange. */
+typedef struct SemTokenData {
+    uint32_t *data;   /**< owned; flat uint32 buffer (count entries) */
+    size_t    count;  /**< number of uint32 entries (multiple of 5) */
+} SemTokenData;
+
+/* ── Per-document snapshot ───────────────────────────────────────────────── */
 
 /**
- * One document's frozen read state.  All pointers are owned by this struct
- * and freed by query_context_free().  Field names mirror the live Document
- * so handlers read them unchanged.
- *
- * `root` is a deep copy of the document's tj_node tree; `tok_spans` is a
- * clone whose `owner` pointers have been relocated into that copied tree.
+ * One document's immutable parse output, refcounted and shared.  Every
+ * pointer field is owned and freed when the last ref drops.  The tj_node
+ * tree and token spans are moved out of a ParseOutput at creation, so the
+ * TokenSpan.owner pointers already address nodes within `root`.
  */
-typedef struct {
-    char      *uri;
-    char      *text;
-    char      *task_prefix;
-    char      *account_prefix;
-    char      *report_prefix;
-    char      *resource_prefix;
+typedef struct DocSnapshot {
+    _Atomic int  refcount;
+    uint64_t     doc_version;     /**< monotonic parse stamp; also the semantic-tokens resultId */
 
-    tj_node   *root;            /**< deep-copied per-doc tree (owned) */
-    TokenSpan *tok_spans;       /**< cloned; owner relocated into `root` */
-    int        num_tok_spans;
-    int        num_sem_entries;
+    char        *uri;             /**< owned canonical file:// URI */
+    char        *text;            /**< owned copy of the parsed source text */
 
-    int        is_primary;      /**< 1 for the requested document */
+    tj_node     *root;            /**< owned synthetic root over all top-level decls */
+    TokenSpan   *tok_spans;       /**< owned; .owner points within `root` */
+    int          num_tok_spans;
+    int          num_sem_entries;
+
+    _Atomic(SemTokenData *) sem_memo;  /**< NULL until first request; CAS-published */
+} DocSnapshot;
+
+/**
+ * Create a DocSnapshot taking ownership of @p root and @p tok_spans (the
+ * fields moved out of a ParseOutput) and deep-copying @p uri / @p text.
+ * Returned with refcount 1.
+ */
+DocSnapshot *docsnap_new(const char *uri, const char *text,
+                         tj_node *root, TokenSpan *tok_spans,
+                         int num_tok_spans, int num_sem_entries,
+                         uint64_t doc_version);
+
+/** Bump the refcount and return @p s (NULL-safe, returns NULL). */
+DocSnapshot *docsnap_acquire(DocSnapshot *s);
+
+/** Drop one ref; free @p s and everything it owns when the last ref goes. */
+void docsnap_release(DocSnapshot *s);
+
+/**
+ * Return @p s's semantic-token data, computing and memoizing it on first
+ * call.  Lock-free and idempotent: concurrent first callers each compute a
+ * buffer and race to publish via compare-exchange; the losers free their
+ * buffer and adopt the winner's.  The returned pointer is owned by @p s and
+ * valid for its lifetime.
+ */
+void docsnap_sem_tokens(DocSnapshot *s, const uint32_t **out_data, size_t *out_count);
+
+/* ── Workspace snapshot ──────────────────────────────────────────────────── */
+
+/** One document's place in a WorkspaceSnapshot: its (ref'd) DocSnapshot, the
+ *  include-prefixes applied to it this revision (owned copies), and the index
+ *  of the project it belongs to. */
+typedef struct WsDoc {
+    DocSnapshot *snap;            /**< ref'd; +1 held by the owning WorkspaceSnapshot */
+    char        *task_prefix;     /**< owned; may be NULL */
+    char        *account_prefix;
+    char        *report_prefix;
+    char        *resource_prefix;
+    int          project_index;   /**< index into WorkspaceSnapshot.projects, or -1 */
+} WsDoc;
+
+/** One assembled project: its canonical id and the synthetic root of the
+ *  deep-copied cross-file ProjectNode resolution tree.  Heap-allocated
+ *  individually so `root`'s address is stable (children link back to it via
+ *  parent_node). */
+typedef struct WsProject {
+    char        *id;              /**< owned; canonical .tjp URI or doc URI */
+    ProjectNode  root;            /**< embedded synthetic root over all kinds */
+} WsProject;
+
+/** Immutable, refcounted cross-file view of the whole workspace. */
+typedef struct WorkspaceSnapshot {
+    _Atomic int  refcount;
+    WsDoc       *docs;            /**< owned array[num_docs] */
+    int          num_docs;
+    WsProject  **projects;        /**< owned array of owned WsProject* */
+    int          num_projects;
+    int          projects_cap;
+} WorkspaceSnapshot;
+
+/** Allocate a WorkspaceSnapshot with @p num_docs zeroed WsDoc slots (caller
+ *  fills them) and an empty project list.  Returned with refcount 1. */
+WorkspaceSnapshot *ws_alloc(int num_docs);
+
+/** Append a new empty WsProject with id @p id (deep-copied) and return its
+ *  index; the caller populates its `root` tree. */
+int ws_add_project(WorkspaceSnapshot *ws, const char *id);
+
+/** Bump the refcount and return @p ws (NULL-safe, returns NULL). */
+WorkspaceSnapshot *ws_acquire(WorkspaceSnapshot *ws);
+
+/** Drop one ref; free @p ws, its project trees, and release every WsDoc's
+ *  DocSnapshot ref when the last ref goes. */
+void ws_release(WorkspaceSnapshot *ws);
+
+/* ── Per-query context ───────────────────────────────────────────────────── */
+
+/**
+ * One document's read view as the handlers consume it.  All pointers are
+ * borrowed from a snapshot pinned by the enclosing query_context and are
+ * valid for the duration of the query; nothing here is owned.  Field names
+ * mirror the old live Document so handlers read them unchanged.
+ */
+typedef struct query_doc {
+    const char  *uri;
+    const char  *text;
+    const char  *task_prefix;
+    const char  *account_prefix;
+    const char  *report_prefix;
+    const char  *resource_prefix;
+
+    tj_node     *root;            /**< borrowed from snap */
+    TokenSpan   *tok_spans;       /**< borrowed from snap */
+    int          num_tok_spans;
+    int          num_sem_entries;
+
+    int          is_primary;      /**< 1 for the requested document */
+    DocSnapshot *snap;            /**< borrowed backing snapshot (sem-token memo + version) */
 } query_doc;
 
 /**
- * Plain description of one live document the caller wants cloned.  Built by
- * server.c from a Document slot under docs_mutex and handed to
- * query_context_build(), which performs the deep copies.  Holds only
- * borrowed pointers into the live store — valid for the duration of the
- * build call only.
- */
-typedef struct {
-    const char      *uri;
-    const char      *text;
-    const char      *task_prefix;
-    const char      *account_prefix;
-    const char      *report_prefix;
-    const char      *resource_prefix;
-    const tj_node   *root;
-    const TokenSpan *tok_spans;
-    int              num_tok_spans;
-    int              num_sem_entries;
-    int              is_primary;
-} query_doc_src;
-
-/**
- * Immutable, fully-owned view of the workspace at a single point in time.
- *
- * `docs[primary_idx]` is the requested document; other slots are sibling
- * documents in the same project (extra completion / workspace-symbol
- * pools).  `primary_idx` is -1 when there is no primary document (e.g.
- * workspace/symbol, which spans every document).  `project_root` is a deep
- * copy of the primary document's assembled Project tree, or NULL when the
- * primary has no project.
+ * A query's pinned, lock-free view of the workspace.  Holds one ref on the
+ * WorkspaceSnapshot (which transitively pins every DocSnapshot and project
+ * tree it reads) plus, for semanticTokens/delta, one ref on the immediately
+ * previous DocSnapshot of the primary document.  The query_doc array borrows
+ * into the snapshot; only the array itself and the two refs are released by
+ * query_context_free.
  */
 typedef struct query_context {
-    query_doc   *docs;
-    int          num_docs;
-    int          primary_idx;
-    ProjectNode *project_root;   /**< deep copy of primary project's root; may be NULL */
-    char        *project_id;     /**< owned copy of the project id; may be NULL */
-} query_context;
+    WorkspaceSnapshot *ws;          /**< 1 ref; pins docs + project trees. */
+    DocSnapshot       *prev_snap;   /**< 1 ref; primary's previous parse, for delta. May be NULL. */
 
-/**
- * Build a query_context by deep-copying every document in @p srcs and the
- * provided @p project_root.  Called by the coordinator while holding
- * docs_mutex; the returned context shares no memory with the live store.
- *
- * @param srcs          Array of @p num_docs document descriptors.
- * @param num_docs      Number of entries in @p srcs (may be 0).
- * @param primary_idx   Index of the primary document in @p srcs, or -1.
- * @param project_root  Live primary-project root to clone, or NULL.
- * @param project_id    Project id to copy, or NULL.
- * @return Newly allocated context; free with query_context_free().
- */
-query_context *query_context_build(const query_doc_src *srcs, int num_docs,
-                                   int primary_idx,
-                                   const ProjectNode *project_root,
-                                   const char *project_id);
+    query_doc   *docs;              /**< owned array; entries borrow into `ws`. */
+    int          num_docs;
+    int          primary_idx;       /**< index of the requested doc, or -1. */
+
+    ProjectNode *project_root;      /**< borrowed primary project root; may be NULL. */
+    const char  *project_id;        /**< borrowed; may be NULL. */
+} query_context;
 
 /** The primary query_doc, or NULL when primary_idx < 0. */
 const query_doc *query_context_primary(const query_context *qc);
 
-/** Free a query_context and every field it owns.  NULL-safe. */
+/** Free a query_context: release its snapshot refs and the docs array.
+ *  NULL-safe. */
 void query_context_free(query_context *qc);

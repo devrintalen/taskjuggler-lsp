@@ -25,26 +25,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-void semantic_token_result_release(SemanticTokenResult *r) {
-    if (!r) return;
-    free(r->data);
-    free(r->result_id);
-    r->data           = NULL;
-    r->count          = 0;
-    r->result_id      = NULL;
-}
-
-void semantic_token_result_replace(SemanticTokenResult *r,
-                                    uint32_t *new_data, size_t new_count,
-                                    char *new_result_id) {
-    if (!r) return;
-    free(r->data);
-    free(r->result_id);
-    r->data      = new_data;
-    r->count     = new_count;
-    r->result_id = new_result_id;
-}
-
 /* ── Legend ──────────────────────────────────────────────────────────────── *
  *
  * During initialize the server advertises a legend:

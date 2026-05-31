@@ -22,48 +22,54 @@
 
 #include "parser.h"
 
+#include <stdatomic.h>
+#include <stdint.h>
+
 /*
  * The assembled per-Project tree.
  *
- * server.c builds one ProjectNode tree per Project on every notification
- * by deep-copying each member document's top-level declarations under the
- * includer's prefix target.  Unlike the per-document tj_node trees (which
- * are immutable after parse and own no cross-file edges), a ProjectNode
- * tree is purpose-built to be the cross-file resolution surface: every
- * node carries its own dependency array, and each dependency stores its
- * resolved cross-file edge in-node.
+ * A WorkspaceSnapshot builds one ProjectNode tree per project on every
+ * notification by deep-copying each member document's top-level declarations
+ * under the includer's prefix target.  Unlike the per-document tj_node trees
+ * (which are immutable after parse and own no cross-file edges), a
+ * ProjectNode tree is purpose-built to be the cross-file resolution surface:
+ * every node carries its own dependency array, and each dependency memoizes
+ * its resolved cross-file edge in-node.
  *
  * Memory: a ProjectNode tree shares NO memory with any document tree.
  * project_node_from_tj() deep-copies every string (id, name, and the
  * source URI) so the tree stays valid independent of the documents it was
- * built from.  resolved_target / target_uri point WITHIN the same tree.
+ * built from.  A dependency's resolved target points WITHIN the same tree.
  */
-
-/** Lazy-resolution state for one ProjectDep.  The edge is resolved on the
- *  first query that needs it and memoized in-node. */
-typedef enum {
-    DEP_UNRESOLVED,         /**< not yet resolved this rebuild cycle */
-    DEP_RESOLVED_NULL,      /**< resolved, no matching target */
-    DEP_RESOLVED_TARGET     /**< resolved to resolved_target */
-} DepResolveState;
 
 typedef struct ProjectNode ProjectNode;
 
 /**
  * One `depends`/`precedes` reference on a ProjectNode task, deep-copied
- * from the originating document's Dependency.  The resolved edge
- * (`resolved_target` / `target_uri`) is filled lazily by
- * project_dep_resolve() and memoized here.
+ * from the originating document's Dependency.  The resolved edge is filled
+ * lazily by project_dep_resolve() and memoized write-once in `resolved`.
+ *
+ * `resolved` is a single atomic word so the memo is lock-free and safe to
+ * share across query workers that pin the same snapshot:
+ *   0  — unresolved (sentinel; never a valid published value)
+ *   1  — resolved, no matching target
+ *   else — the resolved ProjectNode * (cast to uintptr_t)
+ * The only transition is unresolved -> (deterministic value); resolution is
+ * a pure function of the immutable tree, so concurrent first resolvers
+ * compute identical results and the idempotent release-store is correct
+ * regardless of which lands last.
  */
 typedef struct {
-    DepKind          kind;
-    int              bang_count;       /**< number of leading `!` characters */
-    char            *path;             /**< owned; dotted identifier path */
-    LspRange         source_range;     /**< spans the bang(s) + path in source */
-    ProjectNode     *resolved_target;  /**< borrowed within this tree; NULL on a miss */
-    const char      *target_uri;       /**< == resolved_target->source_uri, or NULL */
-    DepResolveState  state;            /**< DEP_UNRESOLVED until first query */
+    DepKind            kind;
+    int                bang_count;     /**< number of leading `!` characters */
+    char              *path;           /**< owned; dotted identifier path */
+    LspRange           source_range;   /**< spans the bang(s) + path in source */
+    _Atomic uintptr_t  resolved;       /**< memo cell; see above */
 } ProjectDep;
+
+/** Sentinel values for ProjectDep.resolved. */
+#define PROJECT_DEP_UNRESOLVED   ((uintptr_t)0)
+#define PROJECT_DEP_RESOLVED_NULL ((uintptr_t)1)
 
 struct ProjectNode {
     /* ── Identity ── */
@@ -95,8 +101,8 @@ struct ProjectNode {
 /**
  * Deep-copy a tj_node subtree into a freshly allocated ProjectNode
  * subtree, stamping @p source_uri (deep-copied) onto every node.  Copies
- * id / name strings and the dependency array (with `resolved_target`
- * cleared to DEP_UNRESOLVED).  `parent_node` is wired internally; the
+ * id / name strings and the dependency array (each dependency's memo cell
+ * initialized to unresolved).  `parent_node` is wired internally; the
  * returned root's `parent_node` is NULL.
  *
  * @param src         Source tj_node.  NULL returns NULL.
@@ -104,20 +110,6 @@ struct ProjectNode {
  * @return Newly allocated independent subtree.
  */
 ProjectNode *project_node_from_tj(const tj_node *src, const char *source_uri);
-
-/**
- * Deep-copy a ProjectNode subtree into a freshly allocated, fully
- * independent tree.  Copies every owned string (id, name, source_uri, and
- * dependency paths); `parent_node` links are rewired within the clone and
- * the returned root's `parent_node` is NULL.  Every dependency is reset to
- * DEP_UNRESOLVED with `resolved_target` / `target_uri` cleared so the clone
- * re-resolves lazily against its own nodes — making dependency memoization
- * thread-private to the owning query worker.
- *
- * @param src  Source subtree.  NULL returns NULL.
- * @return Newly allocated independent subtree; free with project_node_free().
- */
-ProjectNode *project_node_deep_copy(const ProjectNode *src);
 
 /**
  * Append @p child under @p parent (growing the children array) and set
@@ -152,10 +144,12 @@ void project_node_free_children(ProjectNode *root);
  * synthetic root.  On a second call the memoized result is returned
  * without recomputing.
  *
- * Concurrency: this mutates the dependency on first call.  Safe today
- * because the server holds docs_mutex for the full duration of every
- * notification and every query (single query worker).  The
- * TODO(workspace-snapshot) lock-free model must synchronize this memo.
+ * Concurrency: lock-free.  The result is published into the dependency's
+ * atomic `resolved` cell with a release store; readers load it with acquire.
+ * Multiple query workers pinning the same snapshot may resolve the same
+ * cold cell concurrently — they compute identical results (resolution is a
+ * pure function of the immutable tree) and the idempotent store is correct
+ * whichever lands last.
  *
  * @param owner_task    The ProjectNode task declaring the dependency.
  * @param dep_index     Index into @p owner_task's `dependencies` array;

@@ -71,36 +71,32 @@
 
 #define MAX_DOCS 64
 
-struct Project;
-
 /** Document store slot.  Each slot owns the parse-derived state directly
  *  (per-kind synthetic roots, tokens, include filenames); parse() returns
  *  a transient ParseOutput whose fields get moved here by doc_install_parse(). */
 typedef struct Document {
     char        *uri;
-    char        *text;
-    SemanticTokenResult sem_tokens; /**< cached semantic-tokens response */
-    _Atomic uint64_t doc_version;   /**< bumped on every text/parse swap */
+    char        *text;              /**< mutable working copy; the snapshot holds its own parsed copy */
+    _Atomic uint64_t doc_version;   /**< monotonic stamp counter; the next parse stamps the value, then ++ */
     int          in_use;
     int          disk_only;
     int          is_cc_root;        /**< 1 when this doc is named directly in compile_commands.json */
 
-    /* Parse-derived state.  `root` is a synthetic node whose children are
-     * every top-level declaration (tasks, accounts, resources/shifts,
-     * reports, and the project block) in source order.  It is non-NULL
-     * after a successful parse and NULL before one has happened (use
-     * `root` as the "has-parse" sentinel).  Freed and replaced wholesale
-     * by doc_install_parse(); freed by doc_free() on slot release. */
-    tj_node     *root;
-    TokenSpan   *tok_spans;
-    int          num_tok_spans;
-    int          tok_span_cap;
-    int          num_sem_entries;
+    /* Immutable parse output.  `snap` is the current parse's DocSnapshot
+     * (NULL before the first parse — use it as the "has-parse" sentinel);
+     * `prev_snap` is the one immediately before it, retained so a
+     * semanticTokens/delta request can diff against the version the client
+     * last held.  Both are refcounted: a published WorkspaceSnapshot also
+     * holds refs, so a snapshot outlives any in-flight query reading it.
+     * Each is released and rotated by doc_install_parse(). */
+    DocSnapshot *snap;
+    DocSnapshot *prev_snap;
 
     /* Prefixes applied to this Document by the includer's `include` block,
      * one per kind.  Populated by follow_includes() from the includer's
      * captured IncludeRef when this file is pulled in; stay NULL on a
-     * canonical .tjp or on orphan .tji files in a .tji-only workspace. */
+     * canonical .tjp or on orphan .tji files in a .tji-only workspace.
+     * Captured into each WorkspaceSnapshot's WsDoc at build time. */
     char        *task_prefix;
     char        *account_prefix;
     char        *report_prefix;
@@ -109,21 +105,22 @@ typedef struct Document {
     /* Resolved file:// URIs of every `include` directive in this doc,
      * recorded by follow_includes() at parse time.  Owned by the
      * Document; cleared at the top of each follow_includes() run and
-     * freed by doc_free().  Lets rebuild_all_projects() walk the
+     * freed by doc_free().  Lets build_workspace_snapshot() walk the
      * include graph without re-parsing or threading state through the
      * load pipeline. */
     char       **included_uris;
     int          num_included_uris;
     int          included_uris_cap;
-
-    /* Project this document belongs to, computed by
-     * rebuild_all_projects() on every notification.  Borrowed pointer;
-     * the projects[] registry owns the Project itself.  NULL between
-     * parse and the next rebuild_all_projects() call. */
-    struct Project *primary_project;
 } Document;
 
 static Document docs[MAX_DOCS];
+
+/* The currently published immutable workspace snapshot.  Touched only by
+ * the coordinator thread (notifications swap it; query coordination acquires
+ * a ref from it), so the pointer itself needs no atomic; only the snapshot's
+ * refcount is atomic, for the worker-side release.  NULL until the first
+ * revalidate builds one. */
+static WorkspaceSnapshot *g_ws = NULL;
 
 /* Serializes every read/write of docs[] — slots, their fields, and the
  * global trees built from them. */
@@ -146,42 +143,32 @@ static int    g_cc_attempted   = 0;
 static char *normalize_uri(const char *raw_uri);
 static void  load_file_from_disk(const char *path);
 static void  follow_includes(const char *file_path, const ParseOutput *po);
-static void  rebuild_all_projects(void);
+static WorkspaceSnapshot *build_workspace_snapshot(void);
 static void  reload_compile_commands(void);
 static void  maybe_reload_compile_commands(void);
 
-/* ── Per-Project ProjectNode tree ───────────────────────────────────────── *
+/* ── Per-project ProjectNode tree ───────────────────────────────────────── *
  *
- * Each compile_commands.json entry becomes one Project; its transitive
+ * Each compile_commands.json entry becomes one project; its transitive
  * include closure (followed via Document.included_uris[]) is deep-copied
- * into the single ProjectNode tree below with the includer's per-kind
- * prefix applied (see project_tree.h).  Built fresh by
- * rebuild_all_projects() on every notification.  Nodes of every kind
- * share one root: a node's `keyword` identifies its kind, so walkers
- * must filter on it to respect TaskJuggler's separate task / account /
- * resource / report id namespaces.
+ * into a single ProjectNode tree with the includer's per-kind prefix
+ * applied (see project_tree.h).  Built fresh by build_workspace_snapshot()
+ * into the published WorkspaceSnapshot on every notification.  Nodes of
+ * every kind share one root: a node's `keyword` identifies its kind, so
+ * walkers must filter on it to respect TaskJuggler's separate task /
+ * account / resource / report id namespaces.
  *
  * This tree is the authoritative cross-file resolution surface: it is
- * prefix-applied (so dependency paths resolve against real qualified
- * ids) and each task node owns the dependency edges declared on it.
+ * prefix-applied (so dependency paths resolve against real qualified ids)
+ * and each task node owns the dependency edges declared on it.
  * handle_definition / handle_references / handle_hover bridge the
  * per-document task under the cursor to its clone here (via
  * project_node_for_doc_task) and resolve against this tree.
  *
- * Each Document has a primary_project pointer set during the rebuild;
- * handlers route cross-file lookups through that pointer.  Orphan
- * editor-only files (didOpen for a doc not reached by any
- * compile_commands entry) are handled by a follow-up commit; until then
- * they end up with primary_project == NULL. */
-typedef struct Project {
-    char        *id;             /**< canonical .tjp URI from compile_commands.json */
-    int          is_orphan;      /**< reserved for singleton editor-only projects (commit 3) */
-    ProjectNode  root;           /**< synthetic root over all kinds, owned outright */
-} Project;
-
-static Project **projects;
-static int       num_projects;
-static int       cap_projects;
+ * Each WsDoc records the index of the project that claimed it during the
+ * snapshot's include BFS; handlers route cross-file lookups through that
+ * membership.  Editor-only files outside every compile_commands closure
+ * each form their own singleton project. */
 
 /* ── Slot lookup / allocation / free ─────────────────────────────────────── */
 
@@ -212,7 +199,6 @@ static Document *doc_alloc(const char *uri) {
         if (!docs[i].in_use) {
             docs[i].in_use = 1;
             docs[i].uri    = canon;
-            docs[i].sem_tokens.next_result_id = 1;
             atomic_store(&docs[i].doc_version, 1);
             return &docs[i];
         }
@@ -221,38 +207,33 @@ static Document *doc_alloc(const char *uri) {
     return NULL;
 }
 
-/** Release the parse-derived fields on @p d (per-kind tj_node trees,
- *  tokens, include filenames), zeroing each so the slot is reusable. */
+/** Release both DocSnapshots held by @p d (the live store's refs), nulling
+ *  each so the slot is reusable.  A snapshot only frees once any
+ *  WorkspaceSnapshot and in-flight query also release their refs. */
 static void doc_clear_parse_state(Document *d) {
-    tj_node_free(d->root);
-    d->root = NULL;
-
-    for (int i = 0; i < d->num_tok_spans; i++)
-        free(d->tok_spans[i].text);
-    free(d->tok_spans);
-    d->tok_spans       = NULL;
-    d->num_tok_spans   = 0;
-    d->tok_span_cap    = 0;
-    d->num_sem_entries = 0;
+    docsnap_release(d->snap);
+    d->snap = NULL;
+    docsnap_release(d->prev_snap);
+    d->prev_snap = NULL;
 }
 
-/** Move every parse-derived field that the Document keeps long-term out
- *  of @p po into @p d, releasing whatever @p d held previously.
- *  Includes are not part of that long-term state — callers consume them
- *  via follow_includes() before calling here; parse_output_free()
- *  releases the leftover include array along with the shell. */
+/** Build a fresh DocSnapshot from @p po (moving its tree and token spans in)
+ *  and rotate it onto @p d: the outgoing current snapshot becomes prev_snap
+ *  (replacing the one before it), so a semanticTokens/delta request can still
+ *  diff against the version the client last held.  Includes are not part of
+ *  the snapshot — callers consume them via follow_includes() before calling
+ *  here; parse_output_free() releases the leftover include array and shell. */
 static void doc_install_parse(Document *d, ParseOutput *po) {
-    doc_clear_parse_state(d);
+    DocSnapshot *fresh = NULL;
     if (po) {
-        d->root                = po->root;
-        d->tok_spans           = po->tok_spans;
-        d->num_tok_spans       = po->num_tok_spans;
-        d->tok_span_cap        = po->tok_span_cap;
-        d->num_sem_entries     = po->num_sem_entries;
-        /* Null out moved-out fields so parse_output_free only releases
-         * what po still owns: the includes array (whose strings live
-         * past follow_includes() because replace_string() strdups them)
-         * and the struct shell. */
+        uint64_t version = atomic_fetch_add(&d->doc_version, 1);
+        fresh = docsnap_new(d->uri, d->text,
+                            po->root, po->tok_spans,
+                            po->num_tok_spans, po->num_sem_entries,
+                            version);
+        /* Ownership of the tree and token spans moved into the snapshot;
+         * null them out so parse_output_free only releases what po still
+         * owns (the includes array and the struct shell). */
         po->root            = NULL;
         po->tok_spans       = NULL;
         po->num_tok_spans   = 0;
@@ -260,13 +241,15 @@ static void doc_install_parse(Document *d, ParseOutput *po) {
         po->num_sem_entries = 0;
         parse_output_free(po);
     }
-    atomic_fetch_add(&d->doc_version, 1);
+
+    docsnap_release(d->prev_snap);
+    d->prev_snap = d->snap;   /* retains its existing ref, reassigned */
+    d->snap      = fresh;     /* fresh holds ref 1, or NULL on a no-parse */
 }
 
 static void doc_free(Document *d) {
     free(d->uri);
     free(d->text);
-    semantic_token_result_release(&d->sem_tokens);
     doc_clear_parse_state(d);
     free(d->task_prefix);
     free(d->account_prefix);
@@ -528,7 +511,7 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
         }
 
         /* Record this resolved URI on the includer so
-         * rebuild_all_projects() can BFS the include graph.  Ownership
+         * build_workspace_snapshot() can BFS the include graph.  Ownership
          * of target_uri transfers to includer->included_uris[]. */
         if (includer && target_uri) {
             if (includer->num_included_uris >= includer->included_uris_cap) {
@@ -696,30 +679,26 @@ static ProjectNode *find_node_by_dotted_path(ProjectNode *start, const char *pat
     return cur;
 }
 
-/* ── Per-Project tree rebuild ──────────────────────────────────────────── */
+/* ── Workspace snapshot build ──────────────────────────────────────────── */
 
-static void project_free(Project *p) {
-    if (!p) return;
-    free(p->id);
-    project_node_free_children(&p->root);
-    free(p);
+/* docs[] slot index -> WsDoc index in the snapshot being built, or -1 when
+ * the slot is unused / unparsed.  Set up once per build_workspace_snapshot()
+ * call and consulted by the include BFS to stamp project membership. */
+static int ws_doc_index_of(const int *slot_to_wsdoc, const Document *d) {
+    return slot_to_wsdoc[(int)(d - docs)];
 }
 
-static void projects_clear(void) {
-    for (int i = 0; i < num_projects; i++)
-        project_free(projects[i]);
-    num_projects = 0;
-}
-
-/** Copy each top-level declaration of @p d into @p p's tree, applying @p d's
- *  matching per-kind prefix.  Routes by the node's own `keyword` (the
- *  per-kind grouping the Document no longer keeps) to pick both the prefix
- *  and the namespace the prefix path is resolved within; the project block
- *  is document-local metadata and is skipped. */
-static void copy_document_into_project(Project *p, Document *d) {
-    if (!d->root) return;
-    for (int i = 0; i < d->root->num_children; i++) {
-        tj_node    *child = d->root->children[i];
+/** Copy each top-level declaration of @p d (from its current snapshot) into
+ *  project @p pidx's tree, applying @p d's matching per-kind prefix.  Routes
+ *  by the node's own `keyword` to pick both the prefix and the namespace the
+ *  prefix path is resolved within; the project block is document-local
+ *  metadata and is skipped. */
+static void copy_document_into_project(WorkspaceSnapshot *ws, int pidx, Document *d) {
+    if (!d->snap || !d->snap->root) return;
+    ProjectNode *proot = &ws->projects[pidx]->root;
+    tj_node *root = d->snap->root;
+    for (int i = 0; i < root->num_children; i++) {
+        tj_node    *child = root->children[i];
         const char *prefix;
         NodeKind    kind = node_kind_of(child->keyword);
         switch (child->keyword) {
@@ -735,24 +714,19 @@ static void copy_document_into_project(Project *p, Document *d) {
         default:
             prefix = d->report_prefix;   break;
         }
-        ProjectNode *target = find_node_by_dotted_path(&p->root, prefix, kind);
+        ProjectNode *target = find_node_by_dotted_path(proot, prefix, kind);
         if (!target) continue;
         project_node_append_child(target,
                                   project_node_from_tj(child, d->uri));
     }
 }
 
-/** Look up @p uri in docs[] (with normalization fallback).  Returns
- *  NULL if no in-use slot matches. */
-static Document *doc_find_by_uri(const char *uri) {
-    return doc_find(uri);
-}
-
-/** BFS from @p root along included_uris[], deep-copying every reachable
- *  Document's top-level into @p p with prefixes applied.  Marks each
- *  visited doc's primary_project to @p p if not already claimed by a
- *  prior project. */
-static void project_populate_from_root(Project *p, Document *root) {
+/** BFS from @p root along included_uris[], copying every reachable Document's
+ *  top-level into project @p pidx with prefixes applied, and stamping each
+ *  visited doc's WsDoc.project_index to @p pidx unless a prior project
+ *  already claimed it. */
+static void project_populate_from_root(WorkspaceSnapshot *ws, int pidx,
+                                       Document *root, const int *slot_to_wsdoc) {
     /* Queue holds borrowed Document pointers; visited[] dedupes within
      * this BFS so a diamond include doesn't double-copy. */
     Document **queue   = NULL;
@@ -781,22 +755,26 @@ static void project_populate_from_root(Project *p, Document *root) {
     /* Anchor the project on the root document's own top-level.  Its
      * prefixes are NULL, so every declaration lands unprefixed in the
      * matching per-kind tree. */
-    copy_document_into_project(p, root);
-    if (!root->primary_project) root->primary_project = p;
+    copy_document_into_project(ws, pidx, root);
+    int root_wsd = ws_doc_index_of(slot_to_wsdoc, root);
+    if (root_wsd >= 0 && ws->docs[root_wsd].project_index < 0)
+        ws->docs[root_wsd].project_index = pidx;
 
     while (q_head < q_len) {
         Document *cur = queue[q_head++];
         for (int i = 0; i < cur->num_included_uris; i++) {
-            Document *child = doc_find_by_uri(cur->included_uris[i]);
-            if (!child || !child->root) continue;
+            Document *child = doc_find(cur->included_uris[i]);
+            if (!child || !child->snap || !child->snap->root) continue;
             int seen = 0;
             for (int v = 0; v < v_len && !seen; v++)
                 if (visited[v] == child) seen = 1;
             if (seen) continue;
             PUSH(visited, v_len, v_cap, child);
             PUSH(queue,   q_len, q_cap, child);
-            copy_document_into_project(p, child);
-            if (!child->primary_project) child->primary_project = p;
+            copy_document_into_project(ws, pidx, child);
+            int child_wsd = ws_doc_index_of(slot_to_wsdoc, child);
+            if (child_wsd >= 0 && ws->docs[child_wsd].project_index < 0)
+                ws->docs[child_wsd].project_index = pidx;
         }
     }
 
@@ -806,60 +784,59 @@ cleanup:
     #undef PUSH
 }
 
-/** Append @p p to projects[], growing the array if needed.  Returns
- *  1 on success, 0 on OOM (caller must project_free(p) on failure). */
-static int projects_append(Project *p) {
-    if (num_projects >= cap_projects) {
-        int new_cap = cap_projects ? cap_projects * 2 : 4;
-        Project **tmp = realloc(projects, (size_t)new_cap * sizeof(Project *));
-        if (!tmp) return 0;
-        projects   = tmp;
-        cap_projects = new_cap;
+/** Build an immutable WorkspaceSnapshot from the current docs[]: one WsDoc
+ *  per parsed in-use document (referencing its DocSnapshot and capturing the
+ *  include-prefixes in force now), one project per is_cc_root document with
+ *  its include closure assembled, and one singleton "orphan" project for
+ *  every remaining document not reached by any closure.  Orphans exist so
+ *  editor-opened files outside the compile_commands.json closure still get
+ *  in-file LSP behavior (completion, hover, etc.) without bleeding into other
+ *  projects' cross-file pools.  Returned with refcount 1. */
+static WorkspaceSnapshot *build_workspace_snapshot(void) {
+    int slot_to_wsdoc[MAX_DOCS];
+    int ndoc = 0;
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (docs[i].in_use && docs[i].snap)
+            slot_to_wsdoc[i] = ndoc++;
+        else
+            slot_to_wsdoc[i] = -1;
     }
-    projects[num_projects++] = p;
-    return 1;
-}
 
-/** Build one Project per is_cc_root Document, then one singleton
- *  "orphan" Project for every remaining in-use Document not reached by
- *  any cc_root's include closure.  Orphans exist so editor-opened
- *  files outside the compile_commands.json closure still get in-file
- *  LSP behavior (completion, hover, etc.) without bleeding into other
- *  projects' cross-file pools. */
-static void rebuild_all_projects(void) {
-    projects_clear();
-    for (int i = 0; i < MAX_DOCS; i++)
-        docs[i].primary_project = NULL;
+    WorkspaceSnapshot *ws = ws_alloc(ndoc);
+
+    /* Populate each WsDoc: ref the live snapshot, copy the prefixes. */
+    for (int i = 0; i < MAX_DOCS; i++) {
+        int wsd = slot_to_wsdoc[i];
+        if (wsd < 0) continue;
+        Document *d = &docs[i];
+        WsDoc    *w = &ws->docs[wsd];
+        w->snap            = docsnap_acquire(d->snap);
+        w->task_prefix     = d->task_prefix     ? strdup(d->task_prefix)     : NULL;
+        w->account_prefix  = d->account_prefix  ? strdup(d->account_prefix)  : NULL;
+        w->report_prefix   = d->report_prefix   ? strdup(d->report_prefix)   : NULL;
+        w->resource_prefix = d->resource_prefix ? strdup(d->resource_prefix) : NULL;
+    }
 
     /* Pass 1: compile_commands roots + their include closures. */
     for (int i = 0; i < MAX_DOCS; i++) {
         Document *root = &docs[i];
-        if (!root->in_use || !root->is_cc_root || !root->root) continue;
-
-        Project *p = calloc(1, sizeof(*p));
-        if (!p) continue;
-        p->id = root->uri ? strdup(root->uri) : NULL;
-        if (!projects_append(p)) { project_free(p); continue; }
-
-        project_populate_from_root(p, root);
+        if (!root->in_use || !root->is_cc_root || !root->snap) continue;
+        int pidx = ws_add_project(ws, root->uri);
+        project_populate_from_root(ws, pidx, root, slot_to_wsdoc);
     }
 
-    /* Pass 2: unclaimed in-use docs each become their own singleton
-     * orphan project.  Anchored on the doc's own top-level with no
-     * prefix; the doc is its sole member. */
+    /* Pass 2: unclaimed parsed docs each become their own singleton orphan
+     * project, anchored on the doc's own top-level with no prefix. */
     for (int i = 0; i < MAX_DOCS; i++) {
+        int wsd = slot_to_wsdoc[i];
+        if (wsd < 0 || ws->docs[wsd].project_index >= 0) continue;
         Document *d = &docs[i];
-        if (!d->in_use || !d->root || d->primary_project) continue;
-
-        Project *p = calloc(1, sizeof(*p));
-        if (!p) continue;
-        p->id        = d->uri ? strdup(d->uri) : NULL;
-        p->is_orphan = 1;
-        if (!projects_append(p)) { project_free(p); continue; }
-
-        copy_document_into_project(p, d);
-        d->primary_project = p;
+        int pidx = ws_add_project(ws, d->uri);
+        copy_document_into_project(ws, pidx, d);
+        ws->docs[wsd].project_index = pidx;
     }
+
+    return ws;
 }
 
 /* Republish (now-empty) diagnostics for editor-managed documents after a
@@ -920,7 +897,7 @@ static void reload_compile_commands(void) {
             if (!entries[i].file_abs) continue;
             load_file_from_disk(entries[i].file_abs);
             /* Tag the doc that holds this compile_commands entry as a
-             * project root.  rebuild_all_projects() seeds one Project
+             * project root.  build_workspace_snapshot() seeds one project
              * per is_cc_root doc and BFS-walks its include closure. */
             char *uri = path_to_uri(entries[i].file_abs);
             Document *root = uri ? doc_find(uri) : NULL;
@@ -993,9 +970,10 @@ static int dependency_count_subtree(const tj_node *n) {
 /** True when @p d declares a project block (scans root's top-level
  *  children for a KW_PROJECT node). */
 static int doc_has_project_block(const Document *d) {
-    if (!d->root) return 0;
-    for (int i = 0; i < d->root->num_children; i++)
-        if (d->root->children[i]->keyword == KW_PROJECT) return 1;
+    if (!d->snap || !d->snap->root) return 0;
+    tj_node *root = d->snap->root;
+    for (int i = 0; i < root->num_children; i++)
+        if (root->children[i]->keyword == KW_PROJECT) return 1;
     return 0;
 }
 
@@ -1007,9 +985,10 @@ static int doc_has_project_block(const Document *d) {
  *    R = has a project block (canonical root candidate)
  *    C = compile_commands.json root
  *  `deps=` shows the total number of captured `depends` + `precedes`
- *  references across every task in the document.
+ *  references across every task in the document.  @p ws is the freshly
+ *  published snapshot, consulted for project membership and count.
  *  Caller must hold docs_mutex. */
-static void dump_docs_to_stderr(const char *trigger) {
+static void dump_docs_to_stderr(const char *trigger, const WorkspaceSnapshot *ws) {
     int total = 0, editor = 0, disk = 0;
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
@@ -1019,18 +998,25 @@ static void dump_docs_to_stderr(const char *trigger) {
     fprintf(stderr,
             "taskjuggler-lsp: docs[] after %s — %d total (%d editor, %d disk), "
             "%d projects\n",
-            trigger, total, editor, disk, num_projects);
+            trigger, total, editor, disk, ws ? ws->num_projects : 0);
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
-        const char *pid = docs[i].primary_project
-                          ? (docs[i].primary_project->id
-                              ? docs[i].primary_project->id : "(no-id)")
-                          : "(none)";
-        int deps = dependency_count_subtree(docs[i].root);
+        /* Find this doc's WsDoc (by snapshot identity) to report its project. */
+        const char *pid = "(none)";
+        if (ws && docs[i].snap) {
+            for (int w = 0; w < ws->num_docs; w++) {
+                if (ws->docs[w].snap != docs[i].snap) continue;
+                int pidx = ws->docs[w].project_index;
+                if (pidx >= 0 && pidx < ws->num_projects)
+                    pid = ws->projects[pidx]->id ? ws->projects[pidx]->id : "(no-id)";
+                break;
+            }
+        }
+        int deps = docs[i].snap ? dependency_count_subtree(docs[i].snap->root) : 0;
         fprintf(stderr, "  [%2d] %c%c%c%c  proj=%s  deps=%d  %s\n",
                 i,
                 docs[i].disk_only          ? 'D' : 'd',
-                docs[i].root               ? 'P' : '-',
+                docs[i].snap               ? 'P' : '-',
                 doc_has_project_block(&docs[i]) ? 'R' : '-',
                 docs[i].is_cc_root         ? 'C' : '-',
                 pid,
@@ -1040,11 +1026,22 @@ static void dump_docs_to_stderr(const char *trigger) {
     fflush(stderr);
 }
 
+/* Build a fresh workspace snapshot from the current docs[] and atomically
+ * swap it in as the published g_ws, releasing the previous one (which an
+ * in-flight query may still be reading — it survives until that query
+ * releases its ref).  Coordinator-only. */
+static void publish_workspace_snapshot(void) {
+    WorkspaceSnapshot *fresh = build_workspace_snapshot();
+    WorkspaceSnapshot *old   = g_ws;
+    g_ws = fresh;
+    ws_release(old);
+}
+
 static void revalidate_all_docs(void) {
     maybe_reload_compile_commands();
-    rebuild_all_projects();
+    publish_workspace_snapshot();
     republish_all_diagnostics();
-    dump_docs_to_stderr("revalidate_all_docs");
+    dump_docs_to_stderr("revalidate_all_docs", g_ws);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1606,57 +1603,68 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
     return make_response(doc, id, sig);
 }
 
-static char *mint_sem_tokens_result_id(Document *d) {
-    char buf[32];
-    int n = snprintf(buf, sizeof(buf), "%" PRIu64,
-                     d->sem_tokens.next_result_id++);
-    if (n < 0) return NULL;
-    return strdup(buf);
+/* The semanticTokens resultId is the document's parse version: it is stable
+ * per snapshot (two requests against the same parse share one id) and lets a
+ * delta diff by version with no write-back, so these run lock-free against
+ * the pinned snapshot like any other query.  The token data itself is
+ * memoized inside the DocSnapshot (docsnap_sem_tokens). */
+static void sem_tokens_result_id(DocSnapshot *s, char *buf, size_t buflen) {
+    snprintf(buf, buflen, "%" PRIu64, s->doc_version);
 }
 
 static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
-                                                    yyjson_val *params, Document *d) {
+                                                    yyjson_val *params, const query_doc *d) {
     (void)params;
-    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->snap || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
-    uint32_t *buf = NULL;
-    size_t    count = 0;
-    compute_semantic_tokens_data(d->tok_spans,
-                                  d->num_tok_spans,
-                                  d->num_sem_entries,
-                                  &buf, &count);
+    const uint32_t *buf = NULL;
+    size_t          count = 0;
+    docsnap_sem_tokens(d->snap, &buf, &count);
 
-    char *result_id = mint_sem_tokens_result_id(d);
-    yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
-    semantic_token_result_replace(&d->sem_tokens, buf, count, result_id);
+    char result_id[32];
+    sem_tokens_result_id(d->snap, result_id, sizeof(result_id));
+    yyjson_mut_val *result =
+        build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
     return make_response(doc, id, result);
 }
 
 static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yyjson_val *id,
-                                                          yyjson_val *params, Document *d) {
+                                                          yyjson_val *params,
+                                                          const query_context *qc,
+                                                          const query_doc *d) {
     const char *previous_result_id = params ? json_str(params, "previousResultId") : NULL;
-    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->snap || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
-    uint32_t *new_buf = NULL;
-    size_t    new_count = 0;
-    compute_semantic_tokens_data(d->tok_spans,
-                                  d->num_tok_spans,
-                                  d->num_sem_entries,
-                                  &new_buf, &new_count);
+    const uint32_t *new_buf = NULL;
+    size_t          new_count = 0;
+    docsnap_sem_tokens(d->snap, &new_buf, &new_count);
 
-    char *result_id = mint_sem_tokens_result_id(d);
+    char result_id[32];
+    sem_tokens_result_id(d->snap, result_id, sizeof(result_id));
+
+    /* Identify the snapshot the client is holding by its resultId (== that
+     * snapshot's parse version): either the current parse (no change since)
+     * or the immediately previous one retained on the query_context.  Diff
+     * against that base; otherwise fall back to a full response. */
+    DocSnapshot *base = NULL;
+    if (previous_result_id) {
+        uint64_t prev_version = strtoull(previous_result_id, NULL, 10);
+        if (prev_version == d->snap->doc_version)
+            base = d->snap;
+        else if (qc->prev_snap && prev_version == qc->prev_snap->doc_version)
+            base = qc->prev_snap;
+    }
+
     yyjson_mut_val *result;
-    if (d->sem_tokens.data && d->sem_tokens.result_id && previous_result_id &&
-        strcmp(d->sem_tokens.result_id, previous_result_id) == 0) {
-        result = build_semantic_tokens_delta_json(doc,
-                                                   d->sem_tokens.data, d->sem_tokens.count,
-                                                   new_buf, new_count,
-                                                   result_id);
+    if (base) {
+        const uint32_t *old_buf = NULL;
+        size_t          old_count = 0;
+        docsnap_sem_tokens(base, &old_buf, &old_count);
+        result = build_semantic_tokens_delta_json(doc, old_buf, old_count,
+                                                   new_buf, new_count, result_id);
     } else {
         result = build_semantic_tokens_json_from_buf(doc, new_buf, new_count, result_id);
     }
-
-    semantic_token_result_replace(&d->sem_tokens, new_buf, new_count, result_id);
     return make_response(doc, id, result);
 }
 
@@ -1864,57 +1872,90 @@ static const char *request_primary_uri(yyjson_val *params) {
     return NULL;
 }
 
-/* Clone the query_context for one query under docs_mutex.  When
- * @p want_all_docs is set (workspace/symbol) every in-use document is
- * included and there is no primary; otherwise the context holds the primary
- * document plus its same-project siblings.  Caller must hold docs_mutex. */
+/* Build the query_context for one query under docs_mutex by pinning the
+ * currently published workspace snapshot (an O(1) refcount bump) and pointing
+ * borrowed query_doc views at its WsDocs.  When @p want_all_docs is set
+ * (workspace/symbol) every document is included and there is no primary;
+ * otherwise the context holds the primary document plus its same-project
+ * siblings.  The primary's previous DocSnapshot is also ref'd for
+ * semanticTokens/delta.  Caller must hold docs_mutex. */
 static query_context *build_query_context_locked(const char *primary_uri,
                                                  int want_all_docs) {
-    Document *primary = primary_uri ? doc_find(primary_uri) : NULL;
-    Project  *proj    = primary ? primary->primary_project : NULL;
+    query_context *qc = calloc(1, sizeof(query_context));
+    if (!qc) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    qc->primary_idx = -1;
 
-    query_doc_src srcs[MAX_DOCS];
-    int n           = 0;
-    int primary_idx = -1;
+    /* Resolve the primary document and retain its previous snapshot for
+     * delta, even if it is not represented in the snapshot yet. */
+    Document *primary_doc = primary_uri ? doc_find(primary_uri) : NULL;
+    if (primary_doc)
+        qc->prev_snap = docsnap_acquire(primary_doc->prev_snap);
+    const char *primary_canon = primary_doc ? primary_doc->uri : NULL;
 
-    for (int i = 0; i < MAX_DOCS && n < MAX_DOCS; i++) {
-        Document *cand = &docs[i];
-        if (!cand->in_use) continue;
-        int is_primary = (cand == primary);
-        if (!is_primary && !want_all_docs) {
-            /* Same-project siblings only; orphans (proj == NULL) get none. */
-            if (!proj || cand->primary_project != proj) continue;
+    WorkspaceSnapshot *ws = ws_acquire(g_ws);
+    qc->ws = ws;
+    if (!ws) return qc;   /* no snapshot yet: empty context, handlers return null */
+
+    /* Locate the primary WsDoc and its project. */
+    int primary_proj = -1;
+    if (primary_canon) {
+        for (int i = 0; i < ws->num_docs; i++) {
+            DocSnapshot *s = ws->docs[i].snap;
+            if (s && s->uri && strcmp(s->uri, primary_canon) == 0) {
+                primary_proj = ws->docs[i].project_index;
+                break;
+            }
         }
-        srcs[n] = (query_doc_src){
-            .uri             = cand->uri,
-            .text            = cand->text,
-            .task_prefix     = cand->task_prefix,
-            .account_prefix  = cand->account_prefix,
-            .report_prefix   = cand->report_prefix,
-            .resource_prefix = cand->resource_prefix,
-            .root            = cand->root,
-            .tok_spans       = cand->tok_spans,
-            .num_tok_spans   = cand->num_tok_spans,
-            .num_sem_entries = cand->num_sem_entries,
-            .is_primary      = is_primary,
-        };
-        if (is_primary) primary_idx = n;
-        n++;
     }
 
-    const ProjectNode *project_root = proj ? &proj->root : NULL;
-    const char        *project_id   = proj ? proj->id    : NULL;
-    return query_context_build(srcs, n, primary_idx, project_root, project_id);
+    if (ws->num_docs > 0) {
+        qc->docs = calloc((size_t)ws->num_docs, sizeof(query_doc));
+        if (!qc->docs) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    }
+
+    int n = 0;
+    for (int i = 0; i < ws->num_docs; i++) {
+        WsDoc       *w = &ws->docs[i];
+        DocSnapshot *s = w->snap;
+        if (!s) continue;
+        int is_primary = (primary_canon && s->uri && strcmp(s->uri, primary_canon) == 0);
+        if (!is_primary && !want_all_docs) {
+            /* Same-project siblings only; an orphan's singleton project has
+             * no siblings, so the primary stands alone. */
+            if (primary_proj < 0 || w->project_index != primary_proj) continue;
+        }
+        qc->docs[n] = (query_doc){
+            .uri             = s->uri,
+            .text            = s->text,
+            .task_prefix     = w->task_prefix,
+            .account_prefix  = w->account_prefix,
+            .report_prefix   = w->report_prefix,
+            .resource_prefix = w->resource_prefix,
+            .root            = s->root,
+            .tok_spans       = s->tok_spans,
+            .num_tok_spans   = s->num_tok_spans,
+            .num_sem_entries = s->num_sem_entries,
+            .is_primary      = is_primary,
+            .snap            = s,
+        };
+        if (is_primary) qc->primary_idx = n;
+        n++;
+    }
+    qc->num_docs = n;
+
+    if (primary_proj >= 0 && primary_proj < ws->num_projects) {
+        qc->project_root = &ws->projects[primary_proj]->root;
+        qc->project_id   = ws->projects[primary_proj]->id;
+    }
+    return qc;
 }
 
-/* Methods that mutate live state (initialize/shutdown) or depend on
- * sequential write-back (semanticTokens) run inline on the coordinator
- * rather than against a clone. */
+/* Only the state-mutating lifecycle methods run inline on the coordinator;
+ * every other query (semanticTokens included, now that its data and resultId
+ * live in the snapshot) is served lock-free from a pinned snapshot. */
 static int is_inline_query_method(const char *m) {
     return strcmp(m, "initialize") == 0
-        || strcmp(m, "shutdown") == 0
-        || strcmp(m, "textDocument/semanticTokens/full") == 0
-        || strcmp(m, "textDocument/semanticTokens/full/delta") == 0;
+        || strcmp(m, "shutdown") == 0;
 }
 
 int server_coordinate_query(Job *job) {
@@ -1929,16 +1970,10 @@ int server_coordinate_query(Job *job) {
         yyjson_mut_val *resp = NULL;
 
         pthread_mutex_lock(&docs_mutex);
-        const char *primary_uri = request_primary_uri(params);
-        Document   *primary     = primary_uri ? doc_find(primary_uri) : NULL;
         if (strcmp(m, "initialize") == 0) {
             resp = handle_initialize(out_doc, id_item, params);
-        } else if (strcmp(m, "shutdown") == 0) {
-            resp = handle_shutdown(out_doc, id_item);
-        } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
-            resp = handle_semantic_tokens_full(out_doc, id_item, params, primary);
         } else {
-            resp = handle_semantic_tokens_full_delta(out_doc, id_item, params, primary);
+            resp = handle_shutdown(out_doc, id_item);
         }
         pthread_mutex_unlock(&docs_mutex);
 
@@ -1947,8 +1982,8 @@ int server_coordinate_query(Job *job) {
         return 1;   /* handled inline; coordinator frees the Job */
     }
 
-    /* Every other query is served from a private clone.  Build it under the
-     * lock and let the coordinator hand the Job to the worker pool. */
+    /* Every other query is served from a pinned snapshot.  Build the context
+     * under the lock and let the coordinator hand the Job to the worker pool. */
     int want_all_docs = (strcmp(m, "workspace/symbol") == 0);
 
     pthread_mutex_lock(&docs_mutex);
@@ -1990,6 +2025,10 @@ void server_run_query(Job *job) {
         resp = handle_definition(out_doc, id_item, params, qc, d);
     } else if (strcmp(m, "textDocument/completion") == 0) {
         resp = handle_completion(out_doc, id_item, params, qc, d);
+    } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
+        resp = handle_semantic_tokens_full(out_doc, id_item, params, d);
+    } else if (strcmp(m, "textDocument/semanticTokens/full/delta") == 0) {
+        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params, qc, d);
     } else if (strcmp(m, "workspace/symbol") == 0) {
         resp = handle_workspace_symbol(out_doc, id_item, params, qc);
     } else if (id_item) {

@@ -21,6 +21,8 @@
 #include "project_tree.h"
 #include "grammar.tab.h"   /* KW_TASK */
 
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,9 +53,7 @@ static void copy_dependencies(ProjectNode *dst, const tj_node *src) {
         d->bang_count      = s->bang_count;
         d->path            = s->path ? strdup(s->path) : NULL;
         d->source_range    = s->source_range;
-        d->resolved_target = NULL;
-        d->target_uri      = NULL;
-        d->state           = DEP_UNRESOLVED;
+        atomic_init(&d->resolved, PROJECT_DEP_UNRESOLVED);
     }
     dst->num_dependencies = src->num_dependencies;
 }
@@ -72,40 +72,6 @@ ProjectNode *project_node_from_tj(const tj_node *src, const char *source_uri) {
     for (int i = 0; i < src->num_children; i++)
         project_node_append_child(dst, project_node_from_tj(src->children[i],
                                                             source_uri));
-    return dst;
-}
-
-static void copy_project_dependencies(ProjectNode *dst, const ProjectNode *src) {
-    if (src->num_dependencies <= 0) return;
-    dst->dependencies = calloc((size_t)src->num_dependencies, sizeof(ProjectDep));
-    if (!dst->dependencies) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    for (int i = 0; i < src->num_dependencies; i++) {
-        const ProjectDep *s = &src->dependencies[i];
-        ProjectDep       *d = &dst->dependencies[i];
-        d->kind            = s->kind;
-        d->bang_count      = s->bang_count;
-        d->path            = s->path ? strdup(s->path) : NULL;
-        d->source_range    = s->source_range;
-        d->resolved_target = NULL;
-        d->target_uri      = NULL;
-        d->state           = DEP_UNRESOLVED;
-    }
-    dst->num_dependencies = src->num_dependencies;
-}
-
-ProjectNode *project_node_deep_copy(const ProjectNode *src) {
-    if (!src) return NULL;
-    ProjectNode *dst = calloc(1, sizeof(ProjectNode));
-    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    dst->keyword         = src->keyword;
-    dst->id              = src->id         ? strdup(src->id)         : NULL;
-    dst->name            = src->name       ? strdup(src->name)       : NULL;
-    dst->range           = src->range;
-    dst->selection_range = src->selection_range;
-    dst->source_uri      = src->source_uri ? strdup(src->source_uri) : NULL;
-    copy_project_dependencies(dst, src);
-    for (int i = 0; i < src->num_children; i++)
-        project_node_append_child(dst, project_node_deep_copy(src->children[i]));
     return dst;
 }
 
@@ -192,7 +158,10 @@ static ProjectNode *find_task(ProjectNode *const *children, int n,
 ProjectNode *project_dep_resolve(ProjectNode *owner_task, int dep_index,
                                  ProjectNode *project_root) {
     ProjectDep *dep = &owner_task->dependencies[dep_index];
-    if (dep->state != DEP_UNRESOLVED) return dep->resolved_target;
+
+    uintptr_t cached = atomic_load_explicit(&dep->resolved, memory_order_acquire);
+    if (cached != PROJECT_DEP_UNRESOLVED)
+        return (cached == PROJECT_DEP_RESOLVED_NULL) ? NULL : (ProjectNode *)cached;
 
     char **segs = NULL;
     int    nseg = 0;
@@ -223,8 +192,7 @@ ProjectNode *project_dep_resolve(ProjectNode *owner_task, int dep_index,
 
     free_segs(segs, nseg);
 
-    dep->resolved_target = resolved;
-    dep->target_uri      = resolved ? resolved->source_uri : NULL;
-    dep->state           = resolved ? DEP_RESOLVED_TARGET : DEP_RESOLVED_NULL;
+    uintptr_t to_publish = resolved ? (uintptr_t)resolved : PROJECT_DEP_RESOLVED_NULL;
+    atomic_store_explicit(&dep->resolved, to_publish, memory_order_release);
     return resolved;
 }

@@ -32,8 +32,7 @@ yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
     if (!target) return NULL;
 
     yyjson_mut_val *location = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, location, "uri",
-                           owner->dependencies[dep_index].target_uri);
+    yyjson_mut_obj_add_str(doc, location, "uri", target->source_uri);
     yyjson_mut_obj_add_val(doc, location, "range",
                            range_json(doc, target->selection_range));
     return location;
