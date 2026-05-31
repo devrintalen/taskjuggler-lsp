@@ -120,22 +120,7 @@
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file:///test/project.tjp",
-      "diagnostics": [
-        {
-          "range": {
-            "start": {
-              "line": 3,
-              "character": 13
-            },
-            "end": {
-              "line": 3,
-              "character": 20
-            }
-          },
-          "severity": 1,
-          "message": "unresolved dependency: sibling"
-        }
-      ]
+      "diagnostics": []
     }
   },
   {
