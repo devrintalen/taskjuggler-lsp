@@ -57,14 +57,28 @@ void server_process(const char *json_text);
 void server_dispatch_notification(Job *job);
 
 /**
- * Run the query handler for @p job and send the response.  Runs on a
- * query worker thread; acquires docs_mutex for the duration of the
- * handler because the previous snapshot machinery was retired during
- * the tj_node refactor — see job_queue.h.
+ * Coordinator-thread entry for a query Job.  Runs on the single
+ * coordinator so the LSP arrival-order rule holds.  Acquires docs_mutex
+ * briefly to either:
+ *   - dispatch an inline method (initialize / shutdown / semanticTokens)
+ *     against the live store and send its response, or
+ *   - clone a query_context for every other method, attach it to @p job,
+ *     and hand the Job to the query-worker pool.
  *
- * @param job  Pending query job.  Worker frees it after return.
+ * @param job  Pending query job.
+ * @return 1 when handled inline (caller frees @p job); 0 when ownership of
+ *         @p job was transferred to the query-worker pool.
  */
-void server_dispatch_query(Job *job);
+int server_coordinate_query(Job *job);
+
+/**
+ * Query-worker entry: run the handler for @p job entirely against its
+ * pre-cloned query_context with no lock held, and send the response.
+ *
+ * @param job  Query job whose `context` was populated by
+ *             server_coordinate_query().  Worker frees it after return.
+ */
+void server_run_query(Job *job);
 
 /**
  * Respond to @p job's request with a JSON-RPC `RequestCancelled`

@@ -21,6 +21,8 @@
 #include "project_tree.h"
 #include "grammar.tab.h"   /* KW_TASK */
 
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,9 +53,7 @@ static void copy_dependencies(ProjectNode *dst, const tj_node *src) {
         d->bang_count      = s->bang_count;
         d->path            = s->path ? strdup(s->path) : NULL;
         d->source_range    = s->source_range;
-        d->resolved_target = NULL;
-        d->target_uri      = NULL;
-        d->state           = DEP_UNRESOLVED;
+        atomic_init(&d->resolved, PROJECT_DEP_UNRESOLVED);
     }
     dst->num_dependencies = src->num_dependencies;
 }
@@ -112,7 +112,8 @@ static void split_dotted_path(const char *path, char ***out_segs, int *out_n) {
     if (!*out_segs) return;
     char *tmp = strdup(path);
     if (!tmp) { free(*out_segs); *out_segs = NULL; return; }
-    for (char *tok = strtok(tmp, "."); tok; tok = strtok(NULL, "."))
+    char *save = NULL;
+    for (char *tok = strtok_r(tmp, ".", &save); tok; tok = strtok_r(NULL, ".", &save))
         (*out_segs)[(*out_n)++] = strdup(tok);
     free(tmp);
 }
@@ -157,7 +158,10 @@ static ProjectNode *find_task(ProjectNode *const *children, int n,
 ProjectNode *project_dep_resolve(ProjectNode *owner_task, int dep_index,
                                  ProjectNode *project_root) {
     ProjectDep *dep = &owner_task->dependencies[dep_index];
-    if (dep->state != DEP_UNRESOLVED) return dep->resolved_target;
+
+    uintptr_t cached = atomic_load_explicit(&dep->resolved, memory_order_acquire);
+    if (cached != PROJECT_DEP_UNRESOLVED)
+        return (cached == PROJECT_DEP_RESOLVED_NULL) ? NULL : (ProjectNode *)cached;
 
     char **segs = NULL;
     int    nseg = 0;
@@ -188,8 +192,7 @@ ProjectNode *project_dep_resolve(ProjectNode *owner_task, int dep_index,
 
     free_segs(segs, nseg);
 
-    dep->resolved_target = resolved;
-    dep->target_uri      = resolved ? resolved->source_uri : NULL;
-    dep->state           = resolved ? DEP_RESOLVED_TARGET : DEP_RESOLVED_NULL;
+    uintptr_t to_publish = resolved ? (uintptr_t)resolved : PROJECT_DEP_RESOLVED_NULL;
+    atomic_store_explicit(&dep->resolved, to_publish, memory_order_release);
     return resolved;
 }

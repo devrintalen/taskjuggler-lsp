@@ -117,6 +117,11 @@
   },
   {
     "jsonrpc": "2.0",
+    "id": 4,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
     "id": 2,
     "result": {
       "resultId": "1",
@@ -168,7 +173,7 @@
     "jsonrpc": "2.0",
     "id": 3,
     "result": {
-      "resultId": "2",
+      "resultId": "1",
       "data": [
         0,
         0,
@@ -212,10 +217,5 @@
         0
       ]
     }
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 4,
-    "result": null
   }
 ]

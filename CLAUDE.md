@@ -67,10 +67,19 @@ stale generated header.
 
 ### Process model
 
-Single-threaded, synchronous JSON-RPC over stdin/stdout. `src/main.c`
-reads `Content-Length`-framed messages and hands each body to
-`server_process()` (`src/server.c`); responses are written back via
-`lsp_send_message()`. There is no worker pool, no async I/O.
+JSON-RPC over stdin/stdout. `src/main.c` reads `Content-Length`-framed
+messages and hands each body to `server_process()` (`src/server.c`),
+which enqueues a `Job` onto an arrival-ordered queue. A single
+**coordinator** thread pops jobs in order (preserving the LSP "process
+in arrival order" rule) and owns the live document store under
+`docs_mutex`: it runs notifications and the inline lifecycle methods
+(`initialize` / `shutdown`) itself. Every other request is a read-only
+query — the coordinator pins the current immutable workspace snapshot
+(an O(1) refcount bump, see "Cross-file revalidation") into the Job's
+`query_context` and hands it to a pool of query **workers**
+(`src/threadpool.c`, `NUM_QUERY_WORKERS`). Workers run their handler
+lock-free against the pinned snapshot and write responses via
+`lsp_send_message()` (serialized by `stdout_mutex`).
 
 ### Document store
 
@@ -120,25 +129,41 @@ cross-file edge.
 ### Cross-file revalidation
 
 After any document-changing notification, `server.c` runs
-`revalidate_all_docs()`. This polls `compile_commands.json` for
-on-disk changes, runs `rebuild_all_projects()` to recompute project
-membership and per-`Project` `tj_node` trees from the
-`compile_commands.json` closure, then republishes (currently empty)
-diagnostics on every editor-managed document.
+`revalidate_all_docs()`: it polls `compile_commands.json` for on-disk
+changes, calls `build_workspace_snapshot()` to assemble a fresh
+immutable `workspace_snapshot` from the current `docs[]`, atomically
+swaps it in as the published `g_ws` (releasing the previous one), then
+republishes (currently empty) diagnostics on every editor-managed
+document.
 
-Each `Project` owns four synthetic per-kind `tj_node` roots (`tasks`,
-`accounts`, `reports`, `resources`) populated by deep-copying every
-member document's top-level entries under the includer's prefix
-target. Each `Document.primary_project` points at the project that
-claimed it during BFS. Handlers (`handle_completion` today) scope
-cross-file lookups to other documents sharing the requester's
-`primary_project`, so two unrelated `.tjp`s in the same workspace
-stay independent.
+Snapshots are refcounted and immutable, so a query that pinned the old
+snapshot keeps reading a consistent revision until it releases its ref;
+the old snapshot is freed only then. Two layers (`src/query_context.{h,c}`):
 
-The richer dep-link machinery (`DefinitionLink` / `ReferenceLink` /
-`resolve_cross_file_deps`) was removed in the tj_node refactor and is
-not yet restored; `handle_definition` and `handle_references` return
-`null` until it is.
+- `doc_snapshot` — one document's frozen parse output (`tj_node` tree,
+  token spans, source text), created once per parse and **shared by
+  ref**: editing document A produces a new `doc_snapshot` for A while
+  every other document's snapshot is re-referenced unchanged. Each
+  `Document` holds its current `snap` plus the immediately previous
+  `prev_snap` (retained so `semanticTokens/delta` can diff against the
+  version the client last held). A `doc_snapshot` also carries a
+  write-once, compare-exchange–published memo for its semantic-token
+  data; the `resultId` is the document's parse version (`doc_version`).
+- `workspace_snapshot` — a `ws_doc` per parsed document (its `doc_snapshot`
+  ref plus the include-prefixes in force this revision) and a
+  `ws_project` per assembled project. Each `ws_project` owns one synthetic
+  `ProjectNode` root over all kinds, populated by deep-copying every
+  member document's top-level entries under the includer's prefix
+  target. The include BFS stamps each `ws_doc.project_index`; handlers
+  scope cross-file lookups to siblings sharing the requester's project,
+  so two unrelated `.tjp`s in the same workspace stay independent.
+
+Dependency edges resolve lazily: each `ProjectDep` memoizes its resolved
+target write-once in an atomic `resolved` cell (`project_dep_resolve`),
+so concurrent workers pinning the same snapshot resolve safely and
+back-to-back queries on one revision warm the memo. `handle_definition`,
+`handle_references`, and dependency hover resolve against the snapshot's
+`ProjectNode` tree.
 
 ### Feature dispatch
 
@@ -169,6 +194,13 @@ under GPLv2 as a realistic fixture.
 ## Code Style Conventions
 
 Use snake_case rather than camelCase for multi-word identifiers.
+
+This applies to data types as well: new `struct` / `enum` / `typedef`
+names use snake_case (e.g. `doc_snapshot`, `workspace_snapshot`,
+`query_context`), not CamelCase. A number of older types predate this
+rule and remain CamelCase (`Document`, `Job`, `ProjectNode`,
+`TokenSpan`, `ParseOutput`, …); leave those as they are unless you are
+already refactoring them, but do not introduce new CamelCase types.
 
 Use K&R C style for code.
 

@@ -21,17 +21,19 @@
 /* For the data-flow overview, document lifecycle, and query-dispatch
  * table, see doc/modules/server.rst.
  *
- * TODO(workspace-snapshot): query workers used to operate on a refcounted
- * workspace snapshot so they did not block notifications.  That model
- * relied on per-Document ParseResult refcounting and was retired during
- * the tj_node refactor.  Until a replacement lands, server_dispatch_query
- * acquires docs_mutex for the full handler so the live docs[] array stays
- * consistent under it.
+ * Concurrency model: the coordinator thread owns the live document store.
+ * Notifications and the inline query methods (initialize / shutdown /
+ * semanticTokens) mutate it under docs_mutex on the coordinator.  Every
+ * other query is served by cloning a query_context (a frozen, fully-owned
+ * copy of the documents and project tree the handler needs) under
+ * docs_mutex, then running the handler on a worker thread with no lock
+ * held.  See query_context.h.
  */
 
 #include "server.h"
 #include "parser.h"
 #include "project_tree.h"
+#include "query_context.h"
 #include "grammar.tab.h"   /* KW_* keyword constants for per-kind routing */
 #include "job_queue.h"
 #include "threadpool.h"
@@ -69,36 +71,32 @@
 
 #define MAX_DOCS 64
 
-struct Project;
-
 /** Document store slot.  Each slot owns the parse-derived state directly
  *  (per-kind synthetic roots, tokens, include filenames); parse() returns
  *  a transient ParseOutput whose fields get moved here by doc_install_parse(). */
 typedef struct Document {
     char        *uri;
-    char        *text;
-    SemanticTokenResult sem_tokens; /**< cached semantic-tokens response */
-    _Atomic uint64_t doc_version;   /**< bumped on every text/parse swap */
+    char        *text;              /**< mutable working copy; the snapshot holds its own parsed copy */
+    _Atomic uint64_t doc_version;   /**< monotonic stamp counter; the next parse stamps the value, then ++ */
     int          in_use;
     int          disk_only;
     int          is_cc_root;        /**< 1 when this doc is named directly in compile_commands.json */
 
-    /* Parse-derived state.  `root` is a synthetic node whose children are
-     * every top-level declaration (tasks, accounts, resources/shifts,
-     * reports, and the project block) in source order.  It is non-NULL
-     * after a successful parse and NULL before one has happened (use
-     * `root` as the "has-parse" sentinel).  Freed and replaced wholesale
-     * by doc_install_parse(); freed by doc_free() on slot release. */
-    tj_node     *root;
-    TokenSpan   *tok_spans;
-    int          num_tok_spans;
-    int          tok_span_cap;
-    int          num_sem_entries;
+    /* Immutable parse output.  `snap` is the current parse's doc_snapshot
+     * (NULL before the first parse — use it as the "has-parse" sentinel);
+     * `prev_snap` is the one immediately before it, retained so a
+     * semanticTokens/delta request can diff against the version the client
+     * last held.  Both are refcounted: a published workspace_snapshot also
+     * holds refs, so a snapshot outlives any in-flight query reading it.
+     * Each is released and rotated by doc_install_parse(). */
+    doc_snapshot *snap;
+    doc_snapshot *prev_snap;
 
     /* Prefixes applied to this Document by the includer's `include` block,
      * one per kind.  Populated by follow_includes() from the includer's
      * captured IncludeRef when this file is pulled in; stay NULL on a
-     * canonical .tjp or on orphan .tji files in a .tji-only workspace. */
+     * canonical .tjp or on orphan .tji files in a .tji-only workspace.
+     * Captured into each workspace_snapshot's ws_doc at build time. */
     char        *task_prefix;
     char        *account_prefix;
     char        *report_prefix;
@@ -107,21 +105,22 @@ typedef struct Document {
     /* Resolved file:// URIs of every `include` directive in this doc,
      * recorded by follow_includes() at parse time.  Owned by the
      * Document; cleared at the top of each follow_includes() run and
-     * freed by doc_free().  Lets rebuild_all_projects() walk the
+     * freed by doc_free().  Lets build_workspace_snapshot() walk the
      * include graph without re-parsing or threading state through the
      * load pipeline. */
     char       **included_uris;
     int          num_included_uris;
     int          included_uris_cap;
-
-    /* Project this document belongs to, computed by
-     * rebuild_all_projects() on every notification.  Borrowed pointer;
-     * the projects[] registry owns the Project itself.  NULL between
-     * parse and the next rebuild_all_projects() call. */
-    struct Project *primary_project;
 } Document;
 
 static Document docs[MAX_DOCS];
+
+/* The currently published immutable workspace snapshot.  Touched only by
+ * the coordinator thread (notifications swap it; query coordination acquires
+ * a ref from it), so the pointer itself needs no atomic; only the snapshot's
+ * refcount is atomic, for the worker-side release.  NULL until the first
+ * revalidate builds one. */
+static workspace_snapshot *g_ws = NULL;
 
 /* Serializes every read/write of docs[] — slots, their fields, and the
  * global trees built from them. */
@@ -144,42 +143,32 @@ static int    g_cc_attempted   = 0;
 static char *normalize_uri(const char *raw_uri);
 static void  load_file_from_disk(const char *path);
 static void  follow_includes(const char *file_path, const ParseOutput *po);
-static void  rebuild_all_projects(void);
+static workspace_snapshot *build_workspace_snapshot(void);
 static void  reload_compile_commands(void);
 static void  maybe_reload_compile_commands(void);
 
-/* ── Per-Project ProjectNode tree ───────────────────────────────────────── *
+/* ── Per-project ProjectNode tree ───────────────────────────────────────── *
  *
- * Each compile_commands.json entry becomes one Project; its transitive
+ * Each compile_commands.json entry becomes one project; its transitive
  * include closure (followed via Document.included_uris[]) is deep-copied
- * into the single ProjectNode tree below with the includer's per-kind
- * prefix applied (see project_tree.h).  Built fresh by
- * rebuild_all_projects() on every notification.  Nodes of every kind
- * share one root: a node's `keyword` identifies its kind, so walkers
- * must filter on it to respect TaskJuggler's separate task / account /
- * resource / report id namespaces.
+ * into a single ProjectNode tree with the includer's per-kind prefix
+ * applied (see project_tree.h).  Built fresh by build_workspace_snapshot()
+ * into the published workspace_snapshot on every notification.  Nodes of
+ * every kind share one root: a node's `keyword` identifies its kind, so
+ * walkers must filter on it to respect TaskJuggler's separate task /
+ * account / resource / report id namespaces.
  *
  * This tree is the authoritative cross-file resolution surface: it is
- * prefix-applied (so dependency paths resolve against real qualified
- * ids) and each task node owns the dependency edges declared on it.
+ * prefix-applied (so dependency paths resolve against real qualified ids)
+ * and each task node owns the dependency edges declared on it.
  * handle_definition / handle_references / handle_hover bridge the
  * per-document task under the cursor to its clone here (via
  * project_node_for_doc_task) and resolve against this tree.
  *
- * Each Document has a primary_project pointer set during the rebuild;
- * handlers route cross-file lookups through that pointer.  Orphan
- * editor-only files (didOpen for a doc not reached by any
- * compile_commands entry) are handled by a follow-up commit; until then
- * they end up with primary_project == NULL. */
-typedef struct Project {
-    char        *id;             /**< canonical .tjp URI from compile_commands.json */
-    int          is_orphan;      /**< reserved for singleton editor-only projects (commit 3) */
-    ProjectNode  root;           /**< synthetic root over all kinds, owned outright */
-} Project;
-
-static Project **projects;
-static int       num_projects;
-static int       cap_projects;
+ * Each ws_doc records the index of the project that claimed it during the
+ * snapshot's include BFS; handlers route cross-file lookups through that
+ * membership.  Editor-only files outside every compile_commands closure
+ * each form their own singleton project. */
 
 /* ── Slot lookup / allocation / free ─────────────────────────────────────── */
 
@@ -210,7 +199,6 @@ static Document *doc_alloc(const char *uri) {
         if (!docs[i].in_use) {
             docs[i].in_use = 1;
             docs[i].uri    = canon;
-            docs[i].sem_tokens.next_result_id = 1;
             atomic_store(&docs[i].doc_version, 1);
             return &docs[i];
         }
@@ -219,38 +207,33 @@ static Document *doc_alloc(const char *uri) {
     return NULL;
 }
 
-/** Release the parse-derived fields on @p d (per-kind tj_node trees,
- *  tokens, include filenames), zeroing each so the slot is reusable. */
+/** Release both doc_snapshots held by @p d (the live store's refs), nulling
+ *  each so the slot is reusable.  A snapshot only frees once any
+ *  workspace_snapshot and in-flight query also release their refs. */
 static void doc_clear_parse_state(Document *d) {
-    tj_node_free(d->root);
-    d->root = NULL;
-
-    for (int i = 0; i < d->num_tok_spans; i++)
-        free(d->tok_spans[i].text);
-    free(d->tok_spans);
-    d->tok_spans       = NULL;
-    d->num_tok_spans   = 0;
-    d->tok_span_cap    = 0;
-    d->num_sem_entries = 0;
+    docsnap_release(d->snap);
+    d->snap = NULL;
+    docsnap_release(d->prev_snap);
+    d->prev_snap = NULL;
 }
 
-/** Move every parse-derived field that the Document keeps long-term out
- *  of @p po into @p d, releasing whatever @p d held previously.
- *  Includes are not part of that long-term state — callers consume them
- *  via follow_includes() before calling here; parse_output_free()
- *  releases the leftover include array along with the shell. */
+/** Build a fresh doc_snapshot from @p po (moving its tree and token spans in)
+ *  and rotate it onto @p d: the outgoing current snapshot becomes prev_snap
+ *  (replacing the one before it), so a semanticTokens/delta request can still
+ *  diff against the version the client last held.  Includes are not part of
+ *  the snapshot — callers consume them via follow_includes() before calling
+ *  here; parse_output_free() releases the leftover include array and shell. */
 static void doc_install_parse(Document *d, ParseOutput *po) {
-    doc_clear_parse_state(d);
+    doc_snapshot *fresh = NULL;
     if (po) {
-        d->root                = po->root;
-        d->tok_spans           = po->tok_spans;
-        d->num_tok_spans       = po->num_tok_spans;
-        d->tok_span_cap        = po->tok_span_cap;
-        d->num_sem_entries     = po->num_sem_entries;
-        /* Null out moved-out fields so parse_output_free only releases
-         * what po still owns: the includes array (whose strings live
-         * past follow_includes() because replace_string() strdups them)
-         * and the struct shell. */
+        uint64_t version = atomic_fetch_add(&d->doc_version, 1);
+        fresh = docsnap_new(d->uri, d->text,
+                            po->root, po->tok_spans,
+                            po->num_tok_spans, po->num_sem_entries,
+                            version);
+        /* Ownership of the tree and token spans moved into the snapshot;
+         * null them out so parse_output_free only releases what po still
+         * owns (the includes array and the struct shell). */
         po->root            = NULL;
         po->tok_spans       = NULL;
         po->num_tok_spans   = 0;
@@ -258,13 +241,15 @@ static void doc_install_parse(Document *d, ParseOutput *po) {
         po->num_sem_entries = 0;
         parse_output_free(po);
     }
-    atomic_fetch_add(&d->doc_version, 1);
+
+    docsnap_release(d->prev_snap);
+    d->prev_snap = d->snap;   /* retains its existing ref, reassigned */
+    d->snap      = fresh;     /* fresh holds ref 1, or NULL on a no-parse */
 }
 
 static void doc_free(Document *d) {
     free(d->uri);
     free(d->text);
-    semantic_token_result_release(&d->sem_tokens);
     doc_clear_parse_state(d);
     free(d->task_prefix);
     free(d->account_prefix);
@@ -526,7 +511,7 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
         }
 
         /* Record this resolved URI on the includer so
-         * rebuild_all_projects() can BFS the include graph.  Ownership
+         * build_workspace_snapshot() can BFS the include graph.  Ownership
          * of target_uri transfers to includer->included_uris[]. */
         if (includer && target_uri) {
             if (includer->num_included_uris >= includer->included_uris_cap) {
@@ -678,7 +663,9 @@ static ProjectNode *find_node_by_dotted_path(ProjectNode *start, const char *pat
     char *copy = strdup(path);
     if (!copy) return NULL;
     ProjectNode *cur = start;
-    for (char *seg = strtok(copy, "."); seg && cur; seg = strtok(NULL, ".")) {
+    char *save = NULL;
+    for (char *seg = strtok_r(copy, ".", &save); seg && cur;
+         seg = strtok_r(NULL, ".", &save)) {
         ProjectNode *next = NULL;
         for (int i = 0; i < cur->num_children && !next; i++) {
             ProjectNode *child = cur->children[i];
@@ -692,30 +679,26 @@ static ProjectNode *find_node_by_dotted_path(ProjectNode *start, const char *pat
     return cur;
 }
 
-/* ── Per-Project tree rebuild ──────────────────────────────────────────── */
+/* ── Workspace snapshot build ──────────────────────────────────────────── */
 
-static void project_free(Project *p) {
-    if (!p) return;
-    free(p->id);
-    project_node_free_children(&p->root);
-    free(p);
+/* docs[] slot index -> ws_doc index in the snapshot being built, or -1 when
+ * the slot is unused / unparsed.  Set up once per build_workspace_snapshot()
+ * call and consulted by the include BFS to stamp project membership. */
+static int ws_doc_index_of(const int *slot_to_wsdoc, const Document *d) {
+    return slot_to_wsdoc[(int)(d - docs)];
 }
 
-static void projects_clear(void) {
-    for (int i = 0; i < num_projects; i++)
-        project_free(projects[i]);
-    num_projects = 0;
-}
-
-/** Copy each top-level declaration of @p d into @p p's tree, applying @p d's
- *  matching per-kind prefix.  Routes by the node's own `keyword` (the
- *  per-kind grouping the Document no longer keeps) to pick both the prefix
- *  and the namespace the prefix path is resolved within; the project block
- *  is document-local metadata and is skipped. */
-static void copy_document_into_project(Project *p, Document *d) {
-    if (!d->root) return;
-    for (int i = 0; i < d->root->num_children; i++) {
-        tj_node    *child = d->root->children[i];
+/** Copy each top-level declaration of @p d (from its current snapshot) into
+ *  project @p pidx's tree, applying @p d's matching per-kind prefix.  Routes
+ *  by the node's own `keyword` to pick both the prefix and the namespace the
+ *  prefix path is resolved within; the project block is document-local
+ *  metadata and is skipped. */
+static void copy_document_into_project(workspace_snapshot *ws, int pidx, Document *d) {
+    if (!d->snap || !d->snap->root) return;
+    ProjectNode *proot = &ws->projects[pidx]->root;
+    tj_node *root = d->snap->root;
+    for (int i = 0; i < root->num_children; i++) {
+        tj_node    *child = root->children[i];
         const char *prefix;
         NodeKind    kind = node_kind_of(child->keyword);
         switch (child->keyword) {
@@ -731,24 +714,19 @@ static void copy_document_into_project(Project *p, Document *d) {
         default:
             prefix = d->report_prefix;   break;
         }
-        ProjectNode *target = find_node_by_dotted_path(&p->root, prefix, kind);
+        ProjectNode *target = find_node_by_dotted_path(proot, prefix, kind);
         if (!target) continue;
         project_node_append_child(target,
                                   project_node_from_tj(child, d->uri));
     }
 }
 
-/** Look up @p uri in docs[] (with normalization fallback).  Returns
- *  NULL if no in-use slot matches. */
-static Document *doc_find_by_uri(const char *uri) {
-    return doc_find(uri);
-}
-
-/** BFS from @p root along included_uris[], deep-copying every reachable
- *  Document's top-level into @p p with prefixes applied.  Marks each
- *  visited doc's primary_project to @p p if not already claimed by a
- *  prior project. */
-static void project_populate_from_root(Project *p, Document *root) {
+/** BFS from @p root along included_uris[], copying every reachable Document's
+ *  top-level into project @p pidx with prefixes applied, and stamping each
+ *  visited doc's ws_doc.project_index to @p pidx unless a prior project
+ *  already claimed it. */
+static void project_populate_from_root(workspace_snapshot *ws, int pidx,
+                                       Document *root, const int *slot_to_wsdoc) {
     /* Queue holds borrowed Document pointers; visited[] dedupes within
      * this BFS so a diamond include doesn't double-copy. */
     Document **queue   = NULL;
@@ -777,22 +755,26 @@ static void project_populate_from_root(Project *p, Document *root) {
     /* Anchor the project on the root document's own top-level.  Its
      * prefixes are NULL, so every declaration lands unprefixed in the
      * matching per-kind tree. */
-    copy_document_into_project(p, root);
-    if (!root->primary_project) root->primary_project = p;
+    copy_document_into_project(ws, pidx, root);
+    int root_wsd = ws_doc_index_of(slot_to_wsdoc, root);
+    if (root_wsd >= 0 && ws->docs[root_wsd].project_index < 0)
+        ws->docs[root_wsd].project_index = pidx;
 
     while (q_head < q_len) {
         Document *cur = queue[q_head++];
         for (int i = 0; i < cur->num_included_uris; i++) {
-            Document *child = doc_find_by_uri(cur->included_uris[i]);
-            if (!child || !child->root) continue;
+            Document *child = doc_find(cur->included_uris[i]);
+            if (!child || !child->snap || !child->snap->root) continue;
             int seen = 0;
             for (int v = 0; v < v_len && !seen; v++)
                 if (visited[v] == child) seen = 1;
             if (seen) continue;
             PUSH(visited, v_len, v_cap, child);
             PUSH(queue,   q_len, q_cap, child);
-            copy_document_into_project(p, child);
-            if (!child->primary_project) child->primary_project = p;
+            copy_document_into_project(ws, pidx, child);
+            int child_wsd = ws_doc_index_of(slot_to_wsdoc, child);
+            if (child_wsd >= 0 && ws->docs[child_wsd].project_index < 0)
+                ws->docs[child_wsd].project_index = pidx;
         }
     }
 
@@ -802,60 +784,59 @@ cleanup:
     #undef PUSH
 }
 
-/** Append @p p to projects[], growing the array if needed.  Returns
- *  1 on success, 0 on OOM (caller must project_free(p) on failure). */
-static int projects_append(Project *p) {
-    if (num_projects >= cap_projects) {
-        int new_cap = cap_projects ? cap_projects * 2 : 4;
-        Project **tmp = realloc(projects, (size_t)new_cap * sizeof(Project *));
-        if (!tmp) return 0;
-        projects   = tmp;
-        cap_projects = new_cap;
+/** Build an immutable workspace_snapshot from the current docs[]: one ws_doc
+ *  per parsed in-use document (referencing its doc_snapshot and capturing the
+ *  include-prefixes in force now), one project per is_cc_root document with
+ *  its include closure assembled, and one singleton "orphan" project for
+ *  every remaining document not reached by any closure.  Orphans exist so
+ *  editor-opened files outside the compile_commands.json closure still get
+ *  in-file LSP behavior (completion, hover, etc.) without bleeding into other
+ *  projects' cross-file pools.  Returned with refcount 1. */
+static workspace_snapshot *build_workspace_snapshot(void) {
+    int slot_to_wsdoc[MAX_DOCS];
+    int ndoc = 0;
+    for (int i = 0; i < MAX_DOCS; i++) {
+        if (docs[i].in_use && docs[i].snap)
+            slot_to_wsdoc[i] = ndoc++;
+        else
+            slot_to_wsdoc[i] = -1;
     }
-    projects[num_projects++] = p;
-    return 1;
-}
 
-/** Build one Project per is_cc_root Document, then one singleton
- *  "orphan" Project for every remaining in-use Document not reached by
- *  any cc_root's include closure.  Orphans exist so editor-opened
- *  files outside the compile_commands.json closure still get in-file
- *  LSP behavior (completion, hover, etc.) without bleeding into other
- *  projects' cross-file pools. */
-static void rebuild_all_projects(void) {
-    projects_clear();
-    for (int i = 0; i < MAX_DOCS; i++)
-        docs[i].primary_project = NULL;
+    workspace_snapshot *ws = ws_alloc(ndoc);
+
+    /* Populate each ws_doc: ref the live snapshot, copy the prefixes. */
+    for (int i = 0; i < MAX_DOCS; i++) {
+        int wsd = slot_to_wsdoc[i];
+        if (wsd < 0) continue;
+        Document *d = &docs[i];
+        ws_doc    *w = &ws->docs[wsd];
+        w->snap            = docsnap_acquire(d->snap);
+        w->task_prefix     = d->task_prefix     ? strdup(d->task_prefix)     : NULL;
+        w->account_prefix  = d->account_prefix  ? strdup(d->account_prefix)  : NULL;
+        w->report_prefix   = d->report_prefix   ? strdup(d->report_prefix)   : NULL;
+        w->resource_prefix = d->resource_prefix ? strdup(d->resource_prefix) : NULL;
+    }
 
     /* Pass 1: compile_commands roots + their include closures. */
     for (int i = 0; i < MAX_DOCS; i++) {
         Document *root = &docs[i];
-        if (!root->in_use || !root->is_cc_root || !root->root) continue;
-
-        Project *p = calloc(1, sizeof(*p));
-        if (!p) continue;
-        p->id = root->uri ? strdup(root->uri) : NULL;
-        if (!projects_append(p)) { project_free(p); continue; }
-
-        project_populate_from_root(p, root);
+        if (!root->in_use || !root->is_cc_root || !root->snap) continue;
+        int pidx = ws_add_project(ws, root->uri);
+        project_populate_from_root(ws, pidx, root, slot_to_wsdoc);
     }
 
-    /* Pass 2: unclaimed in-use docs each become their own singleton
-     * orphan project.  Anchored on the doc's own top-level with no
-     * prefix; the doc is its sole member. */
+    /* Pass 2: unclaimed parsed docs each become their own singleton orphan
+     * project, anchored on the doc's own top-level with no prefix. */
     for (int i = 0; i < MAX_DOCS; i++) {
+        int wsd = slot_to_wsdoc[i];
+        if (wsd < 0 || ws->docs[wsd].project_index >= 0) continue;
         Document *d = &docs[i];
-        if (!d->in_use || !d->root || d->primary_project) continue;
-
-        Project *p = calloc(1, sizeof(*p));
-        if (!p) continue;
-        p->id        = d->uri ? strdup(d->uri) : NULL;
-        p->is_orphan = 1;
-        if (!projects_append(p)) { project_free(p); continue; }
-
-        copy_document_into_project(p, d);
-        d->primary_project = p;
+        int pidx = ws_add_project(ws, d->uri);
+        copy_document_into_project(ws, pidx, d);
+        ws->docs[wsd].project_index = pidx;
     }
+
+    return ws;
 }
 
 /* Republish (now-empty) diagnostics for editor-managed documents after a
@@ -916,7 +897,7 @@ static void reload_compile_commands(void) {
             if (!entries[i].file_abs) continue;
             load_file_from_disk(entries[i].file_abs);
             /* Tag the doc that holds this compile_commands entry as a
-             * project root.  rebuild_all_projects() seeds one Project
+             * project root.  build_workspace_snapshot() seeds one project
              * per is_cc_root doc and BFS-walks its include closure. */
             char *uri = path_to_uri(entries[i].file_abs);
             Document *root = uri ? doc_find(uri) : NULL;
@@ -989,9 +970,10 @@ static int dependency_count_subtree(const tj_node *n) {
 /** True when @p d declares a project block (scans root's top-level
  *  children for a KW_PROJECT node). */
 static int doc_has_project_block(const Document *d) {
-    if (!d->root) return 0;
-    for (int i = 0; i < d->root->num_children; i++)
-        if (d->root->children[i]->keyword == KW_PROJECT) return 1;
+    if (!d->snap || !d->snap->root) return 0;
+    tj_node *root = d->snap->root;
+    for (int i = 0; i < root->num_children; i++)
+        if (root->children[i]->keyword == KW_PROJECT) return 1;
     return 0;
 }
 
@@ -1003,9 +985,10 @@ static int doc_has_project_block(const Document *d) {
  *    R = has a project block (canonical root candidate)
  *    C = compile_commands.json root
  *  `deps=` shows the total number of captured `depends` + `precedes`
- *  references across every task in the document.
+ *  references across every task in the document.  @p ws is the freshly
+ *  published snapshot, consulted for project membership and count.
  *  Caller must hold docs_mutex. */
-static void dump_docs_to_stderr(const char *trigger) {
+static void dump_docs_to_stderr(const char *trigger, const workspace_snapshot *ws) {
     int total = 0, editor = 0, disk = 0;
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
@@ -1015,18 +998,25 @@ static void dump_docs_to_stderr(const char *trigger) {
     fprintf(stderr,
             "taskjuggler-lsp: docs[] after %s — %d total (%d editor, %d disk), "
             "%d projects\n",
-            trigger, total, editor, disk, num_projects);
+            trigger, total, editor, disk, ws ? ws->num_projects : 0);
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
-        const char *pid = docs[i].primary_project
-                          ? (docs[i].primary_project->id
-                              ? docs[i].primary_project->id : "(no-id)")
-                          : "(none)";
-        int deps = dependency_count_subtree(docs[i].root);
+        /* Find this doc's ws_doc (by snapshot identity) to report its project. */
+        const char *pid = "(none)";
+        if (ws && docs[i].snap) {
+            for (int w = 0; w < ws->num_docs; w++) {
+                if (ws->docs[w].snap != docs[i].snap) continue;
+                int pidx = ws->docs[w].project_index;
+                if (pidx >= 0 && pidx < ws->num_projects)
+                    pid = ws->projects[pidx]->id ? ws->projects[pidx]->id : "(no-id)";
+                break;
+            }
+        }
+        int deps = docs[i].snap ? dependency_count_subtree(docs[i].snap->root) : 0;
         fprintf(stderr, "  [%2d] %c%c%c%c  proj=%s  deps=%d  %s\n",
                 i,
                 docs[i].disk_only          ? 'D' : 'd',
-                docs[i].root               ? 'P' : '-',
+                docs[i].snap               ? 'P' : '-',
                 doc_has_project_block(&docs[i]) ? 'R' : '-',
                 docs[i].is_cc_root         ? 'C' : '-',
                 pid,
@@ -1036,11 +1026,22 @@ static void dump_docs_to_stderr(const char *trigger) {
     fflush(stderr);
 }
 
+/* Build a fresh workspace snapshot from the current docs[] and atomically
+ * swap it in as the published g_ws, releasing the previous one (which an
+ * in-flight query may still be reading — it survives until that query
+ * releases its ref).  Coordinator-only. */
+static void publish_workspace_snapshot(void) {
+    workspace_snapshot *fresh = build_workspace_snapshot();
+    workspace_snapshot *old   = g_ws;
+    g_ws = fresh;
+    ws_release(old);
+}
+
 static void revalidate_all_docs(void) {
     maybe_reload_compile_commands();
-    rebuild_all_projects();
+    publish_workspace_snapshot();
     republish_all_diagnostics();
-    dump_docs_to_stderr("revalidate_all_docs");
+    dump_docs_to_stderr("revalidate_all_docs", g_ws);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1411,16 +1412,19 @@ static void handle_didclose(yyjson_val *params) {
 
 /* ── Read-only query handlers ─────────────────────────────────────────────
  *
- * Each handler takes `d` (the primary Document, already located by the
- * dispatcher under docs_mutex) and returns the response JSON.  Caller
- * holds docs_mutex; no further locking is needed because the previous
- * snapshot machinery was retired.
+ * Each handler takes `d` (the primary query_doc, cloned from the live store
+ * by server_coordinate_query() under docs_mutex) and returns the response
+ * JSON.  Handlers run on a query worker with no lock held: every pointer
+ * they touch lives inside the Job's private query_context, so a concurrent
+ * notification mutating the live store cannot disturb them.  Cross-document
+ * handlers also receive `qc` for its sibling-document pools and project
+ * tree.
  */
 
 /** A document's top-level symbol pool: the children of its synthetic
  *  `root`, in source order, or an empty pool when @p d has no parse.
  *  The pointers are borrowed from @p d — never freed by the caller. */
-static void doc_symbol_pool(const Document *d, tj_node *const **out_top, int *out_n) {
+static void doc_symbol_pool(const query_doc *d, tj_node *const **out_top, int *out_n) {
     if (d && d->root) {
         *out_top = (tj_node *const *)d->root->children;
         *out_n   = d->root->num_children;
@@ -1431,7 +1435,7 @@ static void doc_symbol_pool(const Document *d, tj_node *const **out_top, int *ou
 }
 
 static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                               yyjson_val *params, Document *d) {
+                                               yyjson_val *params, const query_doc *d) {
     (void)params;
     if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
@@ -1450,26 +1454,28 @@ static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *i
     return make_response(doc, id, raw);
 }
 
-/* Map a per-document task tj_node to its clone in @p d's assembled
+/* Map a per-document task tj_node to its clone in @p qc's assembled
  * Project tree.  Cursor lookups (dependency_at_cursor / task_decl_at_cursor)
  * return per-document nodes, but cross-file resolution lives in the
  * ProjectNode tree, so callers bridge through here first.
  *
  * The per-document task's unprefixed dotted id (its in-file ancestry) is
  * appended to @p d's task prefix target inside the Project tree.  Returns
- * NULL when @p d has no project, the prefix target is missing, or the path
- * does not resolve. */
-static ProjectNode *project_node_for_doc_task(const Document *d,
+ * NULL when @p qc has no project tree, the prefix target is missing, or the
+ * path does not resolve. */
+static ProjectNode *project_node_for_doc_task(const query_context *qc,
+                                              const query_doc *d,
                                               const tj_node *per_doc_task) {
-    if (!d || !d->primary_project || !per_doc_task) return NULL;
-    Project *p = d->primary_project;
+    if (!qc || !qc->project_root || !d || !per_doc_task) return NULL;
 
     char *qid = sym_qualified_id(per_doc_task);   /* unprefixed in-file path */
     if (!qid || !qid[0]) { free(qid); return NULL; }
 
-    ProjectNode *cur = find_node_by_dotted_path(&p->root, d->task_prefix,
+    ProjectNode *cur = find_node_by_dotted_path(qc->project_root, d->task_prefix,
                                                 NODE_KIND_TASK);
-    for (char *seg = strtok(qid, "."); seg && cur; seg = strtok(NULL, ".")) {
+    char *save = NULL;
+    for (char *seg = strtok_r(qid, ".", &save); seg && cur;
+         seg = strtok_r(NULL, ".", &save)) {
         ProjectNode *next = NULL;
         for (int i = 0; i < cur->num_children && !next; i++) {
             ProjectNode *child = cur->children[i];
@@ -1484,7 +1490,7 @@ static ProjectNode *project_node_for_doc_task(const Document *d,
 }
 
 static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
-                                             yyjson_val *params, Document *d) {
+                                             yyjson_val *params, const query_doc *d) {
     (void)params;
     if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
@@ -1498,7 +1504,7 @@ static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
-                                         yyjson_val *params, Document *d) {
+                                         yyjson_val *params, const query_doc *d) {
     (void)params;
     if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
@@ -1512,7 +1518,8 @@ static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
-                                     yyjson_val *params, Document *d) {
+                                     yyjson_val *params, const query_context *qc,
+                                     const query_doc *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
@@ -1529,16 +1536,16 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
      * when the cursor is not on a dependency or the reference is unresolved. */
     tj_node          *owner = NULL;
     const Dependency *dep   = NULL;
-    if (d->primary_project &&
+    if (qc->project_root &&
         dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
                              &owner, &dep)) {
-        ProjectNode *merged_owner = project_node_for_doc_task(d, owner);
+        ProjectNode *merged_owner = project_node_for_doc_task(qc, d, owner);
         ProjectNode *target = NULL;
         if (merged_owner) {
             int ordinal = (int)(dep - owner->dependencies);
             if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
                 target = project_dep_resolve(merged_owner, ordinal,
-                                             &d->primary_project->root);
+                                             qc->project_root);
         }
         if (target) {
             char *value = project_node_hover_markdown(target);
@@ -1575,7 +1582,7 @@ static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id,
-                                              yyjson_val *params, Document *d) {
+                                              yyjson_val *params, const query_doc *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
@@ -1596,73 +1603,85 @@ static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id
     return make_response(doc, id, sig);
 }
 
-static char *mint_sem_tokens_result_id(Document *d) {
-    char buf[32];
-    int n = snprintf(buf, sizeof(buf), "%" PRIu64,
-                     d->sem_tokens.next_result_id++);
-    if (n < 0) return NULL;
-    return strdup(buf);
+/* The semanticTokens resultId is the document's parse version: it is stable
+ * per snapshot (two requests against the same parse share one id) and lets a
+ * delta diff by version with no write-back, so these run lock-free against
+ * the pinned snapshot like any other query.  The token data itself is
+ * memoized inside the doc_snapshot (docsnap_sem_tokens). */
+static void sem_tokens_result_id(doc_snapshot *s, char *buf, size_t buflen) {
+    snprintf(buf, buflen, "%" PRIu64, s->doc_version);
 }
 
 static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
-                                                    yyjson_val *params, Document *d) {
+                                                    yyjson_val *params, const query_doc *d) {
     (void)params;
-    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->snap || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
-    uint32_t *buf = NULL;
-    size_t    count = 0;
-    compute_semantic_tokens_data(d->tok_spans,
-                                  d->num_tok_spans,
-                                  d->num_sem_entries,
-                                  &buf, &count);
+    const uint32_t *buf = NULL;
+    size_t          count = 0;
+    docsnap_sem_tokens(d->snap, &buf, &count);
 
-    char *result_id = mint_sem_tokens_result_id(d);
-    yyjson_mut_val *result = build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
-    semantic_token_result_replace(&d->sem_tokens, buf, count, result_id);
+    char result_id[32];
+    sem_tokens_result_id(d->snap, result_id, sizeof(result_id));
+    yyjson_mut_val *result =
+        build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
     return make_response(doc, id, result);
 }
 
 static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yyjson_val *id,
-                                                          yyjson_val *params, Document *d) {
+                                                          yyjson_val *params,
+                                                          const query_context *qc,
+                                                          const query_doc *d) {
     const char *previous_result_id = params ? json_str(params, "previousResultId") : NULL;
-    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!d || !d->snap || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
-    uint32_t *new_buf = NULL;
-    size_t    new_count = 0;
-    compute_semantic_tokens_data(d->tok_spans,
-                                  d->num_tok_spans,
-                                  d->num_sem_entries,
-                                  &new_buf, &new_count);
+    const uint32_t *new_buf = NULL;
+    size_t          new_count = 0;
+    docsnap_sem_tokens(d->snap, &new_buf, &new_count);
 
-    char *result_id = mint_sem_tokens_result_id(d);
+    char result_id[32];
+    sem_tokens_result_id(d->snap, result_id, sizeof(result_id));
+
+    /* Identify the snapshot the client is holding by its resultId (== that
+     * snapshot's parse version): either the current parse (no change since)
+     * or the immediately previous one retained on the query_context.  Diff
+     * against that base; otherwise fall back to a full response. */
+    doc_snapshot *base = NULL;
+    if (previous_result_id) {
+        uint64_t prev_version = strtoull(previous_result_id, NULL, 10);
+        if (prev_version == d->snap->doc_version)
+            base = d->snap;
+        else if (qc->prev_snap && prev_version == qc->prev_snap->doc_version)
+            base = qc->prev_snap;
+    }
+
     yyjson_mut_val *result;
-    if (d->sem_tokens.data && d->sem_tokens.result_id && previous_result_id &&
-        strcmp(d->sem_tokens.result_id, previous_result_id) == 0) {
-        result = build_semantic_tokens_delta_json(doc,
-                                                   d->sem_tokens.data, d->sem_tokens.count,
-                                                   new_buf, new_count,
-                                                   result_id);
+    if (base) {
+        const uint32_t *old_buf = NULL;
+        size_t          old_count = 0;
+        docsnap_sem_tokens(base, &old_buf, &old_count);
+        result = build_semantic_tokens_delta_json(doc, old_buf, old_count,
+                                                   new_buf, new_count, result_id);
     } else {
         result = build_semantic_tokens_json_from_buf(doc, new_buf, new_count, result_id);
     }
-
-    semantic_token_result_replace(&d->sem_tokens, new_buf, new_count, result_id);
     return make_response(doc, id, result);
 }
 
 static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params, Document *d) {
+                                          yyjson_val *params, const query_context *qc,
+                                          const query_doc *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
     if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-    if (!d->primary_project) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!qc->project_root) return make_response(doc, id, yyjson_mut_null(doc));
 
     tj_node *task = task_decl_at_cursor(d->tok_spans, d->num_tok_spans, pos);
-    ProjectNode *wanted = project_node_for_doc_task(d, task);
+    ProjectNode *wanted = project_node_for_doc_task(qc, d, task);
     yyjson_mut_val *result = build_references_json(doc,
-                                                    &d->primary_project->root,
+                                                    qc->project_root,
                                                     wanted);
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);
@@ -1670,7 +1689,7 @@ static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
 
 static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
                                                   yyjson_val *id,
-                                                  yyjson_val *params, Document *d) {
+                                                  yyjson_val *params, const query_doc *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
     if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
@@ -1689,25 +1708,26 @@ static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
 }
 
 static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params, Document *d) {
+                                          yyjson_val *params, const query_context *qc,
+                                          const query_doc *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *pos_obj = yyjson_obj_get(params, "position");
     if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-    if (!d->primary_project) return make_response(doc, id, yyjson_mut_null(doc));
+    if (!qc->project_root) return make_response(doc, id, yyjson_mut_null(doc));
 
     tj_node          *owner = NULL;
     const Dependency *dep   = NULL;
     yyjson_mut_val   *result = NULL;
     if (dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
                              &owner, &dep)) {
-        ProjectNode *merged_owner = project_node_for_doc_task(d, owner);
+        ProjectNode *merged_owner = project_node_for_doc_task(qc, d, owner);
         if (merged_owner) {
             int ordinal = (int)(dep - owner->dependencies);
             if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
                 result = build_definition_json(doc, merged_owner, ordinal,
-                                               &d->primary_project->root);
+                                               qc->project_root);
         }
     }
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
@@ -1715,7 +1735,8 @@ static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params, Document *d) {
+                                          yyjson_val *params, const query_context *qc,
+                                          const query_doc *d) {
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
     if (!tdp) tdp = params;
@@ -1724,24 +1745,17 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
     if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
-    /* Gather top-level nodes of every other Document in the requester's
-     * project as extra pools.  Skips:
-     *   - the requester itself (its symbols are in `self_top`)
-     *   - docs in a different project (cross-project bleed)
-     * Orphans are singleton projects, so the loop naturally yields no
-     * extras for them — correct behavior.  disk_only project members
-     * ARE included: a .tji pulled in via include is a legitimate
-     * cross-file completion source. */
+    /* Every non-primary doc in the context is a sibling in the requester's
+     * project (the clone step already restricted membership), so each one's
+     * top-level pool is an extra cross-file completion source.  Orphans
+     * have no siblings, so the loop naturally yields no extras for them. */
     tj_node *const *extra_pools[MAX_DOCS];
     int             extra_counts[MAX_DOCS];
     int             num_extra = 0;
-    for (int i = 0; i < MAX_DOCS && num_extra < MAX_DOCS; i++) {
-        if (!docs[i].in_use) continue;
-        if (&docs[i] == d) continue;
-        if (!d->primary_project) continue;
-        if (docs[i].primary_project != d->primary_project) continue;
+    for (int i = 0; i < qc->num_docs && num_extra < MAX_DOCS; i++) {
+        if (qc->docs[i].is_primary) continue;
         tj_node *const *top; int n;
-        doc_symbol_pool(&docs[i], &top, &n);
+        doc_symbol_pool(&qc->docs[i], &top, &n);
         if (!top) continue;
         extra_pools[num_extra]  = top;
         extra_counts[num_extra] = n;
@@ -1765,17 +1779,18 @@ static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
 }
 
 static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                                yyjson_val *params) {
+                                                yyjson_val *params,
+                                                const query_context *qc) {
     const char *query = params ? json_str(params, "query") : NULL;
     if (!query) query = "";
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    for (int i = 0; i < MAX_DOCS; i++) {
-        if (!docs[i].in_use || !docs[i].root) continue;
+    for (int i = 0; i < qc->num_docs; i++) {
+        if (!qc->docs[i].root) continue;
         tj_node *const *top; int n;
-        doc_symbol_pool(&docs[i], &top, &n);
+        doc_symbol_pool(&qc->docs[i], &top, &n);
         if (!top) continue;
-        collect_workspace_symbols(doc, query, top, n, docs[i].uri, arr);
+        collect_workspace_symbols(doc, query, top, n, qc->docs[i].uri, arr);
     }
     return make_response(doc, id, arr);
 }
@@ -1840,67 +1855,185 @@ void server_dispatch_cancelled(Job *job) {
     yyjson_mut_doc_free(out_doc);
 }
 
-void server_dispatch_query(Job *job) {
+/* Pull the request's primary document URI out of `params`, accepting both
+ * the flat `textDocument` form and the nested `textDocumentPosition` form. */
+static const char *request_primary_uri(yyjson_val *params) {
+    if (!params) return NULL;
+    yyjson_val *td = yyjson_obj_get(params, "textDocument");
+    if (td) {
+        const char *uri = json_str(td, "uri");
+        if (uri) return uri;
+    }
+    yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
+    if (tdp) {
+        td = yyjson_obj_get(tdp, "textDocument");
+        if (td) return json_str(td, "uri");
+    }
+    return NULL;
+}
+
+/* Build the query_context for one query under docs_mutex by pinning the
+ * currently published workspace snapshot (an O(1) refcount bump) and pointing
+ * borrowed query_doc views at its ws_docs.  When @p want_all_docs is set
+ * (workspace/symbol) every document is included and there is no primary;
+ * otherwise the context holds the primary document plus its same-project
+ * siblings.  The primary's previous doc_snapshot is also ref'd for
+ * semanticTokens/delta.  Caller must hold docs_mutex. */
+static query_context *build_query_context_locked(const char *primary_uri,
+                                                 int want_all_docs) {
+    query_context *qc = calloc(1, sizeof(query_context));
+    if (!qc) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    qc->primary_idx = -1;
+
+    /* Resolve the primary document and retain its previous snapshot for
+     * delta, even if it is not represented in the snapshot yet. */
+    Document *primary_doc = primary_uri ? doc_find(primary_uri) : NULL;
+    if (primary_doc)
+        qc->prev_snap = docsnap_acquire(primary_doc->prev_snap);
+    const char *primary_canon = primary_doc ? primary_doc->uri : NULL;
+
+    workspace_snapshot *ws = ws_acquire(g_ws);
+    qc->ws = ws;
+    if (!ws) return qc;   /* no snapshot yet: empty context, handlers return null */
+
+    /* Locate the primary ws_doc and its project. */
+    int primary_proj = -1;
+    if (primary_canon) {
+        for (int i = 0; i < ws->num_docs; i++) {
+            doc_snapshot *s = ws->docs[i].snap;
+            if (s && s->uri && strcmp(s->uri, primary_canon) == 0) {
+                primary_proj = ws->docs[i].project_index;
+                break;
+            }
+        }
+    }
+
+    if (ws->num_docs > 0) {
+        qc->docs = calloc((size_t)ws->num_docs, sizeof(query_doc));
+        if (!qc->docs) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    }
+
+    int n = 0;
+    for (int i = 0; i < ws->num_docs; i++) {
+        ws_doc       *w = &ws->docs[i];
+        doc_snapshot *s = w->snap;
+        if (!s) continue;
+        int is_primary = (primary_canon && s->uri && strcmp(s->uri, primary_canon) == 0);
+        if (!is_primary && !want_all_docs) {
+            /* Same-project siblings only; an orphan's singleton project has
+             * no siblings, so the primary stands alone. */
+            if (primary_proj < 0 || w->project_index != primary_proj) continue;
+        }
+        qc->docs[n] = (query_doc){
+            .uri             = s->uri,
+            .text            = s->text,
+            .task_prefix     = w->task_prefix,
+            .account_prefix  = w->account_prefix,
+            .report_prefix   = w->report_prefix,
+            .resource_prefix = w->resource_prefix,
+            .root            = s->root,
+            .tok_spans       = s->tok_spans,
+            .num_tok_spans   = s->num_tok_spans,
+            .num_sem_entries = s->num_sem_entries,
+            .is_primary      = is_primary,
+            .snap            = s,
+        };
+        if (is_primary) qc->primary_idx = n;
+        n++;
+    }
+    qc->num_docs = n;
+
+    if (primary_proj >= 0 && primary_proj < ws->num_projects) {
+        qc->project_root = &ws->projects[primary_proj]->root;
+        qc->project_id   = ws->projects[primary_proj]->id;
+    }
+    return qc;
+}
+
+/* Only the state-mutating lifecycle methods run inline on the coordinator;
+ * every other query (semanticTokens included, now that its data and resultId
+ * live in the snapshot) is served lock-free from a pinned snapshot. */
+static int is_inline_query_method(const char *m) {
+    return strcmp(m, "initialize") == 0
+        || strcmp(m, "shutdown") == 0;
+}
+
+int server_coordinate_query(Job *job) {
     yyjson_val *root    = yyjson_doc_get_root(job->request_doc);
     yyjson_val *id_item = yyjson_obj_get(root, "id");
     yyjson_val *method  = yyjson_obj_get(root, "method");
     yyjson_val *params  = yyjson_obj_get(root, "params");
     const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
 
+    if (is_inline_query_method(m)) {
+        yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
+        yyjson_mut_val *resp = NULL;
+
+        pthread_mutex_lock(&docs_mutex);
+        if (strcmp(m, "initialize") == 0) {
+            resp = handle_initialize(out_doc, id_item, params);
+        } else {
+            resp = handle_shutdown(out_doc, id_item);
+        }
+        pthread_mutex_unlock(&docs_mutex);
+
+        if (resp) send_response(out_doc, resp);
+        yyjson_mut_doc_free(out_doc);
+        return 1;   /* handled inline; coordinator frees the Job */
+    }
+
+    /* Every other query is served from a pinned snapshot.  Build the context
+     * under the lock and let the coordinator hand the Job to the worker pool. */
+    int want_all_docs = (strcmp(m, "workspace/symbol") == 0);
+
+    pthread_mutex_lock(&docs_mutex);
+    const char *primary_uri = request_primary_uri(params);
+    job->context = build_query_context_locked(primary_uri, want_all_docs);
+    pthread_mutex_unlock(&docs_mutex);
+
+    return 0;   /* ownership transferred to the worker pool */
+}
+
+void server_run_query(Job *job) {
+    yyjson_val *root    = yyjson_doc_get_root(job->request_doc);
+    yyjson_val *id_item = yyjson_obj_get(root, "id");
+    yyjson_val *method  = yyjson_obj_get(root, "method");
+    yyjson_val *params  = yyjson_obj_get(root, "params");
+    const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
+
+    const query_context *qc = job->context;
+    const query_doc     *d  = query_context_primary(qc);
+
     yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *resp = NULL;
 
-    /* Locate the primary Document (if any) so handlers receive a stable
-     * pointer.  Held docs_mutex covers both lookup and handler execution. */
-    pthread_mutex_lock(&docs_mutex);
-
-    const char *primary_uri = NULL;
-    if (params) {
-        yyjson_val *td = yyjson_obj_get(params, "textDocument");
-        if (td) primary_uri = json_str(td, "uri");
-        if (!primary_uri) {
-            yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
-            if (tdp) {
-                td = yyjson_obj_get(tdp, "textDocument");
-                if (td) primary_uri = json_str(td, "uri");
-            }
-        }
-    }
-    Document *primary = primary_uri ? doc_find(primary_uri) : NULL;
-
-    if (strcmp(m, "initialize") == 0) {
-        resp = handle_initialize(out_doc, id_item, params);
-    } else if (strcmp(m, "shutdown") == 0) {
-        resp = handle_shutdown(out_doc, id_item);
-    } else if (strcmp(m, "textDocument/documentSymbol") == 0) {
-        resp = handle_document_symbol(out_doc, id_item, params, primary);
+    if (strcmp(m, "textDocument/documentSymbol") == 0) {
+        resp = handle_document_symbol(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/foldingRange") == 0) {
-        resp = handle_folding_range(out_doc, id_item, params, primary);
+        resp = handle_folding_range(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/codeLens") == 0) {
-        resp = handle_code_lens(out_doc, id_item, params, primary);
+        resp = handle_code_lens(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/hover") == 0) {
-        resp = handle_hover(out_doc, id_item, params, primary);
+        resp = handle_hover(out_doc, id_item, params, qc, d);
     } else if (strcmp(m, "textDocument/signatureHelp") == 0) {
-        resp = handle_signature_help(out_doc, id_item, params, primary);
+        resp = handle_signature_help(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/references") == 0) {
-        resp = handle_references(out_doc, id_item, params, primary);
+        resp = handle_references(out_doc, id_item, params, qc, d);
     } else if (strcmp(m, "textDocument/documentHighlight") == 0) {
-        resp = handle_document_highlight(out_doc, id_item, params, primary);
+        resp = handle_document_highlight(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/definition") == 0) {
-        resp = handle_definition(out_doc, id_item, params, primary);
+        resp = handle_definition(out_doc, id_item, params, qc, d);
     } else if (strcmp(m, "textDocument/completion") == 0) {
-        resp = handle_completion(out_doc, id_item, params, primary);
-    } else if (strcmp(m, "workspace/symbol") == 0) {
-        resp = handle_workspace_symbol(out_doc, id_item, params);
+        resp = handle_completion(out_doc, id_item, params, qc, d);
     } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
-        resp = handle_semantic_tokens_full(out_doc, id_item, params, primary);
+        resp = handle_semantic_tokens_full(out_doc, id_item, params, d);
     } else if (strcmp(m, "textDocument/semanticTokens/full/delta") == 0) {
-        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params, primary);
+        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params, qc, d);
+    } else if (strcmp(m, "workspace/symbol") == 0) {
+        resp = handle_workspace_symbol(out_doc, id_item, params, qc);
     } else if (id_item) {
         resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
     }
-
-    pthread_mutex_unlock(&docs_mutex);
 
     if (resp) send_response(out_doc, resp);
     yyjson_mut_doc_free(out_doc);
