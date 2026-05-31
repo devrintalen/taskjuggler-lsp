@@ -869,10 +869,16 @@ static void reload_compile_commands(void) {
     g_cc_attempted = 1;
 
     if (!g_cc_path) {
-        show_message(1,
-            "taskjuggler-lsp: no workspace root; cannot locate "
-            "compile_commands.json.  No documents will be loaded; "
-            "cross-file LSP features are disabled.");
+        /* No workspace root (rootUri null / no folder open), so we cannot
+         * locate compile_commands.json.  This is a legitimate single-file
+         * scenario, not an error: we no longer surface a window/showMessage
+         * here.  The degradation is instead reported per-file as warning
+         * diagnostics (see the TODO in publish_diagnostics()).
+         *
+         * TODO(diagnostics): set a global cc-status flag (e.g. g_cc_missing)
+         * here so publish_diagnostics() can key the "Missing
+         * compile_commands.json" warnings off it.  Parked until diagnostic
+         * collection is un-stubbed (see diagnostics.h). */
         return;
     }
 
@@ -906,11 +912,13 @@ static void reload_compile_commands(void) {
         }
         break;
     case CC_NOT_FOUND:
-        show_message(1,
-            "taskjuggler-lsp: compile_commands.json not found at workspace "
-            "root.  No documents will be loaded; create the file (a JSON "
-            "array of { \"file\": \"<path>\" } entries) to enable "
-            "cross-file LSP features.");
+        /* compile_commands.json is absent at the workspace root.  As with the
+         * no-root case above, this is reported per-file as warning diagnostics
+         * rather than a window/showMessage, so no notification is emitted here.
+         *
+         * TODO(diagnostics): set the global cc-status flag here too so
+         * publish_diagnostics() emits the "Missing compile_commands.json"
+         * warnings.  Parked until diagnostic collection is un-stubbed. */
         break;
     case CC_PARSE_ERROR:
         show_message(1,
