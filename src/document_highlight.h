@@ -21,30 +21,39 @@
 #pragma once
 
 #include "parser.h"
+#include "project_tree.h"
 #include <yyjson.h>
 
 /**
  * Build a DocumentHighlight[] JSON array for textDocument/documentHighlight.
  *
- * Works bidirectionally: triggers from both definition and reference sites.
- * For dotted dependency paths (e.g. `task1.subtask2`), each segment is
- * treated as an independent reference.
+ * Works bidirectionally: the caller resolves the cursor — whether it sits on
+ * a task declaration or on a dependency reference — to a single target task
+ * @p wanted in the pinned snapshot's ProjectNode tree (the same resolution
+ * definition/references use).  This builder then reports, scoped to the
+ * current document only (highlight ranges carry no URI):
+ *   - @p wanted's declaration identifier as Write (kind 3), when the
+ *     declaration lives in this document, and
+ *   - the matching identifier token of every dependency that resolves to
+ *     @p wanted as Read (kind 2).
  *
  * Values are allocated in @p doc; caller owns @p doc.
  *
- * @param doc          Destination mutable JSON document.
- * @param symbols      Top-level symbols of the current document.
- * @param num_symbols  Length of @p symbols.
- * @param tokens       Token spans of the current document.
- * @param num_tokens   Length of @p tokens.
- * @param cursor       Cursor position.
- * @return A JSON array of DocumentHighlight objects: the definition site
- *         tagged as Write (kind 3) and all same-document reference sites
- *         tagged as Read (kind 2).  NULL when @p cursor is not on an
- *         identifier that resolves to a symbol definition.
+ * @param doc           Destination mutable JSON document.
+ * @param project_root  The requesting project's synthetic root, the
+ *                      resolution context forwarded to project_dep_resolve().
+ * @param wanted        The resolved target task, or NULL.
+ * @param doc_uri       URI of the current document; scopes highlights to it.
+ * @param tokens        Token spans of the current document, used to pick the
+ *                      target segment's identifier token out of a dependency's
+ *                      full source range.
+ * @param num_tokens    Length of @p tokens.
+ * @return A JSON array of DocumentHighlight objects, or NULL when @p wanted
+ *         (or a required input) is NULL.
  */
 yyjson_mut_val *build_document_highlight_json(
     yyjson_mut_doc *doc,
-    tj_node *const *symbols, int num_symbols,
-    const TokenSpan *tokens, int num_tokens,
-    LspPos cursor);
+    ProjectNode *project_root,
+    const ProjectNode *wanted,
+    const char *doc_uri,
+    const TokenSpan *tokens, int num_tokens);
