@@ -116,10 +116,17 @@ def run_server(server_binary, input_messages):
     message.  Other requests are sent without waiting; the server may
     answer them in any order, and diff_output matches responses by id.
     """
+    # Suppress the asynchronous tj3 diagnostics workers so the golden output
+    # stays deterministic and independent of whether tj3 is installed (it is
+    # not in CI, and its messages are version-specific).  tj3 behavior is
+    # verified separately, not through the golden suite.
+    env = dict(os.environ, TASKJUGGLER_LSP_DISABLE_TJ3="1")
+
     process = subprocess.Popen(
         [server_binary],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
+        env=env,
     )
 
     collected = []

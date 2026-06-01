@@ -30,32 +30,62 @@
 #define DIAG_WARNING 2
 
 /**
- * A single error or warning to be reported to the editor.  Carried forward
- * from the previous design so that other modules referencing the type still
- * compile, even though diagnostic collection is currently dropped.
+ * A single error or warning to be reported to the editor.  @p message is
+ * owned (heap-allocated) by whoever holds the Diagnostic; @p source is a
+ * borrowed static string (e.g. "tj3") naming the producer, or NULL.
  */
 struct Diagnostic {
-    LspRange  range;
-    int       severity;
-    char     *message;
+    LspRange    range;
+    int         severity;
+    char       *message;     /**< owned */
+    const char *source;      /**< borrowed static literal; may be NULL */
 };
 
-/* ── LSP publishDiagnostics notification ─────────────────────────────────── *
+/* ── LSP publishDiagnostics notification ─────────────────────────────────── */
+
+/**
+ * Send a textDocument/publishDiagnostics notification for @p uri carrying
+ * @p count diagnostics from @p diags (which may be NULL when @p count is 0,
+ * clearing markers for the URI).
  *
- * TODO(diagnostics): Diagnostic collection was removed during the tj_node
- * refactor.  publish_diagnostics() is kept as a stub that publishes an
- * empty diagnostics array for @p uri so the client clears any previous
- * markers when documents are reparsed, opened, closed, or renamed.
- *
- * Restore richer behaviour once the global tj_node tree is in place and
- * dep resolution / unresolved-include / syntax-error reporting are
- * reintroduced.
+ * @param uri    Document URI the diagnostics apply to.
+ * @param diags  Borrowed array of @p count diagnostics (not freed here).
+ * @param count  Number of diagnostics.
  */
+void publish_diagnostics_list(const char *uri, const Diagnostic *diags, int count);
 
 /**
  * Send a textDocument/publishDiagnostics notification for @p uri with an
- * empty diagnostics array.
+ * empty diagnostics array (clears any previous markers for the URI).
  *
  * @param uri  Document URI whose diagnostics are being cleared.
  */
 void publish_diagnostics(const char *uri);
+
+/* ── Multi-source diagnostic aggregation (diag_set) ──────────────────────── *
+ *
+ * publishDiagnostics replaces *all* diagnostics for a URI in one message, so
+ * independent producers cannot publish separately — their diagnostics must be
+ * merged per-URI first.  A diag_set collects diagnostics keyed by URI from any
+ * number of sources, then flushes the merged result in one publish per URI.
+ */
+
+/** Opaque ordered map URI -> growable Diagnostic[]. */
+typedef struct diag_set diag_set;
+
+/** Allocate an empty diag_set. */
+diag_set *diag_set_new(void);
+
+/** Append @p d to the entry for @p uri (created on first use).  Takes
+ *  ownership of @p d.message; @p uri is copied. */
+void diag_set_add(diag_set *s, const char *uri, Diagnostic d);
+
+/** Free @p s and every diagnostic message it owns.  NULL-safe. */
+void diag_set_free(diag_set *s);
+
+/**
+ * Publish @p current: one notification per URI it holds.  Additionally emit an
+ * empty array for every URI present in @p previous but absent from @p current,
+ * so diagnostics that went away are cleared.  Either argument may be NULL.
+ */
+void diag_set_publish(const diag_set *current, const diag_set *previous);

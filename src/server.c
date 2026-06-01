@@ -52,6 +52,8 @@
 #include "workspace_symbol.h"
 #include "code_lens.h"
 #include "compile_commands.h"
+#include "pathutil.h"
+#include "diag_worker.h"
 #include "version.h"
 
 #include <yyjson.h>
@@ -344,12 +346,12 @@ static char *percent_encode_path(const char *src) {
     return dst;
 }
 
-static char *uri_to_path(const char *uri) {
+char *uri_to_path(const char *uri) {
     if (!uri || strncmp(uri, "file://", 7) != 0) return NULL;
     return percent_decode(uri + 7);
 }
 
-static char *path_to_uri(const char *path) {
+char *path_to_uri(const char *path) {
     char *encoded = percent_encode_path(path);
     size_t enc_len = strlen(encoded);
     char *uri = malloc(7 + enc_len + 1);
@@ -822,6 +824,7 @@ static workspace_snapshot *build_workspace_snapshot(void) {
         Document *root = &docs[i];
         if (!root->in_use || !root->is_cc_root || !root->snap) continue;
         int pidx = ws_add_project(ws, root->uri);
+        ws->projects[pidx]->from_compile_commands = 1;
         project_populate_from_root(ws, pidx, root, slot_to_wsdoc);
     }
 
@@ -1049,6 +1052,11 @@ static void revalidate_all_docs(void) {
     maybe_reload_compile_commands();
     publish_workspace_snapshot();
     republish_all_diagnostics();
+    /* Hand the freshly published snapshot to the per-project diagnostics
+     * workers (spawning/retiring them as projects appear/disappear).  Every
+     * snapshot-updating notification funnels through here, so this single
+     * call covers didOpen/didChange/didClose/watched-files/rename/cc-reload. */
+    diag_registry_update(g_ws);
     dump_docs_to_stderr("revalidate_all_docs", g_ws);
 }
 
@@ -2080,6 +2088,7 @@ void server_process(const char *json_text) {
     if (strcmp(m, "exit") == 0) {
         yyjson_doc_free(in_doc);
         threadpool_stop();
+        diag_registry_shutdown();
         exit(0);
     }
 
