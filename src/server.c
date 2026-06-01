@@ -59,7 +59,6 @@
 #include <yyjson.h>
 #include <ctype.h>
 #include <inttypes.h>
-#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -828,7 +827,12 @@ static workspace_snapshot *build_workspace_snapshot(void) {
         w->account_prefix  = d->account_prefix  ? strdup(d->account_prefix)  : NULL;
         w->report_prefix   = d->report_prefix   ? strdup(d->report_prefix)   : NULL;
         w->resource_prefix = d->resource_prefix ? strdup(d->resource_prefix) : NULL;
+        w->disk_only       = d->disk_only;
     }
+
+    /* Stamp the cc-status so the diagnostics workers can emit the per-file
+     * "Missing compile_commands.json" warnings off the immutable snapshot. */
+    ws->cc_missing = g_cc_missing;
 
     /* Pass 1: compile_commands roots + their include closures. */
     for (int i = 0; i < MAX_DOCS; i++) {
@@ -853,83 +857,17 @@ static workspace_snapshot *build_workspace_snapshot(void) {
     return ws;
 }
 
-/* True when @p uri ends with @p suffix (case-sensitive). */
-static int uri_has_suffix(const char *uri, const char *suffix) {
-    size_t lu = strlen(uri), ls = strlen(suffix);
-    return lu >= ls && strcmp(uri + (lu - ls), suffix) == 0;
-}
-
-/* Append one DIAG_WARNING at @p range carrying a heap copy of @p message to a
- * growable Diagnostic array (length *count, capacity *cap).  Used to build the
- * per-file "Missing compile_commands.json" markers. */
-static void push_warning(Diagnostic **diags, int *count, int *cap,
-                         LspRange range, const char *message) {
-    if (*count >= *cap) {
-        int nc = *cap ? *cap * 2 : 4;
-        Diagnostic *tmp = realloc(*diags, (size_t)nc * sizeof(Diagnostic));
-        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        *diags = tmp;
-        *cap   = nc;
-    }
-    Diagnostic *d = &(*diags)[(*count)++];
-    d->range    = range;
-    d->severity = DIAG_WARNING;
-    d->source   = "taskjuggler-lsp";
-    d->message  = strdup(message);
-}
-
-/* Collect the "Missing compile_commands.json" warnings for editor-managed
- * document @p d into a growable Diagnostic array.  Only meaningful when
- * g_cc_missing is set, i.e. no project closures were loaded:
- *
- *   - .tji fragments are parsed in isolation (no including .tjp), so emit one
- *     warning at the top of the file.
- *   - .tjp files emit one warning per `include` directive, located on the
- *     KW_INCLUDE token, since those includes are followed stand-alone rather
- *     than through a compile_commands.json closure.  A .tjp with no includes
- *     loses nothing cross-file and gets no warning. */
-static void collect_cc_missing_diags(const Document *d, Diagnostic **diags,
-                                     int *count, int *cap) {
-    if (uri_has_suffix(d->uri, ".tji")) {
-        LspRange r = { { 0, 0 }, { 0, (uint32_t)INT_MAX } };
-        push_warning(diags, count, cap, r,
-            "Missing compile_commands.json, this file will be parsed "
-            "stand-alone, not as part of any other loaded .tjp file that "
-            "includes it.");
-        return;
-    }
-    const doc_snapshot *s = d->snap;
-    if (!s) return;
-    for (int t = 0; t < s->num_tok_spans; t++) {
-        if (s->tok_spans[t].token_kind != KW_INCLUDE) continue;
-        LspRange r = { s->tok_spans[t].start, s->tok_spans[t].end };
-        push_warning(diags, count, cap, r,
-            "Missing compile_commands.json, cross-file LSP features are "
-            "disabled.");
-    }
-}
-
-/* Publish diagnostics for every editor-managed document after a notification.
- * Each such document gets exactly one publishDiagnostics (so stale markers
- * from the pre-refactor diagnostic stream are cleared), carrying the per-file
- * "Missing compile_commands.json" warnings when g_cc_missing is set and an
- * empty array otherwise.  tj3 diagnostics are layered on top asynchronously by
- * the per-project workers (diag_registry_update). */
+/* Publish an empty diagnostics baseline for every editor-managed document
+ * after a notification so the client clears stale markers from the previous
+ * revision.  The diagnostics workers (diag_registry_update) then layer the
+ * real markers on top asynchronously: tj3 results plus, when no usable
+ * compile_commands.json is present, the per-file "Missing
+ * compile_commands.json" warnings (see diag_collect_cc_missing). */
 static void republish_all_diagnostics(void) {
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
         if (docs[i].disk_only) continue;
-
-        Diagnostic *diags = NULL;
-        int count = 0, cap = 0;
-        if (g_cc_missing)
-            collect_cc_missing_diags(&docs[i], &diags, &count, &cap);
-
-        publish_diagnostics_list(docs[i].uri, diags, count);
-
-        for (int j = 0; j < count; j++)
-            free(diags[j].message);
-        free(diags);
+        publish_diagnostics(docs[i].uri);
     }
 }
 

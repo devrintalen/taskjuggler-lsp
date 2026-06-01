@@ -101,103 +101,108 @@
   },
   {
     "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/main.tjp",
-      "diagnostics": [
-        {
-          "range": {
-            "start": {
-              "line": 2,
-              "character": 0
-            },
-            "end": {
-              "line": 2,
-              "character": 7
-            }
-          },
-          "severity": 2,
-          "source": "taskjuggler-lsp",
-          "message": "Missing compile_commands.json, cross-file LSP features are disabled."
-        },
-        {
-          "range": {
-            "start": {
-              "line": 3,
-              "character": 0
-            },
-            "end": {
-              "line": 3,
-              "character": 7
-            }
-          },
-          "severity": 2,
-          "source": "taskjuggler-lsp",
-          "message": "Missing compile_commands.json, cross-file LSP features are disabled."
-        }
+    "id": 5,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": {
+      "resultId": "1",
+      "data": [
+        0,
+        0,
+        8,
+        0,
+        0,
+        0,
+        9,
+        3,
+        4,
+        0,
+        0,
+        4,
+        11,
+        2,
+        0
       ]
     }
   },
   {
     "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/main.tjp",
-      "diagnostics": [
-        {
-          "range": {
-            "start": {
-              "line": 2,
-              "character": 0
-            },
-            "end": {
-              "line": 2,
-              "character": 7
-            }
-          },
-          "severity": 2,
-          "source": "taskjuggler-lsp",
-          "message": "Missing compile_commands.json, cross-file LSP features are disabled."
-        },
-        {
-          "range": {
-            "start": {
-              "line": 3,
-              "character": 0
-            },
-            "end": {
-              "line": 3,
-              "character": 7
-            }
-          },
-          "severity": 2,
-          "source": "taskjuggler-lsp",
-          "message": "Missing compile_commands.json, cross-file LSP features are disabled."
-        }
+    "id": 4,
+    "result": {
+      "resultId": "1",
+      "data": [
+        0,
+        0,
+        4,
+        0,
+        0,
+        0,
+        5,
+        2,
+        4,
+        0,
+        0,
+        3,
+        6,
+        2,
+        0
       ]
     }
   },
   {
     "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/resources.tji",
-      "diagnostics": [
-        {
-          "range": {
-            "start": {
-              "line": 0,
-              "character": 0
-            },
-            "end": {
-              "line": 0,
-              "character": 2147483647
-            }
-          },
-          "severity": 2,
-          "source": "taskjuggler-lsp",
-          "message": "Missing compile_commands.json, this file will be parsed stand-alone, not as part of any other loaded .tjp file that includes it."
-        }
+    "id": 2,
+    "result": {
+      "resultId": "1",
+      "data": [
+        0,
+        0,
+        7,
+        0,
+        0,
+        0,
+        8,
+        4,
+        4,
+        0,
+        0,
+        5,
+        16,
+        2,
+        0,
+        0,
+        17,
+        10,
+        3,
+        0,
+        0,
+        11,
+        3,
+        3,
+        0,
+        2,
+        0,
+        7,
+        5,
+        0,
+        0,
+        8,
+        15,
+        2,
+        0,
+        1,
+        0,
+        7,
+        5,
+        0,
+        0,
+        8,
+        11,
+        2,
+        0
       ]
     }
   },
@@ -287,112 +292,5 @@
         }
       ]
     }
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 2,
-    "result": {
-      "resultId": "1",
-      "data": [
-        0,
-        0,
-        7,
-        0,
-        0,
-        0,
-        8,
-        4,
-        4,
-        0,
-        0,
-        5,
-        16,
-        2,
-        0,
-        0,
-        17,
-        10,
-        3,
-        0,
-        0,
-        11,
-        3,
-        3,
-        0,
-        2,
-        0,
-        7,
-        5,
-        0,
-        0,
-        8,
-        15,
-        2,
-        0,
-        1,
-        0,
-        7,
-        5,
-        0,
-        0,
-        8,
-        11,
-        2,
-        0
-      ]
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 3,
-    "result": {
-      "resultId": "1",
-      "data": [
-        0,
-        0,
-        8,
-        0,
-        0,
-        0,
-        9,
-        3,
-        4,
-        0,
-        0,
-        4,
-        11,
-        2,
-        0
-      ]
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 4,
-    "result": {
-      "resultId": "1",
-      "data": [
-        0,
-        0,
-        4,
-        0,
-        0,
-        0,
-        5,
-        2,
-        4,
-        0,
-        0,
-        3,
-        6,
-        2,
-        0
-      ]
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 5,
-    "result": null
   }
 ]

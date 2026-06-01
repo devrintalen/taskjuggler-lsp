@@ -101,79 +101,23 @@
   },
   {
     "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/tasks.tji",
-      "diagnostics": [
-        {
-          "range": {
-            "start": {
-              "line": 0,
-              "character": 0
-            },
-            "end": {
-              "line": 0,
-              "character": 2147483647
-            }
-          },
-          "severity": 2,
-          "source": "taskjuggler-lsp",
-          "message": "Missing compile_commands.json, this file will be parsed stand-alone, not as part of any other loaded .tjp file that includes it."
-        }
-      ]
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/tasks.tji",
-      "diagnostics": [
-        {
-          "range": {
-            "start": {
-              "line": 0,
-              "character": 0
-            },
-            "end": {
-              "line": 0,
-              "character": 2147483647
-            }
-          },
-          "severity": 2,
-          "source": "taskjuggler-lsp",
-          "message": "Missing compile_commands.json, this file will be parsed stand-alone, not as part of any other loaded .tjp file that includes it."
-        }
-      ]
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/project.tjp",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/tasks.tji",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file:///test/project.tjp",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
     "id": 2,
     "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/project.tjp",
+      "diagnostics": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file:///test/tasks.tji",
+      "diagnostics": []
+    }
   }
 ]

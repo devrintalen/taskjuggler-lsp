@@ -101,6 +101,34 @@
   },
   {
     "jsonrpc": "2.0",
+    "id": 3,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": [
+      {
+        "name": "\"Shared\"",
+        "kind": 12,
+        "location": {
+          "uri": "file://${CASE_DIR}/workspace/shared.tji",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 5
+            },
+            "end": {
+              "line": 0,
+              "character": 16
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file://${CASE_DIR}/workspace/main.tjp",
@@ -137,33 +165,5 @@
         }
       ]
     }
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 3,
-    "result": null
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 2,
-    "result": [
-      {
-        "name": "\"Shared\"",
-        "kind": 12,
-        "location": {
-          "uri": "file://${CASE_DIR}/workspace/shared.tji",
-          "range": {
-            "start": {
-              "line": 0,
-              "character": 5
-            },
-            "end": {
-              "line": 0,
-              "character": 16
-            }
-          }
-        }
-      }
-    ]
   }
 ]

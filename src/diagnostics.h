@@ -89,3 +89,23 @@ void diag_set_free(diag_set *s);
  * so diagnostics that went away are cleared.  Either argument may be NULL.
  */
 void diag_set_publish(const diag_set *current, const diag_set *previous);
+
+/* ── Server-level diagnostics ────────────────────────────────────────────── */
+
+struct workspace_snapshot;
+struct ws_project;
+
+/**
+ * Collect the "Missing compile_commands.json" warnings for @p proj into
+ * @p out.  A no-op unless @p ws was built with no usable compile_commands.json
+ * (ws->cc_missing): in that state no project closures are loaded and every
+ * editor file is parsed stand-alone, so each editor-managed member document of
+ * @p proj gets a warning — one per `include` directive in a .tjp (on its
+ * KW_INCLUDE token), or one at the top of a stand-alone .tji.  Added to the
+ * same diag_set the tj3 runner fills so the two sources merge per URI.
+ *
+ * Forward-declared struct pointers keep this header free of the snapshot
+ * layer; callers (the diagnostics worker) include query_context.h.
+ */
+void diag_collect_cc_missing(const struct workspace_snapshot *ws,
+                             const struct ws_project *proj, diag_set *out);
