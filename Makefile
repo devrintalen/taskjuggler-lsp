@@ -12,7 +12,7 @@ GEN_HDR  = src/grammar.tab.h
 SRC = src/main.c src/server.c src/parser.c src/diagnostics.c \
       src/job_queue.c src/threadpool.c src/compile_commands.c \
       $(GEN_LEX) $(GEN_GRAM) \
-      src/document_symbol.c src/folding_range.c src/hover.c src/signature.c src/completion.c src/semantic_tokens.c src/semantic_tokens_delta.c src/dependency.c src/definition.c src/references.c src/document_highlight.c src/workspace_symbol.c src/code_lens.c src/project_tree.c src/query_context.c
+      src/document_symbol.c src/folding_range.c src/hover.c src/signature.c src/completion.c src/semantic_tokens.c src/semantic_tokens_delta.c src/dependency.c src/definition.c src/references.c src/document_highlight.c src/workspace_symbol.c src/code_lens.c src/project_tree.c src/query_context.c src/tj3.c src/diag_worker.c
 
 OBJ = $(SRC:.c=.o)
 BIN = taskjuggler-lsp

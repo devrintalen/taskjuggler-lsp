@@ -19,6 +19,7 @@ import argparse
 import difflib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -106,7 +107,27 @@ def _wait_for_response_id(collected, expected_id, deadline_seconds=5.0):
     return False
 
 
-def run_server(server_binary, input_messages):
+def _wait_quiescent(collected, quiet_seconds=0.5, max_wait=15.0):
+    """Block until @p collected stops growing for @p quiet_seconds (or timeout).
+
+    Used for tj3 cases, whose diagnostics arrive asynchronously from a worker
+    thread after the triggering notification is processed.  We wait for the
+    output stream to go quiet rather than guessing a fixed delay.
+    """
+    import time
+    last_len = -1
+    last_change = time.monotonic()
+    deadline = last_change + max_wait
+    while time.monotonic() < deadline:
+        if len(collected) != last_len:
+            last_len = len(collected)
+            last_change = time.monotonic()
+        elif time.monotonic() - last_change >= quiet_seconds:
+            return
+        time.sleep(0.02)
+
+
+def run_server(server_binary, input_messages, use_tj3=False):
     """Start the server, send all messages, and return the collected output.
 
     Honors LSP spec ordering for `initialize`: per the spec, the client
@@ -115,11 +136,21 @@ def run_server(server_binary, input_messages):
     harness blocks until that response arrives before sending the next
     message.  Other requests are sent without waiting; the server may
     answer them in any order, and diff_output matches responses by id.
+
+    By default the asynchronous tj3 diagnostics workers are suppressed so the
+    golden output stays deterministic and independent of whether tj3 is
+    installed.  Cases that opt in (a `uses_tj3` marker file) run with tj3
+    enabled and wait for the async diagnostics to settle before closing.
     """
+    env = dict(os.environ)
+    if not use_tj3:
+        env["TASKJUGGLER_LSP_DISABLE_TJ3"] = "1"
+
     process = subprocess.Popen(
         [server_binary],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
+        env=env,
     )
 
     collected = []
@@ -137,6 +168,11 @@ def run_server(server_binary, input_messages):
                 and message.get('method') == 'initialize' \
                 and 'id' in message:
             _wait_for_response_id(collected, message['id'])
+
+    # tj3 diagnostics are published asynchronously; let them settle so the
+    # captured stream is complete and deterministic before we close stdin.
+    if use_tj3:
+        _wait_quiescent(collected)
 
     process.stdin.close()
     reader.join(timeout=10.0)
@@ -291,11 +327,19 @@ def run_test_case(server_binary, case_dir, record):
         print(f"  {yellow('SKIP')}  {case_name}  {dim('no input.json')}")
         return True
 
+    # A `uses_tj3` marker opts the case into running the real tj3 compiler.
+    # Such cases need tj3 on PATH; skip them (rather than fail) where it is
+    # absent, so the rest of the suite stays runnable without tj3 installed.
+    use_tj3 = os.path.isfile(os.path.join(case_dir, 'uses_tj3'))
+    if use_tj3 and shutil.which('tj3') is None:
+        print(f"  {yellow('SKIP')}  {case_name}  {dim('tj3 not on PATH')}")
+        return True
+
     abs_case_dir = os.path.abspath(case_dir)
     with open(input_path, 'r') as input_file:
         input_messages = apply_substitutions(json.load(input_file), abs_case_dir)
 
-    actual = run_server(server_binary, input_messages)
+    actual = run_server(server_binary, input_messages, use_tj3=use_tj3)
 
     if record:
         redacted = apply_redactions(actual, abs_case_dir)

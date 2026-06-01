@@ -139,6 +139,7 @@ typedef struct ws_doc {
 typedef struct ws_project {
     char        *id;              /**< owned; canonical .tjp URI or doc URI */
     ProjectNode  root;            /**< embedded synthetic root over all kinds */
+    int          from_compile_commands; /**< 1 for a compile_commands.json root; 0 for an orphan singleton */
 } ws_project;
 
 /** Immutable, refcounted cross-file view of the whole workspace. */
