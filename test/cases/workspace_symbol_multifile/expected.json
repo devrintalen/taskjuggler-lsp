@@ -104,7 +104,38 @@
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file:///test/project.tjp",
-      "diagnostics": []
+      "diagnostics": [
+        {
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 0
+            },
+            "end": {
+              "line": 2,
+              "character": 7
+            }
+          },
+          "severity": 2,
+          "source": "taskjuggler-lsp",
+          "message": "Missing compile_commands.json, cross-file LSP features are disabled."
+        },
+        {
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 0
+            },
+            "end": {
+              "line": 3,
+              "character": 7
+            }
+          },
+          "severity": 2,
+          "source": "taskjuggler-lsp",
+          "message": "Missing compile_commands.json, cross-file LSP features are disabled."
+        }
+      ]
     }
   },
   {
@@ -112,7 +143,38 @@
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file:///test/project.tjp",
-      "diagnostics": []
+      "diagnostics": [
+        {
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 0
+            },
+            "end": {
+              "line": 2,
+              "character": 7
+            }
+          },
+          "severity": 2,
+          "source": "taskjuggler-lsp",
+          "message": "Missing compile_commands.json, cross-file LSP features are disabled."
+        },
+        {
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 0
+            },
+            "end": {
+              "line": 3,
+              "character": 7
+            }
+          },
+          "severity": 2,
+          "source": "taskjuggler-lsp",
+          "message": "Missing compile_commands.json, cross-file LSP features are disabled."
+        }
+      ]
     }
   },
   {
@@ -120,7 +182,23 @@
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file:///test/tasks.tji",
-      "diagnostics": []
+      "diagnostics": [
+        {
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 0
+            },
+            "end": {
+              "line": 0,
+              "character": 2147483647
+            }
+          },
+          "severity": 2,
+          "source": "taskjuggler-lsp",
+          "message": "Missing compile_commands.json, this file will be parsed stand-alone, not as part of any other loaded .tjp file that includes it."
+        }
+      ]
     }
   },
   {
@@ -128,7 +206,38 @@
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file:///test/project.tjp",
-      "diagnostics": []
+      "diagnostics": [
+        {
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 0
+            },
+            "end": {
+              "line": 2,
+              "character": 7
+            }
+          },
+          "severity": 2,
+          "source": "taskjuggler-lsp",
+          "message": "Missing compile_commands.json, cross-file LSP features are disabled."
+        },
+        {
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 0
+            },
+            "end": {
+              "line": 3,
+              "character": 7
+            }
+          },
+          "severity": 2,
+          "source": "taskjuggler-lsp",
+          "message": "Missing compile_commands.json, cross-file LSP features are disabled."
+        }
+      ]
     }
   },
   {
@@ -136,7 +245,23 @@
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file:///test/tasks.tji",
-      "diagnostics": []
+      "diagnostics": [
+        {
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 0
+            },
+            "end": {
+              "line": 0,
+              "character": 2147483647
+            }
+          },
+          "severity": 2,
+          "source": "taskjuggler-lsp",
+          "message": "Missing compile_commands.json, this file will be parsed stand-alone, not as part of any other loaded .tjp file that includes it."
+        }
+      ]
     }
   },
   {
@@ -144,7 +269,23 @@
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file:///test/resources.tji",
-      "diagnostics": []
+      "diagnostics": [
+        {
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 0
+            },
+            "end": {
+              "line": 0,
+              "character": 2147483647
+            }
+          },
+          "severity": 2,
+          "source": "taskjuggler-lsp",
+          "message": "Missing compile_commands.json, this file will be parsed stand-alone, not as part of any other loaded .tjp file that includes it."
+        }
+      ]
     }
   },
   {
@@ -299,6 +440,11 @@
   },
   {
     "jsonrpc": "2.0",
+    "id": 5,
+    "result": []
+  },
+  {
+    "jsonrpc": "2.0",
     "id": 4,
     "result": [
       {
@@ -320,11 +466,6 @@
         }
       }
     ]
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 5,
-    "result": []
   },
   {
     "jsonrpc": "2.0",

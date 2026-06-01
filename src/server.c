@@ -59,6 +59,7 @@
 #include <yyjson.h>
 #include <ctype.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -140,6 +141,16 @@ static time_t g_cc_mtime_sec   = 0;
 static long   g_cc_mtime_nsec  = 0;
 static off_t  g_cc_size        = 0;
 static int    g_cc_attempted   = 0;
+
+/* Set by reload_compile_commands() whenever the server has no usable
+ * compile_commands.json (no workspace root, or the file is absent): in that
+ * state no project closures are loaded and every editor file is parsed
+ * stand-alone.  republish_all_diagnostics() keys the per-file "Missing
+ * compile_commands.json" warnings off this flag.  A malformed file
+ * (CC_PARSE_ERROR / CC_SCHEMA_ERROR) is a distinct config error surfaced via
+ * window/showMessage, not described by these warnings, so it leaves the flag
+ * clear. */
+static int    g_cc_missing     = 0;
 
 /* Forward declarations. */
 static char *normalize_uri(const char *raw_uri);
@@ -842,14 +853,83 @@ static workspace_snapshot *build_workspace_snapshot(void) {
     return ws;
 }
 
-/* Republish (now-empty) diagnostics for editor-managed documents after a
- * notification so the client clears stale markers from the pre-refactor
- * diagnostic stream. */
+/* True when @p uri ends with @p suffix (case-sensitive). */
+static int uri_has_suffix(const char *uri, const char *suffix) {
+    size_t lu = strlen(uri), ls = strlen(suffix);
+    return lu >= ls && strcmp(uri + (lu - ls), suffix) == 0;
+}
+
+/* Append one DIAG_WARNING at @p range carrying a heap copy of @p message to a
+ * growable Diagnostic array (length *count, capacity *cap).  Used to build the
+ * per-file "Missing compile_commands.json" markers. */
+static void push_warning(Diagnostic **diags, int *count, int *cap,
+                         LspRange range, const char *message) {
+    if (*count >= *cap) {
+        int nc = *cap ? *cap * 2 : 4;
+        Diagnostic *tmp = realloc(*diags, (size_t)nc * sizeof(Diagnostic));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        *diags = tmp;
+        *cap   = nc;
+    }
+    Diagnostic *d = &(*diags)[(*count)++];
+    d->range    = range;
+    d->severity = DIAG_WARNING;
+    d->source   = "taskjuggler-lsp";
+    d->message  = strdup(message);
+}
+
+/* Collect the "Missing compile_commands.json" warnings for editor-managed
+ * document @p d into a growable Diagnostic array.  Only meaningful when
+ * g_cc_missing is set, i.e. no project closures were loaded:
+ *
+ *   - .tji fragments are parsed in isolation (no including .tjp), so emit one
+ *     warning at the top of the file.
+ *   - .tjp files emit one warning per `include` directive, located on the
+ *     KW_INCLUDE token, since those includes are followed stand-alone rather
+ *     than through a compile_commands.json closure.  A .tjp with no includes
+ *     loses nothing cross-file and gets no warning. */
+static void collect_cc_missing_diags(const Document *d, Diagnostic **diags,
+                                     int *count, int *cap) {
+    if (uri_has_suffix(d->uri, ".tji")) {
+        LspRange r = { { 0, 0 }, { 0, (uint32_t)INT_MAX } };
+        push_warning(diags, count, cap, r,
+            "Missing compile_commands.json, this file will be parsed "
+            "stand-alone, not as part of any other loaded .tjp file that "
+            "includes it.");
+        return;
+    }
+    const doc_snapshot *s = d->snap;
+    if (!s) return;
+    for (int t = 0; t < s->num_tok_spans; t++) {
+        if (s->tok_spans[t].token_kind != KW_INCLUDE) continue;
+        LspRange r = { s->tok_spans[t].start, s->tok_spans[t].end };
+        push_warning(diags, count, cap, r,
+            "Missing compile_commands.json, cross-file LSP features are "
+            "disabled.");
+    }
+}
+
+/* Publish diagnostics for every editor-managed document after a notification.
+ * Each such document gets exactly one publishDiagnostics (so stale markers
+ * from the pre-refactor diagnostic stream are cleared), carrying the per-file
+ * "Missing compile_commands.json" warnings when g_cc_missing is set and an
+ * empty array otherwise.  tj3 diagnostics are layered on top asynchronously by
+ * the per-project workers (diag_registry_update). */
 static void republish_all_diagnostics(void) {
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
         if (docs[i].disk_only) continue;
-        publish_diagnostics(docs[i].uri);
+
+        Diagnostic *diags = NULL;
+        int count = 0, cap = 0;
+        if (g_cc_missing)
+            collect_cc_missing_diags(&docs[i], &diags, &count, &cap);
+
+        publish_diagnostics_list(docs[i].uri, diags, count);
+
+        for (int j = 0; j < count; j++)
+            free(diags[j].message);
+        free(diags);
     }
 }
 
@@ -876,14 +956,14 @@ static void reload_compile_commands(void) {
          * locate compile_commands.json.  This is a legitimate single-file
          * scenario, not an error: we no longer surface a window/showMessage
          * here.  The degradation is instead reported per-file as warning
-         * diagnostics (see the TODO in publish_diagnostics()).
-         *
-         * TODO(diagnostics): set a global cc-status flag (e.g. g_cc_missing)
-         * here so publish_diagnostics() can key the "Missing
-         * compile_commands.json" warnings off it.  Parked until diagnostic
-         * collection is un-stubbed (see diagnostics.h). */
+         * diagnostics by republish_all_diagnostics(), gated on g_cc_missing. */
+        g_cc_missing = 1;
         return;
     }
+
+    /* Cleared up front; re-set below only if the file is absent.  A malformed
+     * file keeps it clear (its showMessage already describes the problem). */
+    g_cc_missing = 0;
 
     struct stat st;
     if (stat(g_cc_path, &st) == 0) {
@@ -917,11 +997,9 @@ static void reload_compile_commands(void) {
     case CC_NOT_FOUND:
         /* compile_commands.json is absent at the workspace root.  As with the
          * no-root case above, this is reported per-file as warning diagnostics
-         * rather than a window/showMessage, so no notification is emitted here.
-         *
-         * TODO(diagnostics): set the global cc-status flag here too so
-         * publish_diagnostics() emits the "Missing compile_commands.json"
-         * warnings.  Parked until diagnostic collection is un-stubbed. */
+         * by republish_all_diagnostics() rather than a window/showMessage, so
+         * no notification is emitted here. */
+        g_cc_missing = 1;
         break;
     case CC_PARSE_ERROR:
         show_message(1,

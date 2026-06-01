@@ -104,8 +104,29 @@
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file://${CASE_DIR}/workspace/project.tjp",
-      "diagnostics": []
+      "diagnostics": [
+        {
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 0
+            },
+            "end": {
+              "line": 1,
+              "character": 7
+            }
+          },
+          "severity": 2,
+          "source": "taskjuggler-lsp",
+          "message": "Missing compile_commands.json, cross-file LSP features are disabled."
+        }
+      ]
     }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "result": null
   },
   {
     "jsonrpc": "2.0",
@@ -322,10 +343,5 @@
         }
       ]
     }
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 4,
-    "result": null
   }
 ]

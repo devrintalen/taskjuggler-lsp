@@ -78,34 +78,14 @@ void publish_diagnostics(const char *uri) {
     publish_diagnostics_list(uri, NULL, 0);
 }
 
-/* TODO(diagnostics): "Missing compile_commands.json" warnings.  This is a
- * separate, server-level diagnostic source, independent of the tj3 diagnostics
- * and still unimplemented.  When the server has no usable compile_commands.json
- * (no workspace root, or the file is absent), it loads no project closures and
- * every editor file is parsed stand-alone.  We replaced the old
- * window/showMessage with per-file warning diagnostics; produce them into a
- * diag_set (so they merge with any other source for the same URI) and publish
- * via diag_set_publish, gated on a global cc-status flag set in
- * reload_compile_commands() (see the two TODO(diagnostics) markers there —
- * e.g. g_cc_missing).  Two cases:
- *
- *   1. .tjp files — one Warning per `include` directive, located at the
- *      include statement.  The IncludeRef carries no range, but each directive
- *      is a KW_INCLUDE token in the document's token spans; scan for
- *      kind == KW_INCLUDE and use that span's start/end.  Message similar to:
- *        "Missing compile_commands.json, cross-file LSP features are
- *         disabled."
- *
- *   2. .tji files — one Warning at the top of the file (range covering
- *      line 0), since an include fragment opened with no including .tjp is
- *      parsed in isolation.  Message similar to:
- *        "Missing compile_commands.json, this file will be parsed
- *         stand-alone, not as part of any other loaded .tjp file that
- *         includes it."
- *
- * Both use DIAG_WARNING severity.  Reaching the token spans for the URI needs
- * a small accessor over the server's docs[] (or building this source in
- * server.c, where the document store lives). */
+/* The "Missing compile_commands.json" warnings are a separate, server-level
+ * diagnostic source, independent of the tj3 diagnostics.  When the server has
+ * no usable compile_commands.json (no workspace root, or the file is absent)
+ * it loads no project closures and every editor file is parsed stand-alone;
+ * republish_all_diagnostics() in server.c then emits one DIAG_WARNING per
+ * `include` directive in a .tjp (located on its KW_INCLUDE token) and one at
+ * the top of every stand-alone .tji.  That builder lives in server.c because
+ * it reads the document store (docs[] and each doc's token spans) directly. */
 
 /* ── diag_set ────────────────────────────────────────────────────────────── */
 
