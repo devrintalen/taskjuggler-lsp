@@ -39,6 +39,7 @@ typedef struct diag_worker {
 
     workspace_snapshot *pending;     /* newest unstarted request; holds 1 ref */
     int              stop;
+    int              clear_on_stop;  /* publish empties on stop (retired project) or not (shutdown) */
 
     diag_set        *last_published; /* owned; what this worker last emitted */
 
@@ -90,7 +91,10 @@ static void *diag_worker_main(void *arg) {
         run_once(w, ws);
     }
 
-    clear_published(w->last_published);
+    /* Clearing only makes sense when a project was retired mid-session (drop
+     * its stale markers); at server shutdown the client is going away, so we
+     * skip it — which also keeps the output stream deterministic for tests. */
+    if (w->clear_on_stop) clear_published(w->last_published);
     diag_set_free(w->last_published);
     w->last_published = NULL;
     return NULL;
@@ -122,8 +126,9 @@ static void diag_worker_request(diag_worker *w, workspace_snapshot *ws) {
     pthread_mutex_unlock(&w->lock);
 }
 
-static void diag_worker_retire(diag_worker *w) {
+static void diag_worker_retire(diag_worker *w, int clear_on_stop) {
     pthread_mutex_lock(&w->lock);
+    w->clear_on_stop = clear_on_stop;
     w->stop = 1;
     pthread_cond_signal(&w->cond);
     pthread_mutex_unlock(&w->lock);
@@ -180,7 +185,7 @@ void diag_registry_update(workspace_snapshot *ws) {
              * retire the old worker and respawn in the new class. */
             for (int i = 0; i < g_num_workers; i++)
                 if (g_workers[i] == w) { registry_remove_at(i); break; }
-            diag_worker_retire(w);
+            diag_worker_retire(w, 1);
             w = NULL;
         }
         if (!w) {
@@ -196,7 +201,7 @@ void diag_registry_update(workspace_snapshot *ws) {
         if (!g_workers[i]->seen) {
             diag_worker *w = g_workers[i];
             registry_remove_at(i);
-            diag_worker_retire(w);
+            diag_worker_retire(w, 1);
         } else {
             i++;
         }
@@ -205,7 +210,7 @@ void diag_registry_update(workspace_snapshot *ws) {
 
 void diag_registry_shutdown(void) {
     for (int i = 0; i < g_num_workers; i++)
-        diag_worker_retire(g_workers[i]);
+        diag_worker_retire(g_workers[i], 0);
     free(g_workers);
     g_workers     = NULL;
     g_num_workers = 0;

@@ -11,6 +11,12 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    env:
+      # Pin tj3 so its diagnostic wording/format stays stable until we choose
+      # to bump it. Keep in sync with TASKJUGGLER_VERSION in
+      # .devcontainer/Dockerfile so CI and local dev produce identical output.
+      TASKJUGGLER_VERSION: "3.8.4"
+
     steps:
     - uses: actions/checkout@v4
     - run: sudo apt update
@@ -20,6 +26,8 @@ jobs:
         git clone --depth 1 https://github.com/ibireme/yyjson.git
         cmake -S yyjson -B yyjson/build
         sudo cmake --build yyjson/build --target install
+    - name: install TaskJuggler (tj3 for diagnostics tests)
+      run: sudo gem install taskjuggler --version "${TASKJUGGLER_VERSION}" --no-document
     - name: make
       run: make
     - name: test
