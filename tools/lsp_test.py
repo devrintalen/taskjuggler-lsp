@@ -127,7 +127,7 @@ def _wait_quiescent(collected, quiet_seconds=0.5, max_wait=15.0):
         time.sleep(0.02)
 
 
-def run_server(server_binary, input_messages, use_tj3=False):
+def run_server(server_binary, input_messages, use_tj3=False, wait_async=False):
     """Start the server, send all messages, and return the collected output.
 
     Honors LSP spec ordering for `initialize`: per the spec, the client
@@ -139,8 +139,11 @@ def run_server(server_binary, input_messages, use_tj3=False):
 
     By default the asynchronous tj3 diagnostics workers are suppressed so the
     golden output stays deterministic and independent of whether tj3 is
-    installed.  Cases that opt in (a `uses_tj3` marker file) run with tj3
-    enabled and wait for the async diagnostics to settle before closing.
+    installed.  Cases that opt in via `uses_tj3` run with tj3 enabled; cases
+    that opt in via either `uses_tj3` or `uses_async_diag` set @p wait_async
+    and block until the async diagnostics settle before closing (e.g. the
+    "Missing compile_commands.json" warnings, which a worker emits even with
+    tj3 disabled).
     """
     env = dict(os.environ)
     if not use_tj3:
@@ -169,9 +172,10 @@ def run_server(server_binary, input_messages, use_tj3=False):
                 and 'id' in message:
             _wait_for_response_id(collected, message['id'])
 
-    # tj3 diagnostics are published asynchronously; let them settle so the
-    # captured stream is complete and deterministic before we close stdin.
-    if use_tj3:
+    # Worker-emitted diagnostics (tj3 results and "Missing compile_commands.json"
+    # warnings) are published asynchronously; let them settle so the captured
+    # stream is complete before we close stdin.
+    if wait_async:
         _wait_quiescent(collected)
 
     process.stdin.close()
@@ -238,14 +242,42 @@ def _partition(messages):
     return responses, notifications, duplicate_ids
 
 
-def diff_output(expected, actual):
+def _collapse_diagnostics(notifications):
+    """Reduce publishDiagnostics to the final state per URI, sorted by URI.
+
+    Only used for cases that opt into asynchronous diagnostics.  Those markers
+    are emitted by per-project worker threads that interleave nondeterministically
+    with the coordinator's synchronous empty baselines, so neither the order nor
+    the count of intermediate publishes is reproducible.  What *is* deterministic
+    — and all the client ultimately renders — is the last diagnostics array
+    published for each URI.  We keep every non-publishDiagnostics notification in
+    order and replace the publishes with one entry per URI (its final state),
+    ordered by URI.
+    """
+    pub = 'textDocument/publishDiagnostics'
+    others = [m for m in notifications
+              if not (isinstance(m, dict) and m.get('method') == pub)]
+    final = {}
+    for m in notifications:
+        if isinstance(m, dict) and m.get('method') == pub:
+            final[m['params']['uri']] = m
+    pubs = [final[uri] for uri in sorted(final)]
+    return others + pubs
+
+
+def diff_output(expected, actual, collapse_diagnostics=False):
     """Return a colored diff string, or empty string if equal.
 
     Responses are matched by id (order-insensitive); notifications and
-    server-initiated requests are diffed in order.
+    server-initiated requests are diffed in order.  When @p collapse_diagnostics
+    is set (asynchronous-diagnostics cases), publishDiagnostics are compared by
+    final-state-per-URI instead of positionally (see _collapse_diagnostics).
     """
     exp_responses, exp_notifications, exp_dups = _partition(expected)
     act_responses, act_notifications, act_dups = _partition(actual)
+    if collapse_diagnostics:
+        exp_notifications = _collapse_diagnostics(exp_notifications)
+        act_notifications = _collapse_diagnostics(act_notifications)
 
     sections = []
 
@@ -335,14 +367,24 @@ def run_test_case(server_binary, case_dir, record):
         print(f"  {yellow('SKIP')}  {case_name}  {dim('tj3 not on PATH')}")
         return True
 
+    # A `uses_async_diag` marker opts the case into waiting for worker-emitted
+    # diagnostics to settle (without enabling tj3) — needed for the "Missing
+    # compile_commands.json" warnings, which a worker publishes asynchronously.
+    uses_async_diag = os.path.isfile(os.path.join(case_dir, 'uses_async_diag'))
+    wait_async = use_tj3 or uses_async_diag
+
     abs_case_dir = os.path.abspath(case_dir)
     with open(input_path, 'r') as input_file:
         input_messages = apply_substitutions(json.load(input_file), abs_case_dir)
 
-    actual = run_server(server_binary, input_messages, use_tj3=use_tj3)
+    actual = run_server(server_binary, input_messages,
+                        use_tj3=use_tj3, wait_async=wait_async)
 
     if record:
-        redacted = apply_redactions(actual, abs_case_dir)
+        # For async-diagnostics cases, store the canonical final-state-per-URI
+        # form so the golden file does not capture a racy intermediate ordering.
+        to_write = _collapse_diagnostics(actual) if wait_async else actual
+        redacted = apply_redactions(to_write, abs_case_dir)
         with open(expected_path, 'w') as expected_file:
             json.dump(redacted, expected_file, indent=2)
             expected_file.write('\n')
@@ -356,7 +398,7 @@ def run_test_case(server_binary, case_dir, record):
     with open(expected_path, 'r') as expected_file:
         expected = apply_substitutions(json.load(expected_file), abs_case_dir)
 
-    diff = diff_output(expected, actual)
+    diff = diff_output(expected, actual, collapse_diagnostics=wait_async)
     if not diff:
         print(f"  {green('✓')}  {case_name}")
         return True

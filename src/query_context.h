@@ -130,6 +130,7 @@ typedef struct ws_doc {
     char        *report_prefix;
     char        *resource_prefix;
     int          project_index;   /**< index into workspace_snapshot.projects, or -1 */
+    int          disk_only;       /**< 1 for a background (non-editor) document */
 } ws_doc;
 
 /** One assembled project: its canonical id and the synthetic root of the
@@ -150,6 +151,7 @@ typedef struct workspace_snapshot {
     ws_project  **projects;        /**< owned array of owned ws_project* */
     int          num_projects;
     int          projects_cap;
+    int          cc_status;        /**< cc_status: degradation of the driving compile_commands.json */
 } workspace_snapshot;
 
 /** Allocate a workspace_snapshot with @p num_docs zeroed ws_doc slots (caller

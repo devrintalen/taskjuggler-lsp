@@ -141,6 +141,14 @@ static long   g_cc_mtime_nsec  = 0;
 static off_t  g_cc_size        = 0;
 static int    g_cc_attempted   = 0;
 
+/* Degradation status of the workspace's compile_commands.json, set by
+ * reload_compile_commands() and stamped onto each workspace_snapshot.  Whenever
+ * it is not CC_STATUS_OK — the file is missing (no workspace root, or absent) or
+ * malformed (invalid JSON / wrong schema) — no project closures are loaded and
+ * every editor file is parsed stand-alone, so the diagnostics workers emit the
+ * per-file "Missing/Malformed compile_commands.json" warnings keyed off it. */
+static cc_status g_cc_status   = CC_STATUS_OK;
+
 /* Forward declarations. */
 static char *normalize_uri(const char *raw_uri);
 static void  load_file_from_disk(const char *path);
@@ -817,7 +825,13 @@ static workspace_snapshot *build_workspace_snapshot(void) {
         w->account_prefix  = d->account_prefix  ? strdup(d->account_prefix)  : NULL;
         w->report_prefix   = d->report_prefix   ? strdup(d->report_prefix)   : NULL;
         w->resource_prefix = d->resource_prefix ? strdup(d->resource_prefix) : NULL;
+        w->disk_only       = d->disk_only;
     }
+
+    /* Stamp the cc-status so the diagnostics workers can emit the per-file
+     * "Missing/Malformed compile_commands.json" warnings off the immutable
+     * snapshot. */
+    ws->cc_status = g_cc_status;
 
     /* Pass 1: compile_commands roots + their include closures. */
     for (int i = 0; i < MAX_DOCS; i++) {
@@ -842,9 +856,12 @@ static workspace_snapshot *build_workspace_snapshot(void) {
     return ws;
 }
 
-/* Republish (now-empty) diagnostics for editor-managed documents after a
- * notification so the client clears stale markers from the pre-refactor
- * diagnostic stream. */
+/* Publish an empty diagnostics baseline for every editor-managed document
+ * after a notification so the client clears stale markers from the previous
+ * revision.  The diagnostics workers (diag_registry_update) then layer the
+ * real markers on top asynchronously: tj3 results plus, when no usable
+ * compile_commands.json is present, the per-file "Missing
+ * compile_commands.json" warnings (see diag_collect_cc_missing). */
 static void republish_all_diagnostics(void) {
     for (int i = 0; i < MAX_DOCS; i++) {
         if (!docs[i].in_use) continue;
@@ -876,14 +893,14 @@ static void reload_compile_commands(void) {
          * locate compile_commands.json.  This is a legitimate single-file
          * scenario, not an error: we no longer surface a window/showMessage
          * here.  The degradation is instead reported per-file as warning
-         * diagnostics (see the TODO in publish_diagnostics()).
-         *
-         * TODO(diagnostics): set a global cc-status flag (e.g. g_cc_missing)
-         * here so publish_diagnostics() can key the "Missing
-         * compile_commands.json" warnings off it.  Parked until diagnostic
-         * collection is un-stubbed (see diagnostics.h). */
+         * diagnostics by the diagnostics workers, keyed off g_cc_status. */
+        g_cc_status = CC_STATUS_MISSING;
         return;
     }
+
+    /* Cleared up front; re-set below to MISSING (absent) or MALFORMED
+     * (invalid JSON / wrong schema) as the load result dictates. */
+    g_cc_status = CC_STATUS_OK;
 
     struct stat st;
     if (stat(g_cc_path, &st) == 0) {
@@ -917,22 +934,26 @@ static void reload_compile_commands(void) {
     case CC_NOT_FOUND:
         /* compile_commands.json is absent at the workspace root.  As with the
          * no-root case above, this is reported per-file as warning diagnostics
-         * rather than a window/showMessage, so no notification is emitted here.
-         *
-         * TODO(diagnostics): set the global cc-status flag here too so
-         * publish_diagnostics() emits the "Missing compile_commands.json"
-         * warnings.  Parked until diagnostic collection is un-stubbed. */
+         * by the diagnostics workers rather than a window/showMessage, so no
+         * notification is emitted here. */
+        g_cc_status = CC_STATUS_MISSING;
         break;
     case CC_PARSE_ERROR:
-        show_message(1,
-            "taskjuggler-lsp: compile_commands.json is not valid JSON; "
-            "no documents loaded.  See server stderr for the parse error.");
+        /* Present but not valid JSON.  Like the missing case, no documents are
+         * loaded; the degradation is reported per-file as warning diagnostics
+         * (keyed off g_cc_status) rather than a window/showMessage.  The parse
+         * error detail is logged to stderr by compile_commands_load(). */
+        g_cc_status = CC_STATUS_MALFORMED;
         break;
     case CC_SCHEMA_ERROR:
-        show_message(1,
+        /* Present but does not match the expected schema (top-level JSON array
+         * of objects with a `file` field).  Reported per-file as warning
+         * diagnostics, as above. */
+        fprintf(stderr,
             "taskjuggler-lsp: compile_commands.json does not match the "
             "expected schema (top-level JSON array of objects with a "
-            "`file` field).  No documents loaded.");
+            "`file` field); no documents loaded.\n");
+        g_cc_status = CC_STATUS_MALFORMED;
         break;
     case CC_NO_ROOT:
         /* Already handled above by the g_cc_path NULL check. */

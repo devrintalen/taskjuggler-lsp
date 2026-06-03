@@ -20,8 +20,12 @@
 
 #include "diagnostics.h"
 #include "server.h"
+#include "query_context.h"
+#include "grammar.tab.h"   /* KW_INCLUDE */
 
 #include <yyjson.h>
+#include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -78,34 +82,74 @@ void publish_diagnostics(const char *uri) {
     publish_diagnostics_list(uri, NULL, 0);
 }
 
-/* TODO(diagnostics): "Missing compile_commands.json" warnings.  This is a
- * separate, server-level diagnostic source, independent of the tj3 diagnostics
- * and still unimplemented.  When the server has no usable compile_commands.json
- * (no workspace root, or the file is absent), it loads no project closures and
- * every editor file is parsed stand-alone.  We replaced the old
- * window/showMessage with per-file warning diagnostics; produce them into a
- * diag_set (so they merge with any other source for the same URI) and publish
- * via diag_set_publish, gated on a global cc-status flag set in
- * reload_compile_commands() (see the two TODO(diagnostics) markers there —
- * e.g. g_cc_missing).  Two cases:
- *
- *   1. .tjp files — one Warning per `include` directive, located at the
- *      include statement.  The IncludeRef carries no range, but each directive
- *      is a KW_INCLUDE token in the document's token spans; scan for
- *      kind == KW_INCLUDE and use that span's start/end.  Message similar to:
- *        "Missing compile_commands.json, cross-file LSP features are
- *         disabled."
- *
- *   2. .tji files — one Warning at the top of the file (range covering
- *      line 0), since an include fragment opened with no including .tjp is
- *      parsed in isolation.  Message similar to:
- *        "Missing compile_commands.json, this file will be parsed
- *         stand-alone, not as part of any other loaded .tjp file that
- *         includes it."
- *
- * Both use DIAG_WARNING severity.  Reaching the token spans for the URI needs
- * a small accessor over the server's docs[] (or building this source in
- * server.c, where the document store lives). */
+/* ── "Missing/Malformed compile_commands.json" warnings ──────────────────── */
+
+/* Add one DIAG_WARNING at @p range with a heap copy of @p message to @p out
+ * under @p uri. */
+static void add_warning(diag_set *out, const char *uri,
+                        LspRange range, const char *message) {
+    Diagnostic d;
+    d.range    = range;
+    d.severity = DIAG_WARNING;
+    d.source   = "taskjuggler-lsp";
+    d.message  = strdup(message);
+    diag_set_add(out, uri, d);
+}
+
+void diag_collect_cc_missing(const workspace_snapshot *ws,
+                             const ws_project *proj, diag_set *out) {
+    if (!ws || !proj || !out || ws->cc_status == CC_STATUS_OK) return;
+
+    int pindex = -1;
+    for (int i = 0; i < ws->num_projects; i++)
+        if (ws->projects[i] == proj) { pindex = i; break; }
+    if (pindex < 0) return;
+
+    for (int i = 0; i < ws->num_docs; i++) {
+        const ws_doc *w = &ws->docs[i];
+        if (w->project_index != pindex || w->disk_only || !w->snap) continue;
+        const doc_snapshot *s = w->snap;
+
+        size_t uri_len = strlen(s->uri);
+        int is_tji = uri_len >= 4 && strcmp(s->uri + (uri_len - 4), ".tji") == 0;
+        if (is_tji) {
+            /* An include fragment opened with no including .tjp is parsed in
+             * isolation; warn once at the top of the file.
+             *
+             * TODO: offer an LSP code action to generate a compile_commands.json
+             * for the user when it is missing for a .tjp that includes this
+             * fragment. */
+            LspRange r = { { 0, 0 }, { 0, (uint32_t)INT_MAX } };
+            if (ws->cc_status == CC_STATUS_MALFORMED)
+                add_warning(out, s->uri, r,
+                    "Malformed compile_commands.json, this file will be parsed "
+                    "stand-alone, not as part of any other loaded .tjp file "
+                    "that includes it.");
+            else
+                add_warning(out, s->uri, r,
+                    "Missing compile_commands.json, this file will be parsed "
+                    "stand-alone, not as part of any other loaded .tjp file "
+                    "that includes it.");
+            continue;
+        }
+
+        /* .tjp: one warning per `include` directive, located on its
+         * KW_INCLUDE token.  A .tjp with no includes loses nothing
+         * cross-file and gets no warning. */
+        for (int t = 0; t < s->num_tok_spans; t++) {
+            if (s->tok_spans[t].token_kind != KW_INCLUDE) continue;
+            LspRange r = { s->tok_spans[t].start, s->tok_spans[t].end };
+            if (ws->cc_status == CC_STATUS_MALFORMED)
+                add_warning(out, s->uri, r,
+                    "Malformed compile_commands.json, cross-file LSP features "
+                    "are disabled.");
+            else
+                add_warning(out, s->uri, r,
+                    "Missing compile_commands.json, cross-file LSP features "
+                    "are disabled.");
+        }
+    }
+}
 
 /* ── diag_set ────────────────────────────────────────────────────────────── */
 

@@ -89,3 +89,37 @@ void diag_set_free(diag_set *s);
  * so diagnostics that went away are cleared.  Either argument may be NULL.
  */
 void diag_set_publish(const diag_set *current, const diag_set *previous);
+
+/* ── Server-level diagnostics ────────────────────────────────────────────── */
+
+struct workspace_snapshot;
+struct ws_project;
+
+/**
+ * Degradation status of the workspace's compile_commands.json, published on the
+ * workspace_snapshot.  CC_STATUS_OK means a usable file drove the snapshot and
+ * cross-file features are fully enabled; the other two states load no project
+ * closures, so every editor file is parsed stand-alone and gets a per-file
+ * warning (see diag_collect_cc_missing).
+ */
+typedef enum {
+    CC_STATUS_OK = 0,     /**< usable compile_commands.json */
+    CC_STATUS_MISSING,    /**< no workspace root, or the file is absent */
+    CC_STATUS_MALFORMED,  /**< present but not valid JSON / wrong schema */
+} cc_status;
+
+/**
+ * Collect the "Missing/Malformed compile_commands.json" warnings for @p proj
+ * into @p out.  A no-op unless @p ws has a non-OK cc_status: in that state no
+ * project closures are loaded and every editor file is parsed stand-alone, so
+ * each editor-managed member document of @p proj gets a warning — one per
+ * `include` directive in a .tjp (on its KW_INCLUDE token), or one at the top of
+ * a stand-alone .tji.  The message reflects whether the file is missing or
+ * malformed.  Added to the same diag_set the tj3 runner fills so the two
+ * sources merge per URI.
+ *
+ * Forward-declared struct pointers keep this header free of the snapshot
+ * layer; callers (the diagnostics worker) include query_context.h.
+ */
+void diag_collect_cc_missing(const struct workspace_snapshot *ws,
+                             const struct ws_project *proj, diag_set *out);

@@ -64,7 +64,14 @@ static void run_once(diag_worker *w, workspace_snapshot *ws) {
     }
 
     diag_set *set = diag_set_new();
-    if (proj) tj3_collect_project(ws, proj, w->mode, set);
+    if (proj) {
+        /* Server-level "Missing compile_commands.json" warnings share this
+         * diag_set with the tj3 results so the two sources merge per URI.
+         * Emitted unconditionally (not behind tj3_available) so the warnings
+         * appear even where tj3 is not installed. */
+        diag_collect_cc_missing(ws, proj, set);
+        tj3_collect_project(ws, proj, w->mode, set);
+    }
 
     diag_set_publish(set, w->last_published);
     diag_set_free(w->last_published);

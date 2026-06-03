@@ -102,60 +102,54 @@
   {
     "jsonrpc": "2.0",
     "id": 2,
-    "result": [
-      {
-        "name": "\"Alpha\"",
-        "kind": 12,
-        "location": {
-          "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-          "range": {
-            "start": {
-              "line": 0,
-              "character": 5
-            },
-            "end": {
-              "line": 0,
-              "character": 10
-            }
-          }
-        }
-      }
-    ]
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 4,
     "result": null
   },
   {
     "jsonrpc": "2.0",
-    "id": 3,
-    "result": [
-      {
-        "name": "\"Beta\"",
-        "kind": 12,
-        "location": {
-          "uri": "file://${CASE_DIR}/workspace/tasks_renamed.tji",
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file://${CASE_DIR}/workspace/project.tjp",
+      "diagnostics": [
+        {
           "range": {
             "start": {
-              "line": 0,
-              "character": 5
+              "line": 1,
+              "character": 2
             },
             "end": {
-              "line": 0,
+              "line": 1,
               "character": 9
             }
-          }
+          },
+          "severity": 2,
+          "source": "taskjuggler-lsp",
+          "message": "Malformed compile_commands.json, cross-file LSP features are disabled."
         }
-      }
-    ]
+      ]
+    }
   },
   {
     "jsonrpc": "2.0",
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-      "diagnostics": []
+      "diagnostics": [
+        {
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 0
+            },
+            "end": {
+              "line": 0,
+              "character": 2147483647
+            }
+          },
+          "severity": 2,
+          "source": "taskjuggler-lsp",
+          "message": "Malformed compile_commands.json, this file will be parsed stand-alone, not as part of any other loaded .tjp file that includes it."
+        }
+      ]
     }
   }
 ]
