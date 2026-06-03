@@ -83,12 +83,6 @@ void publish_diagnostics(const char *uri) {
 
 /* ── "Missing compile_commands.json" warnings ────────────────────────────── */
 
-/* True when @p uri ends with @p suffix (case-sensitive). */
-static int uri_has_suffix(const char *uri, const char *suffix) {
-    size_t lu = strlen(uri), ls = strlen(suffix);
-    return lu >= ls && strcmp(uri + (lu - ls), suffix) == 0;
-}
-
 /* Add one DIAG_WARNING at @p range with a heap copy of @p message to @p out
  * under @p uri. */
 static void add_warning(diag_set *out, const char *uri,
@@ -115,7 +109,9 @@ void diag_collect_cc_missing(const workspace_snapshot *ws,
         if (w->project_index != pindex || w->disk_only || !w->snap) continue;
         const doc_snapshot *s = w->snap;
 
-        if (uri_has_suffix(s->uri, ".tji")) {
+        size_t uri_len = strlen(s->uri);
+        int is_tji = uri_len >= 4 && strcmp(s->uri + (uri_len - 4), ".tji") == 0;
+        if (is_tji) {
             /* An include fragment opened with no including .tjp is parsed in
              * isolation; warn once at the top of the file. */
             LspRange r = { { 0, 0 }, { 0, (uint32_t)INT_MAX } };
