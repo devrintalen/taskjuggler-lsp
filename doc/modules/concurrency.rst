@@ -9,8 +9,10 @@ architecture, the split between the *mutable live store* and the
 ``Document``, ``doc_snapshot``, project trees, ``workspace_snapshot``,
 and ``query_context`` — relate to one another and to those threads.
 
-For the per-method handler routing see :doc:`server`; for the bare
-struct and function signatures see the :doc:`../api` reference.
+For the per-method handler routing see :doc:`server`; for the
+multi-source diagnostic pipeline that runs off the published
+snapshots see :doc:`diagnostics`; for the bare struct and function
+signatures see the :doc:`../api` reference.
 
 Threads
 -------

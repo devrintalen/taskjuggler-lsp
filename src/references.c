@@ -25,6 +25,9 @@
  * Recursively collect incoming references to @p wanted within a Project
  * tree, appending one LSP `Location` per matching dependency to @p arr.
  *
+ * @param doc           Output yyjson_mut document used to mint location values.
+ * @param arr           Output array on @p doc that the matching locations are
+ *                      appended to.
  * @param node          The current node in the depth-first walk.  This is
  *                      the traversal cursor — it starts at the project root
  *                      and descends through `children` on each recursive
