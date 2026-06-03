@@ -25,6 +25,7 @@
 
 #include <yyjson.h>
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -81,7 +82,7 @@ void publish_diagnostics(const char *uri) {
     publish_diagnostics_list(uri, NULL, 0);
 }
 
-/* ── "Missing compile_commands.json" warnings ────────────────────────────── */
+/* ── "Missing/Malformed compile_commands.json" warnings ──────────────────── */
 
 /* Add one DIAG_WARNING at @p range with a heap copy of @p message to @p out
  * under @p uri. */
@@ -97,7 +98,12 @@ static void add_warning(diag_set *out, const char *uri,
 
 void diag_collect_cc_missing(const workspace_snapshot *ws,
                              const ws_project *proj, diag_set *out) {
-    if (!ws || !proj || !out || !ws->cc_missing) return;
+    if (!ws || !proj || !out || ws->cc_status == CC_STATUS_OK) return;
+
+    /* A missing file and a malformed one both load no closures; the warning
+     * only differs in how it names the cause. */
+    const char *what = ws->cc_status == CC_STATUS_MALFORMED ? "Malformed"
+                                                            : "Missing";
 
     int pindex = -1;
     for (int i = 0; i < ws->num_projects; i++)
@@ -109,16 +115,22 @@ void diag_collect_cc_missing(const workspace_snapshot *ws,
         if (w->project_index != pindex || w->disk_only || !w->snap) continue;
         const doc_snapshot *s = w->snap;
 
+        char msg[256];
         size_t uri_len = strlen(s->uri);
         int is_tji = uri_len >= 4 && strcmp(s->uri + (uri_len - 4), ".tji") == 0;
         if (is_tji) {
             /* An include fragment opened with no including .tjp is parsed in
-             * isolation; warn once at the top of the file. */
+             * isolation; warn once at the top of the file.
+             *
+             * TODO: offer an LSP code action to generate a compile_commands.json
+             * for the user when it is missing for a .tjp that includes this
+             * fragment. */
             LspRange r = { { 0, 0 }, { 0, (uint32_t)INT_MAX } };
-            add_warning(out, s->uri, r,
-                "Missing compile_commands.json, this file will be parsed "
+            snprintf(msg, sizeof msg,
+                "%s compile_commands.json, this file will be parsed "
                 "stand-alone, not as part of any other loaded .tjp file that "
-                "includes it.");
+                "includes it.", what);
+            add_warning(out, s->uri, r, msg);
             continue;
         }
 
@@ -128,9 +140,10 @@ void diag_collect_cc_missing(const workspace_snapshot *ws,
         for (int t = 0; t < s->num_tok_spans; t++) {
             if (s->tok_spans[t].token_kind != KW_INCLUDE) continue;
             LspRange r = { s->tok_spans[t].start, s->tok_spans[t].end };
-            add_warning(out, s->uri, r,
-                "Missing compile_commands.json, cross-file LSP features are "
-                "disabled.");
+            snprintf(msg, sizeof msg,
+                "%s compile_commands.json, cross-file LSP features are "
+                "disabled.", what);
+            add_warning(out, s->uri, r, msg);
         }
     }
 }

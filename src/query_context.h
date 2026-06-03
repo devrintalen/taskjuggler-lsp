@@ -151,7 +151,7 @@ typedef struct workspace_snapshot {
     ws_project  **projects;        /**< owned array of owned ws_project* */
     int          num_projects;
     int          projects_cap;
-    int          cc_missing;       /**< 1 when no usable compile_commands.json drove this snapshot */
+    int          cc_status;        /**< cc_status: degradation of the driving compile_commands.json */
 } workspace_snapshot;
 
 /** Allocate a workspace_snapshot with @p num_docs zeroed ws_doc slots (caller
