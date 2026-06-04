@@ -60,17 +60,25 @@ typedef struct ProjectNode ProjectNode;
  * regardless of which lands last.
  */
 typedef struct {
-    DepKind            kind;
+    DepKind            kind;           /**< whether this dep is `depends` or `precedes` */
     int                bang_count;     /**< number of leading `!` characters */
     char              *path;           /**< owned; dotted identifier path */
     LspRange           source_range;   /**< spans the bang(s) + path in source */
     _Atomic uintptr_t  resolved;       /**< memo cell; see above */
 } ProjectDep;
 
-/** Sentinel values for ProjectDep.resolved. */
+/** Sentinel value for ProjectDep.resolved meaning "not yet resolved". */
 #define PROJECT_DEP_UNRESOLVED   ((uintptr_t)0)
+/** Sentinel value for ProjectDep.resolved meaning "resolved, no target". */
 #define PROJECT_DEP_RESOLVED_NULL ((uintptr_t)1)
 
+/**
+ * One node in the per-project cross-file resolution tree.  Deep-copied
+ * from the originating tj_node by project_node_from_tj() so the tree
+ * stays valid independent of the documents it was built from.  Holds
+ * the dependency edges and the prefix-applied identifier namespace
+ * that definition / references / dependency-hover resolve against.
+ */
 struct ProjectNode {
     /* ── Identity ── */
     int           keyword;          /**< KW_ / TK_ constant; 0 for the synthetic root */
@@ -85,17 +93,17 @@ struct ProjectNode {
      * URI of the document this node was copied from.  Owned (strdup of
      * Document.uri) so the tree stays valid independent of that document.
      * NULL on the synthetic root. */
-    char         *source_uri;
+    char         *source_uri;       /**< owned; see above */
 
     /* ── Dependencies (task nodes only) ── */
-    ProjectDep   *dependencies;     /**< owned */
-    int           num_dependencies;
+    ProjectDep   *dependencies;     /**< owned array; @see num_dependencies */
+    int           num_dependencies; /**< number of valid entries in `dependencies` */
 
     /* ── Tree links ── */
     ProjectNode  *parent_node;      /**< parent in this tree; NULL on the synthetic root */
-    ProjectNode **children;         /**< owned */
-    int           num_children;
-    int           num_children_cap;
+    ProjectNode **children;         /**< owned array; @see num_children */
+    int           num_children;     /**< number of valid entries in `children` */
+    int           num_children_cap; /**< allocated capacity of `children` */
 };
 
 /**
@@ -114,18 +122,25 @@ ProjectNode *project_node_from_tj(const tj_node *src, const char *source_uri);
 /**
  * Append @p child under @p parent (growing the children array) and set
  * @p child's `parent_node` to @p parent.
+ *
+ * @param parent  Owning node.
+ * @param child   Child subtree (transfer of ownership).
  */
 void project_node_append_child(ProjectNode *parent, ProjectNode *child);
 
 /**
  * Recursively free a heap-allocated ProjectNode subtree, including the
  * node itself.  Safe to call with NULL.
+ *
+ * @param node  Root of the subtree to free.
  */
 void project_node_free(ProjectNode *node);
 
 /**
  * Free every owned child of @p root, leaving @p root as an empty shell.
  * Used to tear down an inline synthetic root before each rebuild.
+ *
+ * @param root  Synthetic root whose children are released.
  */
 void project_node_free_children(ProjectNode *root);
 

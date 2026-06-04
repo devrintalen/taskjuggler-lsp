@@ -33,6 +33,15 @@ server still parses and serves every LSP feature; only the
 ``tj3``-sourced diagnostics are absent.  See
 :doc:`modules/diagnostics` for the integration.
 
+TaskJuggler ships as a Ruby gem (not a distro package on most
+systems), so the canonical install is::
+
+   gem install taskjuggler
+
+On Debian / Ubuntu, install Ruby first via ``apt install ruby``; on
+Gentoo, ``emerge dev-lang/ruby``.  ``taskjuggler`` is not in the main
+Gentoo portage tree.
+
 Building from source
 --------------------
 

@@ -24,23 +24,23 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Each semantic token occupies five uint32 entries in the LSP data array.
- * Diffing operates on these five-tuples as atomic elements, which keeps
- * every emitted edit aligned to a token boundary. */
+/** Number of uint32 entries per semantic token in the LSP data array.
+ *  Diffing operates on these five-tuples as atomic elements, which keeps
+ *  every emitted edit aligned to a token boundary. */
 #define TUPLE_LEN 5
 
-/* Maximum edit distance the Myers diff will compute before falling back to
- * a single replace-everything edit.  Sized so that worst-case snapshot
- * storage stays under a few MB.  Realistic deltas (a typing burst inside
- * a kilo-line file) reduce to D < 100 after prefix/suffix trimming. */
+/** Maximum edit distance the Myers diff will compute before falling back
+ *  to a single replace-everything edit.  Sized so worst-case snapshot
+ *  storage stays under a few MB; realistic deltas (a typing burst inside
+ *  a kilo-line file) reduce to D < 100 after prefix/suffix trimming. */
 #define D_BOUND 1024
 
 /** Single coalesced edit operation expressed in token units. */
 typedef struct {
-    size_t start_tok;        /* offset in the previous data buffer (tokens) */
-    size_t delete_tok;       /* number of tokens to remove */
-    size_t insert_b_start;   /* offset in the new data buffer (tokens)      */
-    size_t insert_tok;       /* number of tokens to insert from there       */
+    size_t start_tok;        /**< offset in the previous data buffer (tokens) */
+    size_t delete_tok;       /**< number of tokens to remove */
+    size_t insert_b_start;   /**< offset in the new data buffer (tokens) */
+    size_t insert_tok;       /**< number of tokens to insert from there */
 } EditOp;
 
 /** Compare two five-tuples for byte equality. */

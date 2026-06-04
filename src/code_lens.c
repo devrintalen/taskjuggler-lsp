@@ -33,13 +33,19 @@
  * Mon-Fri, no holidays.  The project-level `dailyworkinghours`,
  * `weekdays`, and holiday declarations are not yet captured by the
  * parser, so this lens treats them as fixed. */
+/** Working minutes per day used to convert `length` / `effort` values. */
 #define WORKING_MINUTES_PER_DAY (8 * 60)
+/** Working days per week assumed by the lens. */
 #define WORKING_DAYS_PER_WEEK   5
-#define WORKING_DAYS_PER_MONTH  22   /* ≈ yearlyworkingdays(260) / 12 */
+/** Working days per month assumed by the lens (≈ 260 / 12). */
+#define WORKING_DAYS_PER_MONTH  22
+/** Working days per year assumed by the lens (TaskJuggler default). */
 #define WORKING_DAYS_PER_YEAR   260
 
 /* Calendar approximations for `duration`: a month is 30 days, a year
  * is 365 days. */
+
+/** Seconds in one calendar day, used to convert `duration` values. */
 #define CALENDAR_SECONDS_PER_DAY   (24L * 60 * 60)
 
 /**

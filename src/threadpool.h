@@ -38,7 +38,13 @@ void threadpool_start(void);
 void threadpool_stop(void);
 
 /**
- * TODO update this comment
+ * Hand @p job to the threadpool.  The reader thread classifies the
+ * incoming message and calls this for every Job — notifications and
+ * requests alike all go through the single arrival-ordered queue,
+ * which the coordinator pops in order to enforce the LSP "process in
+ * arrival order" rule.
+ *
+ * @param job  Owned Job (transfer of ownership to the queue).
  */
 void threadpool_enqueue_job(Job *job);
 
@@ -52,5 +58,7 @@ void threadpool_enqueue_job(Job *job);
  * missed.  The window is sub-microsecond and real LSP clients cancel
  * only requests sent milliseconds earlier, so the gap is not
  * realistically hit.
+ *
+ * @param id  JSON-RPC request id to cancel.
  */
 void threadpool_cancel_by_id(int64_t id);

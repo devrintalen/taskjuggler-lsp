@@ -117,13 +117,28 @@ typedef enum {
  * pointer into the project's tj_node tree, never owned here.
  */
 typedef struct Dependency {
-    DepKind   kind;
+    DepKind   kind;             /**< whether this dep is `depends` or `precedes` */
     int       bang_count;       /**< number of leading `!` characters */
     char     *path;             /**< dotted identifier path, e.g. "foo.bar" */
     LspRange  source_range;     /**< spans the bang(s) + dotted path in source */
     tj_node  *resolved_target;  /**< NULL until the resolver runs */
 } Dependency;
 
+/**
+ * One named declaration in a parsed document: a task, account,
+ * resource (or shift), report (or related report-kind), or project.
+ * The node kind is identified by the raw `keyword` field, which
+ * holds the KW_/TK_ constant the grammar matched.  Generic enough
+ * to back document-symbol, completion, definition, references,
+ * folding, and dependency resolution — handlers branch on `keyword`
+ * when they need to distinguish kinds.
+ *
+ * Memory: all heap fields (`id`, `name`, `dependencies`, `children`)
+ * and every transitively reachable child node are owned by the
+ * tj_node and freed by tj_node_free().  Cross-tree pointers
+ * (`parent_node`, `parent_doc`, `Dependency.resolved_target`) are
+ * borrowed and never freed here.
+ */
 struct tj_node {
     /* ── Identity ── */
     int        keyword;        /**< KW_ / TK_ constant from grammar.tab.h; 0 for synthetic per-doc roots */
@@ -146,9 +161,9 @@ struct tj_node {
      * one entry per dep_ref in source order.  Empty on tasks that
      * declare no dependencies and on every non-task node.  Owned by
      * this node; freed by tj_node_free(). */
-    Dependency *dependencies;
-    int         num_dependencies;
-    int         dependencies_cap;
+    Dependency *dependencies;     /**< owned array; @see num_dependencies */
+    int         num_dependencies; /**< number of valid entries in `dependencies` */
+    int         dependencies_cap; /**< allocated capacity of `dependencies` */
 
     /* ── Tree links ──
      *
@@ -172,11 +187,11 @@ struct tj_node {
      * children       — locally declared children in source order.
      *                  Owned by this node; freed by tj_node_free().
      */
-    tj_node   *parent_node;
-    tj_node   *parent_doc;
-    tj_node  **children;
-    int        num_children;
-    int        children_cap;
+    tj_node   *parent_node;  /**< borrowed; see comment above */
+    tj_node   *parent_doc;   /**< borrowed; see comment above */
+    tj_node  **children;     /**< owned array; @see num_children */
+    int        num_children; /**< number of valid entries in `children` */
+    int        children_cap; /**< allocated capacity of `children` */
 };
 
 /**
@@ -231,11 +246,11 @@ typedef struct Diagnostic Diagnostic;
  * lives in).  NULL when the token sits outside every declaration.
  */
 typedef struct {
-    int       token_kind;
-    LspPos    start;
-    LspPos    end;
-    char     *text;
-    tj_node  *owner;
+    int       token_kind;   /**< raw TK_/KW_ constant from grammar.tab.h */
+    LspPos    start;        /**< inclusive start position in the source */
+    LspPos    end;          /**< exclusive end position in the source */
+    char     *text;         /**< owned strdup of the lexeme; may be NULL */
+    tj_node  *owner;        /**< borrowed innermost enclosing tj_node, or NULL */
 } TokenSpan;
 
 /**
@@ -248,11 +263,11 @@ typedef struct {
  * ParseOutput / Document that holds the IncludeRef.
  */
 typedef struct {
-    char *filename;
-    char *task_prefix;
-    char *resource_prefix;
-    char *account_prefix;
-    char *report_prefix;
+    char *filename;        /**< owned unquoted target as it appeared in the include statement */
+    char *task_prefix;     /**< owned `taskprefix` argument, or NULL when not present */
+    char *resource_prefix; /**< owned `resourceprefix` argument, or NULL when not present */
+    char *account_prefix;  /**< owned `accountprefix` argument, or NULL when not present */
+    char *report_prefix;   /**< owned `reportprefix` argument, or NULL when not present */
 } IncludeRef;
 
 /**
@@ -276,14 +291,14 @@ typedef struct {
 typedef struct {
     tj_node   *root;         /**< synthetic root; children are all top-level declarations in source order */
 
-    TokenSpan *tok_spans;
-    int        num_tok_spans;
-    int        tok_span_cap;
+    TokenSpan *tok_spans;       /**< owned flat array of every captured token */
+    int        num_tok_spans;   /**< number of valid entries in `tok_spans` */
+    int        tok_span_cap;    /**< allocated capacity of `tok_spans` */
     int        num_sem_entries; /**< upper bound on semantic-token entries (one per source line covered) */
 
-    IncludeRef *includes;       /**< one entry per `include` directive */
-    int         num_includes;
-    int         includes_cap;
+    IncludeRef *includes;       /**< owned array; one entry per `include` directive */
+    int         num_includes;   /**< number of valid entries in `includes` */
+    int         includes_cap;   /**< allocated capacity of `includes` */
 } ParseOutput;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */

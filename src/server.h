@@ -86,6 +86,8 @@ void server_run_query(Job *job);
  * worker when the Job was marked is_cancelled by a $/cancelRequest
  * that arrived while the Job was still queued.  No-op for
  * notifications (no id to reply to).
+ *
+ * @param job  Cancelled job to acknowledge; worker frees it after return.
  */
 void server_dispatch_cancelled(Job *job);
 

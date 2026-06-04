@@ -63,8 +63,13 @@ apt install libyyjson-dev flex bison taskjuggler
 On Gentoo:
 
 ```sh
-emerge -a dev-libs/yyjson sys-devel/flex sys-devel/bison dev-util/taskjuggler
+emerge -a dev-libs/yyjson sys-devel/flex sys-devel/bison dev-lang/ruby
+gem install taskjuggler
 ```
+
+TaskJuggler is not in the main Gentoo portage tree; the upstream
+distribution is a Ruby gem, so install Ruby through portage and then
+pull `taskjuggler` from rubygems.org.
 
 ## Building
 

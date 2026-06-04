@@ -31,24 +31,42 @@
  * YY_BUFFER_STATE to avoid pulling in the full flex header.
  */
 
+/** Opaque flex scanner buffer handle; defined in lexer.yy.c. */
 typedef void *YY_BUFFER_STATE;
+/**
+ * Install @p str as the current flex input buffer.  Defined in lexer.yy.c.
+ *
+ * @param str  NUL-terminated input the scanner will tokenize.
+ * @return Buffer handle to release with yy_delete_buffer().
+ */
 extern YY_BUFFER_STATE yy_scan_string(const char *str);
+/**
+ * Release a buffer returned by yy_scan_string().  Defined in lexer.yy.c.
+ *
+ * @param buf  Buffer handle to free.
+ */
 extern void            yy_delete_buffer(YY_BUFFER_STATE buf);
+/** Current column reported by the flex scanner.  Defined in lexer.yy.c. */
 extern int             yycolumn;
+/** Current line reported by the flex scanner.  Defined in lexer.yy.c. */
 extern int             yylineno;
 
 /* ── Shared globals (used by lexer.l and grammar.y via extern) ───────────── */
 
-/** Currently-being-built ParseOutput; lexer/grammar populate this directly. */
-/* Defined in grammar.y.  Called at the start of every parse() so that a
+/**
+ * Defined in grammar.y.  Called at the start of every parse() so that a
  * partial include-body parse from a previous run cannot leak its pending
- * prefix strings into the next parse. */
+ * prefix strings into the next parse.
+ */
 extern void reset_pending_include_state(void);
 
+/** Currently-being-built ParseOutput; lexer/grammar populate this directly. */
 ParseOutput *g_output         = NULL;
 /** Backing storage for the token-span array under construction. */
 TokenSpan   *g_tok_spans      = NULL;
+/** Number of valid entries currently in `g_tok_spans`. */
 int          g_num_tok_spans  = 0;
+/** Allocated capacity of `g_tok_spans`. */
 int          g_tok_span_cap   = 0;
 /** Running upper bound on emitted semantic-token entries (one per source line covered). */
 int          g_num_sem_entries = 0;
@@ -65,6 +83,13 @@ static int is_sem_highlighted(int kind) {
 /**
  * Append one TokenSpan to the global accumulator.  Called from lexer.l for
  * every token that callers may need to inspect.
+ *
+ * @param kind  Raw TK_/KW_ constant the lexer matched.
+ * @param sl    Start line.
+ * @param sc    Start column.
+ * @param el    End line.
+ * @param ec    End column.
+ * @param text  Borrowed lexeme; strdup'd into the new TokenSpan, or NULL.
  */
 void g_push_tok_span(int kind,
                      uint32_t sl, uint32_t sc,
@@ -240,11 +265,12 @@ static void assign_parent_links(tj_node *parent, tj_node **children, int n,
  * then use the standard single-pass scope-stack algorithm to assign
  * owners.
  */
+/** One frame on the scope stack used by assign_token_owners(). */
 typedef struct {
-    tj_node **children;
-    int       n;
-    int       idx;
-    tj_node  *scope;
+    tj_node **children; /**< borrowed sibling array being walked at this depth */
+    int       n;        /**< number of valid entries in `children` */
+    int       idx;      /**< next child index this frame will visit */
+    tj_node  *scope;    /**< node whose range covers tokens currently being owned */
 } OwnerFrame;
 
 static int compare_node_starts(const void *a, const void *b) {

@@ -79,7 +79,7 @@ typedef struct sem_token_data {
  * TokenSpan.owner pointers already address nodes within `root`.
  */
 typedef struct doc_snapshot {
-    _Atomic int  refcount;
+    _Atomic int  refcount;        /**< outstanding references; freed at 0 */
     uint64_t     doc_version;     /**< monotonic parse stamp; also the semantic-tokens resultId */
 
     char        *uri;             /**< owned canonical file:// URI */
@@ -87,8 +87,8 @@ typedef struct doc_snapshot {
 
     tj_node     *root;            /**< owned synthetic root over all top-level decls */
     TokenSpan   *tok_spans;       /**< owned; .owner points within `root` */
-    int          num_tok_spans;
-    int          num_sem_entries;
+    int          num_tok_spans;   /**< number of valid entries in `tok_spans` */
+    int          num_sem_entries; /**< upper bound on semantic-token entries (one per source line covered) */
 
     _Atomic(sem_token_data *) sem_memo;  /**< NULL until first request; CAS-published */
 } doc_snapshot;
@@ -97,16 +97,34 @@ typedef struct doc_snapshot {
  * Create a doc_snapshot taking ownership of @p root and @p tok_spans (the
  * fields moved out of a ParseOutput) and deep-copying @p uri / @p text.
  * Returned with refcount 1.
+ *
+ * @param uri              Canonical file:// URI; deep-copied.
+ * @param text             Source text the parse consumed; deep-copied.
+ * @param root             Owned synthetic root (transfer of ownership).
+ * @param tok_spans        Owned token span array (transfer of ownership).
+ * @param num_tok_spans    Number of entries in @p tok_spans.
+ * @param num_sem_entries  Upper bound on emitted semantic-token entries.
+ * @param doc_version      Monotonic parse stamp for this snapshot.
+ * @return Newly allocated snapshot with refcount 1.
  */
 doc_snapshot *docsnap_new(const char *uri, const char *text,
                          tj_node *root, TokenSpan *tok_spans,
                          int num_tok_spans, int num_sem_entries,
                          uint64_t doc_version);
 
-/** Bump the refcount and return @p s (NULL-safe, returns NULL). */
+/**
+ * Bump @p s's refcount.
+ *
+ * @param s  Snapshot to acquire, or NULL.
+ * @return @p s (or NULL when called with NULL).
+ */
 doc_snapshot *docsnap_acquire(doc_snapshot *s);
 
-/** Drop one ref; free @p s and everything it owns when the last ref goes. */
+/**
+ * Drop one ref; free @p s and everything it owns when the last ref goes.
+ *
+ * @param s  Snapshot to release; NULL is a no-op.
+ */
 void docsnap_release(doc_snapshot *s);
 
 /**
@@ -115,6 +133,10 @@ void docsnap_release(doc_snapshot *s);
  * buffer and race to publish via compare-exchange; the losers free their
  * buffer and adopt the winner's.  The returned pointer is owned by @p s and
  * valid for its lifetime.
+ *
+ * @param s          Snapshot whose memo is consulted (or filled).
+ * @param out_data   Out: pointer to the encoded uint32 buffer.
+ * @param out_count  Out: number of uint32 entries (always a multiple of 5).
  */
 void docsnap_sem_tokens(doc_snapshot *s, const uint32_t **out_data, size_t *out_count);
 
@@ -126,9 +148,9 @@ void docsnap_sem_tokens(doc_snapshot *s, const uint32_t **out_data, size_t *out_
 typedef struct ws_doc {
     doc_snapshot *snap;            /**< ref'd; +1 held by the owning workspace_snapshot */
     char        *task_prefix;     /**< owned; may be NULL */
-    char        *account_prefix;
-    char        *report_prefix;
-    char        *resource_prefix;
+    char        *account_prefix;  /**< owned; may be NULL */
+    char        *report_prefix;   /**< owned; may be NULL */
+    char        *resource_prefix; /**< owned; may be NULL */
     int          project_index;   /**< index into workspace_snapshot.projects, or -1 */
     int          disk_only;       /**< 1 for a background (non-editor) document */
 } ws_doc;
@@ -145,28 +167,48 @@ typedef struct ws_project {
 
 /** Immutable, refcounted cross-file view of the whole workspace. */
 typedef struct workspace_snapshot {
-    _Atomic int  refcount;
+    _Atomic int  refcount;         /**< outstanding references; freed at 0 */
     ws_doc       *docs;            /**< owned array[num_docs] */
-    int          num_docs;
+    int          num_docs;         /**< number of valid entries in `docs` */
     ws_project  **projects;        /**< owned array of owned ws_project* */
-    int          num_projects;
-    int          projects_cap;
-    int          cc_status;        /**< cc_status: degradation of the driving compile_commands.json */
+    int          num_projects;     /**< number of valid entries in `projects` */
+    int          projects_cap;     /**< allocated capacity of `projects` */
+    int          cc_status;        /**< degradation status of the driving compile_commands.json (CC_STATUS_*) */
 } workspace_snapshot;
 
-/** Allocate a workspace_snapshot with @p num_docs zeroed ws_doc slots (caller
- *  fills them) and an empty project list.  Returned with refcount 1. */
+/**
+ * Allocate a workspace_snapshot with @p num_docs zeroed ws_doc slots (caller
+ * fills them) and an empty project list.  Returned with refcount 1.
+ *
+ * @param num_docs  Number of ws_doc slots to reserve.
+ * @return Heap-allocated snapshot with refcount 1.
+ */
 workspace_snapshot *ws_alloc(int num_docs);
 
-/** Append a new empty ws_project with id @p id (deep-copied) and return its
- *  index; the caller populates its `root` tree. */
+/**
+ * Append a new empty ws_project with id @p id (deep-copied) and return its
+ * index; the caller populates its `root` tree.
+ *
+ * @param ws  Workspace snapshot being assembled.
+ * @param id  Canonical project id; deep-copied.
+ * @return Index of the appended project in `ws->projects`.
+ */
 int ws_add_project(workspace_snapshot *ws, const char *id);
 
-/** Bump the refcount and return @p ws (NULL-safe, returns NULL). */
+/**
+ * Bump @p ws's refcount.
+ *
+ * @param ws  Workspace snapshot to acquire, or NULL.
+ * @return @p ws (or NULL when called with NULL).
+ */
 workspace_snapshot *ws_acquire(workspace_snapshot *ws);
 
-/** Drop one ref; free @p ws, its project trees, and release every ws_doc's
- *  doc_snapshot ref when the last ref goes. */
+/**
+ * Drop one ref; free @p ws, its project trees, and release every ws_doc's
+ * doc_snapshot ref when the last ref goes.
+ *
+ * @param ws  Workspace snapshot to release; NULL is a no-op.
+ */
 void ws_release(workspace_snapshot *ws);
 
 /* ── Per-query context ───────────────────────────────────────────────────── */
@@ -178,17 +220,17 @@ void ws_release(workspace_snapshot *ws);
  * mirror the old live Document so handlers read them unchanged.
  */
 typedef struct query_doc {
-    const char  *uri;
-    const char  *text;
-    const char  *task_prefix;
-    const char  *account_prefix;
-    const char  *report_prefix;
-    const char  *resource_prefix;
+    const char  *uri;             /**< borrowed canonical file:// URI */
+    const char  *text;            /**< borrowed source text */
+    const char  *task_prefix;     /**< borrowed; may be NULL */
+    const char  *account_prefix;  /**< borrowed; may be NULL */
+    const char  *report_prefix;   /**< borrowed; may be NULL */
+    const char  *resource_prefix; /**< borrowed; may be NULL */
 
     tj_node     *root;            /**< borrowed from snap */
     TokenSpan   *tok_spans;       /**< borrowed from snap */
-    int          num_tok_spans;
-    int          num_sem_entries;
+    int          num_tok_spans;   /**< matches snap->num_tok_spans */
+    int          num_sem_entries; /**< matches snap->num_sem_entries */
 
     int          is_primary;      /**< 1 for the requested document */
     doc_snapshot *snap;            /**< borrowed backing snapshot (sem-token memo + version) */
@@ -207,16 +249,25 @@ typedef struct query_context {
     doc_snapshot       *prev_snap;   /**< 1 ref; primary's previous parse, for delta. May be NULL. */
 
     query_doc   *docs;              /**< owned array; entries borrow into `ws`. */
-    int          num_docs;
+    int          num_docs;          /**< number of valid entries in `docs` */
     int          primary_idx;       /**< index of the requested doc, or -1. */
 
     ProjectNode *project_root;      /**< borrowed primary project root; may be NULL. */
     const char  *project_id;        /**< borrowed; may be NULL. */
 } query_context;
 
-/** The primary query_doc, or NULL when primary_idx < 0. */
+/**
+ * Return the primary query_doc, or NULL when primary_idx < 0.
+ *
+ * @param qc  Query context to consult.
+ * @return Borrowed primary `query_doc`, or NULL when none.
+ */
 const query_doc *query_context_primary(const query_context *qc);
 
-/** Free a query_context: release its snapshot refs and the docs array.
- *  NULL-safe. */
+/**
+ * Release a query_context's snapshot refs and free the docs array.
+ * Safe to call with NULL.
+ *
+ * @param qc  Context to free.
+ */
 void query_context_free(query_context *qc);

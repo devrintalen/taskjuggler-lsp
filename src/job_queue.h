@@ -24,6 +24,9 @@
 #include <stdint.h>
 #include <yyjson.h>
 
+/** Forward declaration; the full struct is defined in query_context.h. */
+struct query_context;
+
 /**
  * One pending unit of work parsed off stdin by the reader thread and
  * waiting in a queue for a worker to consume.
@@ -48,16 +51,14 @@
  * on the Job so $/cancelRequest can mark queued Jobs.  Notifications
  * and string/null ids leave `has_id = 0`.
  */
-struct query_context;
-
 typedef struct Job {
-    yyjson_doc            *request_doc;
-    int                    is_notification;
-    int                    is_cancelled;
-    int                    has_id;
-    int64_t                id;
-    struct query_context  *context;
-    struct Job            *next;
+    yyjson_doc            *request_doc;     /**< owned JSON-RPC envelope */
+    int                    is_notification; /**< 1 for LSP notifications, 0 for requests */
+    int                    is_cancelled;    /**< set by $/cancelRequest while queued */
+    int                    has_id;          /**< 1 when `id` is meaningful */
+    int64_t                id;              /**< JSON-RPC request id; valid only if `has_id` */
+    struct query_context  *context;         /**< owned pinned snapshot for query workers; NULL otherwise */
+    struct Job            *next;            /**< intrusive next link inside a queue */
 } Job;
 
 /** Opaque thread-safe FIFO of Job pointers. */
@@ -73,12 +74,17 @@ JobQueue *job_queue_create(void);
 /**
  * Destroy a queue and free its synchronization primitives.  The queue
  * must already be drained and closed.
+ *
+ * @param q  Queue to destroy.
  */
 void      job_queue_destroy(JobQueue *q);
 
 /**
  * Push @p job onto the tail of the queue.  Wakes one waiting worker.
  * Ownership of @p job is transferred to the queue.
+ *
+ * @param q    Target queue.
+ * @param job  Job to enqueue (transfer of ownership).
  */
 void      job_queue_push(JobQueue *q, Job *job);
 
@@ -86,6 +92,9 @@ void      job_queue_push(JobQueue *q, Job *job);
  * Block until a job is available, then return it.  Returns NULL only
  * once the queue is both closed and empty, signalling worker shutdown.
  * Ownership of the returned job is transferred to the caller.
+ *
+ * @param q  Queue to pop from.
+ * @return Owned Job pointer, or NULL when the queue is drained-and-closed.
  */
 Job      *job_queue_pop(JobQueue *q);
 
@@ -93,6 +102,8 @@ Job      *job_queue_pop(JobQueue *q);
  * Mark the queue as closed.  Workers blocked in job_queue_pop() are
  * woken; they continue popping pending jobs until the queue is empty,
  * then their next pop returns NULL.
+ *
+ * @param q  Queue to close.
  */
 void      job_queue_close(JobQueue *q);
 
@@ -100,6 +111,8 @@ void      job_queue_close(JobQueue *q);
  * Free a Job and any heap fields it owns.  NULL-safe per field, so
  * callers may transfer ownership of an owned field elsewhere by
  * NULL-ing it before calling.  Used by workers after dispatch.
+ *
+ * @param job  Job to free.
  */
 void      job_free(Job *job);
 
@@ -110,5 +123,8 @@ void      job_free(Job *job);
  * the has_id check.  Called by the reader when a $/cancelRequest
  * arrives.  The worker checks is_cancelled before dispatching the
  * handler and returns RequestCancelled in its place.
+ *
+ * @param q   Queue to scan.
+ * @param id  Request id to mark cancelled.
  */
 void      job_queue_mark_cancelled_by_id(JobQueue *q, int64_t id);

@@ -32,12 +32,15 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* One materialised member document of the project. */
+/**
+ * One materialised member document of the project, ready to be
+ * written into the temporary directory tj3 runs against.
+ */
 typedef struct member {
-    char       *path;     /* owned; absolute filesystem path */
-    char       *relpath;  /* points into `path`: path relative to the common dir */
-    const char *uri;      /* borrowed from the doc_snapshot */
-    const char *text;     /* borrowed from the doc_snapshot */
+    char       *path;     /**< owned; absolute filesystem path */
+    char       *relpath;  /**< points into `path`: path relative to the common dir */
+    const char *uri;      /**< borrowed from the doc_snapshot */
+    const char *text;     /**< borrowed from the doc_snapshot */
 } member;
 
 /* ── small filesystem helpers ────────────────────────────────────────────── */

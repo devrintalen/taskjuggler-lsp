@@ -96,6 +96,13 @@ static void add_warning(diag_set *out, const char *uri,
     diag_set_add(out, uri, d);
 }
 
+/**
+ * See diagnostics.h for the full contract.
+ *
+ * @param ws    Workspace snapshot whose cc_status drives this collection.
+ * @param proj  Project whose member documents are inspected.
+ * @param out   Output diag_set; new warnings are appended.
+ */
 void diag_collect_cc_missing(const workspace_snapshot *ws,
                              const ws_project *proj, diag_set *out) {
     if (!ws || !proj || !out || ws->cc_status == CC_STATUS_OK) return;
@@ -153,17 +160,19 @@ void diag_collect_cc_missing(const workspace_snapshot *ws,
 
 /* ── diag_set ────────────────────────────────────────────────────────────── */
 
+/** One URI's bucket inside a diag_set: every diagnostic appended for
+ *  that URI through diag_set_add() in source order. */
 typedef struct diag_file {
-    char       *uri;     /* owned */
-    Diagnostic *items;   /* owned; each .message owned */
-    int         count;
-    int         cap;
+    char       *uri;     /**< owned */
+    Diagnostic *items;   /**< owned; each .message owned */
+    int         count;   /**< number of valid entries in `items` */
+    int         cap;     /**< allocated capacity of `items` */
 } diag_file;
 
 struct diag_set {
-    diag_file *files;    /* owned */
-    int        count;
-    int        cap;
+    diag_file *files;    /**< owned ordered map URI -> diag_file */
+    int        count;    /**< number of valid entries in `files` */
+    int        cap;      /**< allocated capacity of `files` */
 };
 
 diag_set *diag_set_new(void) {

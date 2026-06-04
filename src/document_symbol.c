@@ -26,10 +26,15 @@
 #include <stdlib.h>
 
 /* LSP SymbolKind values — only used for JSON serialization. */
+/** LSP SymbolKind.Module — used for KW_PROJECT. */
 #define SK_MODULE   2
+/** LSP SymbolKind.Function — used for KW_TASK. */
 #define SK_FUNCTION 12
+/** LSP SymbolKind.Variable — used for KW_ACCOUNT. */
 #define SK_VARIABLE 13
+/** LSP SymbolKind.Object — used for KW_RESOURCE. */
 #define SK_OBJECT   19
+/** LSP SymbolKind.Event — used for KW_SHIFT. */
 #define SK_EVENT    24
 
 int symbol_kind_for(int keyword) {
@@ -104,9 +109,9 @@ yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r) {
 
 /** Growable byte buffer used to assemble the document-symbol JSON payload. */
 typedef struct {
-    char   *data;
-    size_t  len;
-    size_t  cap;
+    char   *data; /**< owned heap buffer */
+    size_t  len;  /**< number of valid bytes currently in `data` */
+    size_t  cap;  /**< allocated capacity of `data` */
 } Buf;
 
 static void buf_push(Buf *b, const char *s, size_t n) {

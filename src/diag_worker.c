@@ -29,21 +29,30 @@
 
 /* ── one project's worker ────────────────────────────────────────────────── */
 
+/**
+ * One long-lived background worker thread that runs tj3 against
+ * successive workspace_snapshots of a single project and publishes
+ * the resulting diagnostics.  Workers coalesce: while busy, a newer
+ * snapshot replaces any unstarted pending request rather than
+ * queuing, so a burst of edits collapses into as few tj3 invocations
+ * as possible while still guaranteeing eventual validation of the
+ * latest snapshot.
+ */
 typedef struct diag_worker {
-    char            *project_id;     /* owned; registry key (root document URI) */
-    tj3_mode         mode;           /* fixed for the worker's lifetime */
+    char            *project_id;     /**< owned; registry key (root document URI) */
+    tj3_mode         mode;           /**< fixed for the worker's lifetime */
 
-    pthread_t        thread;
-    pthread_mutex_t  lock;
-    pthread_cond_t   cond;
+    pthread_t        thread;         /**< worker thread handle */
+    pthread_mutex_t  lock;           /**< guards `pending` / `stop` / `clear_on_stop` */
+    pthread_cond_t   cond;           /**< signalled when `pending` or `stop` changes */
 
-    workspace_snapshot *pending;     /* newest unstarted request; holds 1 ref */
-    int              stop;
-    int              clear_on_stop;  /* publish empties on stop (retired project) or not (shutdown) */
+    workspace_snapshot *pending;     /**< newest unstarted request; holds 1 ref */
+    int              stop;           /**< 1 asks the thread to exit at its next wake */
+    int              clear_on_stop;  /**< publish empties on stop (retired project) or not (shutdown) */
 
-    diag_set        *last_published; /* owned; what this worker last emitted */
+    diag_set        *last_published; /**< owned; what this worker last emitted */
 
-    int              seen;           /* registry bookkeeping (coordinator-only) */
+    int              seen;           /**< registry bookkeeping (coordinator-only) */
 } diag_worker;
 
 /* Publish empties for every URI in @p prev, clearing this worker's marks. */

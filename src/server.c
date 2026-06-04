@@ -71,17 +71,20 @@
    Document store
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/** Maximum number of simultaneously tracked documents (editor-managed
+ *  and disk-only combined).  Sized to comfortably exceed real-world
+ *  TaskJuggler workspaces. */
 #define MAX_DOCS 64
 
 /** Document store slot.  Each slot owns the parse-derived state directly
  *  (per-kind synthetic roots, tokens, include filenames); parse() returns
  *  a transient ParseOutput whose fields get moved here by doc_install_parse(). */
 typedef struct Document {
-    char        *uri;
+    char        *uri;               /**< owned canonical file:// URI */
     char        *text;              /**< mutable working copy; the snapshot holds its own parsed copy */
     _Atomic uint64_t doc_version;   /**< monotonic stamp counter; the next parse stamps the value, then ++ */
-    int          in_use;
-    int          disk_only;
+    int          in_use;            /**< 1 when this slot holds a tracked document */
+    int          disk_only;         /**< 1 for a background (non-editor) document */
     int          is_cc_root;        /**< 1 when this doc is named directly in compile_commands.json */
 
     /* Immutable parse output.  `snap` is the current parse's doc_snapshot
@@ -91,18 +94,18 @@ typedef struct Document {
      * last held.  Both are refcounted: a published workspace_snapshot also
      * holds refs, so a snapshot outlives any in-flight query reading it.
      * Each is released and rotated by doc_install_parse(). */
-    doc_snapshot *snap;
-    doc_snapshot *prev_snap;
+    doc_snapshot *snap;             /**< current parse output; see comment above */
+    doc_snapshot *prev_snap;        /**< previous parse output retained for delta; see above */
 
     /* Prefixes applied to this Document by the includer's `include` block,
      * one per kind.  Populated by follow_includes() from the includer's
      * captured IncludeRef when this file is pulled in; stay NULL on a
      * canonical .tjp or on orphan .tji files in a .tji-only workspace.
      * Captured into each workspace_snapshot's ws_doc at build time. */
-    char        *task_prefix;
-    char        *account_prefix;
-    char        *report_prefix;
-    char        *resource_prefix;
+    char        *task_prefix;       /**< owned task-namespace prefix; may be NULL */
+    char        *account_prefix;    /**< owned account-namespace prefix; may be NULL */
+    char        *report_prefix;     /**< owned report-namespace prefix; may be NULL */
+    char        *resource_prefix;   /**< owned resource-namespace prefix; may be NULL */
 
     /* Resolved file:// URIs of every `include` directive in this doc,
      * recorded by follow_includes() at parse time.  Owned by the
@@ -110,9 +113,9 @@ typedef struct Document {
      * freed by doc_free().  Lets build_workspace_snapshot() walk the
      * include graph without re-parsing or threading state through the
      * load pipeline. */
-    char       **included_uris;
-    int          num_included_uris;
-    int          included_uris_cap;
+    char       **included_uris;     /**< owned array; see comment above */
+    int          num_included_uris; /**< number of valid entries in `included_uris` */
+    int          included_uris_cap; /**< allocated capacity of `included_uris` */
 } Document;
 
 static Document docs[MAX_DOCS];
@@ -637,15 +640,17 @@ static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
    tj_node tree-building helpers (shared by per-Project rebuild)
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Coarse kind bucket for a node, collapsing the keyword set into the four
+/**
+ * Coarse kind bucket for a node, collapsing the keyword set into the four
  * id namespaces TaskJuggler keeps separate.  KW_PROJECT maps to NODE_KIND_OTHER
- * but is never inserted into a Project tree (it stays document-local). */
+ * but is never inserted into a Project tree (it stays document-local).
+ */
 typedef enum {
-    NODE_KIND_TASK,
-    NODE_KIND_ACCOUNT,
-    NODE_KIND_RESOURCE,
-    NODE_KIND_REPORT,
-    NODE_KIND_OTHER
+    NODE_KIND_TASK,     /**< KW_TASK */
+    NODE_KIND_ACCOUNT,  /**< KW_ACCOUNT */
+    NODE_KIND_RESOURCE, /**< KW_RESOURCE / KW_SHIFT */
+    NODE_KIND_REPORT,   /**< report-family keywords (KW_REPORT, KW_NAVIGATOR, …) */
+    NODE_KIND_OTHER     /**< anything else; never inserted into a project tree */
 } NodeKind;
 
 static NodeKind node_kind_of(int keyword) {
@@ -748,6 +753,10 @@ static void project_populate_from_root(workspace_snapshot *ws, int pidx,
     int        v_len   = 0;
     int        v_cap   = 0;
 
+    /* Append `val` to a growable array (`arr` / `len` / `cap`), doubling
+     * the capacity when full and jumping to `cleanup` on allocation
+     * failure.  Function-body-local macro; #undef'd at the end of the
+     * helper. */
     #define PUSH(arr, len, cap, val) do {                       \
         if ((len) >= (cap)) {                                   \
             int _nc = (cap) ? (cap) * 2 : 8;                    \

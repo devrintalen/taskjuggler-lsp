@@ -43,6 +43,8 @@
  * Reconcile the worker set against @p ws: spawn a worker (of the right class)
  * for every project in the snapshot, retire workers whose project disappeared,
  * and hand @p ws to each surviving worker as its newest pending request.
+ *
+ * @param ws  Latest workspace snapshot; the registry takes its own refs.
  */
 void diag_registry_update(workspace_snapshot *ws);
 

@@ -42,6 +42,11 @@ typedef enum tj3_mode {
  * diagnostics it reports into @p out (keyed by document URI).  Diagnostics for
  * files outside the project are dropped.  No-op if tj3 is not on PATH or the
  * project cannot be materialised.
+ *
+ * @param ws    Workspace snapshot providing the member documents' text.
+ * @param proj  Project whose root document is fed to tj3.
+ * @param mode  Whether to run full scheduling or `--check-syntax` only.
+ * @param out   Output diag_set; new diagnostics are appended.
  */
 void tj3_collect_project(const workspace_snapshot *ws, const ws_project *proj,
                          tj3_mode mode, diag_set *out);

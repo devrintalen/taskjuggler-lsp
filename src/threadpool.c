@@ -23,9 +23,9 @@
 
 #include <pthread.h>
 
-/* Query workers run lock-free against the per-Job query_context the
- * coordinator clones for them (see query_context.h), so they can run
- * truly in parallel. */
+/** Number of query worker threads.  Workers run lock-free against the
+ *  per-Job query_context the coordinator clones for them (see
+ *  query_context.h), so they can run truly in parallel. */
 #define NUM_QUERY_WORKERS 4
 
 /* Single arrival-ordered FIFO populated by the reader.  The
