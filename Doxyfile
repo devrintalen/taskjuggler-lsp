@@ -18,9 +18,6 @@ EXCLUDE                = src/lexer.yy.c src/grammar.tab.c src/grammar.tab.h
 
 # Function-body-local helper macros.  Doxygen extracts them because they
 # are #defines, but they aren't real members of the file's API surface and
-# can't be cleanly associated with their preceding comment.
-# Function-body-local helper macros.  Doxygen extracts them because they
-# are #defines, but they aren't real members of the file's API surface and
 # can't be cleanly associated with their preceding comment.  `PUSH` is a
 # BFS-local growable-array push used inside one server.c helper; SIG /
 # SIG0 are lexer-state aliases.
@@ -33,10 +30,10 @@ EXCLUDE_SYMBOLS        = SIG SIG0 PUSH
 INPUT_FILTER           = "doc/strip_atomic.sh"
 
 EXTRACT_ALL            = NO
-# Internal static helpers in *.c files are deliberately not exposed in the
-# published API reference; their behaviour is documented inline at the call
-# site.  This keeps the reference focused on the public header surface.
-EXTRACT_STATIC         = NO
+# Internal static helpers in *.c files are documented too: every static
+# function carries a doc comment, so extracting them keeps the reference
+# complete rather than stopping at the public header surface.
+EXTRACT_STATIC         = YES
 JAVADOC_AUTOBRIEF      = YES
 OPTIMIZE_OUTPUT_FOR_C  = YES
 TYPEDEF_HIDES_STRUCT   = YES

@@ -45,6 +45,15 @@ typedef struct member {
 
 /* ── small filesystem helpers ────────────────────────────────────────────── */
 
+/**
+ * Concatenate two path components with a '/' separator.
+ *
+ * @param a Left-hand path component (must be NUL-terminated).
+ * @param b Right-hand path component (must be NUL-terminated).
+ * @return Newly heap-allocated string of the form "@p a/@p b"; the
+ *         caller is responsible for freeing it.  Calls exit(1) on
+ *         allocation failure.
+ */
 static char *path_join(const char *a, const char *b) {
     size_t la = strlen(a), lb = strlen(b);
     char *out = malloc(la + 1 + lb + 1);
@@ -55,7 +64,12 @@ static char *path_join(const char *a, const char *b) {
     return out;
 }
 
-/* Create @p dir and any missing parents (mkdir -p), ignoring EEXIST. */
+/**
+ * Create @p dir and any missing parents (equivalent to mkdir -p),
+ * ignoring EEXIST at each level.
+ *
+ * @param dir Absolute or relative path of the directory to create.
+ */
 static void make_dirs(const char *dir) {
     char *tmp = strdup(dir);
     if (!tmp) return;
@@ -70,6 +84,14 @@ static void make_dirs(const char *dir) {
     free(tmp);
 }
 
+/**
+ * Write @p text to the file at @p path, creating or truncating it.
+ * Returns silently if the file cannot be opened.
+ *
+ * @param path Filesystem path of the file to write.
+ * @param text NUL-terminated content to write; NULL or empty string
+ *             produces an empty file.
+ */
 static void write_text_file(const char *path, const char *text) {
     FILE *f = fopen(path, "w");
     if (!f) return;
@@ -77,7 +99,12 @@ static void write_text_file(const char *path, const char *text) {
     fclose(f);
 }
 
-/* Recursively remove @p path (file or directory). */
+/**
+ * Recursively remove @p path (file or directory), equivalent to
+ * rm -rf.  Returns silently if @p path does not exist.
+ *
+ * @param path Filesystem path of the file or directory to remove.
+ */
 static void remove_recursive(const char *path) {
     struct stat st;
     if (lstat(path, &st) != 0) return;
@@ -100,8 +127,15 @@ static void remove_recursive(const char *path) {
     }
 }
 
-/* Length of the longest common directory prefix (including its trailing '/')
- * over @p n absolute paths. */
+/**
+ * Compute the length of the longest common directory prefix shared by
+ * all @p n absolute paths, including its trailing '/'.
+ *
+ * @param paths Array of @p n NUL-terminated absolute path strings.
+ * @param n     Number of entries in @p paths.
+ * @return Length in bytes of the common directory prefix, including
+ *         the trailing '/'.  Returns 0 if @p n is zero.
+ */
 static size_t common_dir_len(char *const *paths, int n) {
     if (n <= 0) return 0;
     size_t len = strlen(paths[0]);
@@ -116,6 +150,16 @@ static size_t common_dir_len(char *const *paths, int n) {
 
 /* ── tj3 discovery ───────────────────────────────────────────────────────── */
 
+/**
+ * Test whether the tj3 binary is available and should be invoked.
+ *
+ * The result is computed once and cached.  If the environment variable
+ * TASKJUGGLER_LSP_DISABLE_TJ3 is set, the function always returns 0
+ * regardless of PATH, which provides a deterministic escape hatch for
+ * test environments.
+ *
+ * @return 1 if tj3 is found and executable on PATH, 0 otherwise.
+ */
 static int tj3_available(void) {
     static int cached = -1;        /* -1 unknown, 0 absent, 1 present */
     if (cached >= 0) return cached;
@@ -147,8 +191,17 @@ static int tj3_available(void) {
 
 /* ── run tj3, capturing stderr ───────────────────────────────────────────── */
 
-/* Fork/exec tj3 with cwd = @p tmpdir, returning its captured stderr as a
- * heap string (owned by caller), or NULL on failure. */
+/**
+ * Fork and exec tj3 with cwd set to @p tmpdir, capturing its stderr
+ * output into a heap-allocated string.
+ *
+ * @param tmpdir Working directory for the tj3 child process.
+ * @param argv   NULL-terminated argument vector passed to execvp;
+ *               argv[0] must be "tj3".
+ * @return Heap-allocated NUL-terminated string containing the full
+ *         stderr output of tj3, owned by the caller; NULL on fork,
+ *         pipe, or allocation failure.
+ */
 static char *run_tj3(const char *tmpdir, char *const argv[]) {
     int errpipe[2];
     if (pipe(errpipe) != 0) return NULL;
@@ -203,9 +256,22 @@ static char *run_tj3(const char *tmpdir, char *const argv[]) {
 
 /* ── stderr parsing ──────────────────────────────────────────────────────── */
 
-/* Map a tj3-reported path to a member URI, or NULL if it is outside the
- * project.  tj3 may report the path relative to the temp dir or absolute
- * under it; normalise both forms before matching against member relpaths. */
+/**
+ * Map a tj3-reported file path to the corresponding member URI.
+ *
+ * tj3 may emit paths relative to the temp directory (e.g. "./foo.tjp")
+ * or absolute under it; both forms are normalised to a bare relative
+ * path before being matched against member relpaths.
+ *
+ * @param path     Raw path string emitted by tj3 in a diagnostic line.
+ * @param tmpdir   The temporary directory passed to run_tj3().
+ * @param real_tmp The result of realpath() on @p tmpdir, or NULL if
+ *                 unavailable; used to resolve symlinks in the path.
+ * @param members  Array of project member descriptors.
+ * @param nmembers Number of entries in @p members.
+ * @return Borrowed pointer to the member's URI string, or NULL if the
+ *         path does not correspond to any project member.
+ */
 static const char *map_reported_path(const char *path,
                                      const char *tmpdir, const char *real_tmp,
                                      const member *members, int nmembers) {
@@ -228,6 +294,25 @@ static const char *map_reported_path(const char *path,
     return NULL;
 }
 
+/**
+ * Parse tj3 stderr output and populate @p out with the resulting
+ * diagnostics.
+ *
+ * Each non-empty line is examined for an ": Error: " or ": Warning: "
+ * marker.  Lines that match are decoded into a Diagnostic (file path,
+ * 1-based line number, severity, message) and appended to @p out.
+ * Lines that do not match are silently ignored.
+ *
+ * @param stderr_buf  NUL-terminated buffer of tj3 stderr; modified in
+ *                    place by strtok_r.  May be NULL (no-op).
+ * @param tmpdir      Temporary directory used for the tj3 run; passed
+ *                    to map_reported_path() for path normalisation.
+ * @param real_tmp    realpath() result for @p tmpdir, or NULL.
+ * @param members     Array of project member descriptors.
+ * @param nmembers    Number of entries in @p members.
+ * @param out         Destination diag_set to receive the parsed
+ *                    diagnostics.
+ */
 static void parse_diagnostics(char *stderr_buf,
                               const char *tmpdir, const char *real_tmp,
                               const member *members, int nmembers,

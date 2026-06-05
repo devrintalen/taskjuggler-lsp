@@ -28,29 +28,40 @@
  *  query_context.h), so they can run truly in parallel. */
 #define NUM_QUERY_WORKERS 4
 
-/* Single arrival-ordered FIFO populated by the reader.  The
- * coordinator pops from it in order, which is what enforces the LSP
- * "messages processed in arrival order" rule across queries and
- * notifications alike. */
+/** Single arrival-ordered FIFO populated by the reader thread.
+ *  The coordinator pops from it in arrival order, enforcing the LSP
+ *  rule that messages are processed in the order they are received. */
 static JobQueue *work_queue;
 
-/* Internal handoff queue: the coordinator pushes query jobs (with
- * their snapshot already attached) onto this for the query worker
- * pool to consume.  Notifications never go here — the coordinator
- * dispatches them inline. */
+/** Internal handoff queue from the coordinator to the query-worker
+ *  pool.  The coordinator pushes query jobs onto this queue after
+ *  attaching a cloned query_context.  Notifications are never
+ *  enqueued here; the coordinator dispatches them inline. */
 static JobQueue *request_queue;
 
+/** Handle for the single coordinator thread. */
 static pthread_t coordinator_thread;
+
+/** Handles for the pool of query worker threads. */
 static pthread_t query_threads[NUM_QUERY_WORKERS];
+
+/** Non-zero after threadpool_start() has been called successfully. */
 static int       pool_started = 0;
 
-/* Coordinator thread.  Pops jobs from work_queue in arrival order so the
- * LSP "messages processed in arrival order" rule is preserved.
- * Notifications and already-cancelled jobs run inline here.  For queries,
- * server_coordinate_query() either dispatches an inline method itself
- * (returning 1, so we free the Job) or clones a query_context, attaches it
- * to the Job, and hands it to the query-worker pool (returning 0, so the
- * pool now owns the Job). */
+/**
+ * Coordinator thread entry point.
+ *
+ * Pops jobs from @c work_queue in arrival order, preserving the LSP
+ * rule that messages are processed in the order they arrive.
+ * Notifications and already-cancelled jobs are dispatched inline.
+ * For query jobs, server_coordinate_query() either handles the request
+ * inline (returning 1, so the Job is freed here) or clones a
+ * query_context, attaches it to the Job, and returns 0, transferring
+ * ownership to the query-worker pool via @c request_queue.
+ *
+ * @param arg Unused; required by the pthread_create signature.
+ * @return Always NULL.
+ */
 static void *coordinator(void *arg) {
     (void)arg;
     while (1) {
@@ -74,9 +85,18 @@ static void *coordinator(void *arg) {
     return NULL;
 }
 
-/* Query worker.  Runs handlers lock-free against the Job's pre-cloned
- * query_context.  A $/cancelRequest may have marked the Job after the
- * coordinator queued it; honour the flag before running. */
+/**
+ * Query worker thread entry point.
+ *
+ * Pops jobs from @c request_queue and executes them lock-free against
+ * the pre-cloned query_context that the coordinator attached.  If a
+ * $/cancelRequest arrived after the coordinator enqueued the job, the
+ * cancellation flag is honoured and the job is dispatched as cancelled
+ * rather than executed.
+ *
+ * @param arg Unused; required by the pthread_create signature.
+ * @return Always NULL.
+ */
 static void *query_worker(void *arg) {
     (void)arg;
     while (1) {

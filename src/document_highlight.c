@@ -32,6 +32,14 @@
  * occurrences, mirroring references.c but emitting highlight kinds instead
  * of cross-file Locations. */
 
+/**
+ * Append a single document highlight object to @p arr.
+ *
+ * @param doc    yyjson mutable document used for all allocations.
+ * @param arr    JSON array to append the highlight object to.
+ * @param range  Source range covered by this highlight.
+ * @param kind   LSP DocumentHighlightKind value (2 = Read, 3 = Write).
+ */
 static void push_highlight(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                            LspRange range, int kind) {
     yyjson_mut_val *obj = yyjson_mut_obj(doc);
@@ -40,11 +48,21 @@ static void push_highlight(yyjson_mut_doc *doc, yyjson_mut_val *arr,
     yyjson_mut_arr_add_val(arr, obj);
 }
 
-/* A dependency's source_range spans the whole reference (leading bangs and
- * every dotted segment); the highlight, like the original implementation's
- * goldens, covers only the identifier token that names the resolved target —
- * i.e. the path's final segment.  Return the last TK_IDENT token whose start
- * falls within @p range. */
+/**
+ * Find the last TK_IDENT token whose start position falls within @p range
+ * and write its range into @p out.
+ *
+ * A dependency's source_range spans the whole reference (leading bangs and
+ * every dotted segment); the highlight covers only the identifier token that
+ * names the resolved target, i.e. the path's final segment.
+ *
+ * @param tokens      Array of token spans for the current document.
+ * @param num_tokens  Number of entries in @p tokens.
+ * @param range       Source range to search within.
+ * @param out         Output parameter set to the range of the last matching
+ *                    TK_IDENT token when one is found.
+ * @return            1 if a matching token was found, 0 otherwise.
+ */
 static int last_ident_in_range(const TokenSpan *tokens, int num_tokens,
                                LspRange range, LspRange *out) {
     int found = 0;
@@ -59,10 +77,23 @@ static int last_ident_in_range(const TokenSpan *tokens, int num_tokens,
     return found;
 }
 
-/* Depth-first walk of the project tree, pushing a Read highlight for each
- * dependency that (a) is declared in the current document and (b) resolves to
- * @p wanted.  Cross-file dependencies are skipped: highlight ranges are
- * doc-local, so only references living in @p doc_uri can be reported. */
+/**
+ * Recursively walk the project tree depth-first, appending a Read highlight
+ * (kind 2) for each dependency that is declared in @p doc_uri and resolves to
+ * @p wanted.  Cross-file dependencies are skipped because highlight ranges
+ * are document-local.
+ *
+ * @param doc           yyjson mutable document used for all allocations.
+ * @param arr           JSON array to append highlight objects to.
+ * @param node          Current node in the depth-first traversal.
+ * @param wanted        Target node that dependencies must resolve to.
+ * @param project_root  Root of the project tree, passed to
+ *                      project_dep_resolve() for resolution.
+ * @param doc_uri       URI of the document being highlighted; only
+ *                      dependencies whose source_uri matches are emitted.
+ * @param tokens        Array of token spans for the current document.
+ * @param num_tokens    Number of entries in @p tokens.
+ */
 static void collect_read_highlights(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                                     ProjectNode *node, const ProjectNode *wanted,
                                     ProjectNode *project_root,

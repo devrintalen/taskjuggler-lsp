@@ -84,8 +84,15 @@ void publish_diagnostics(const char *uri) {
 
 /* ── "Missing/Malformed compile_commands.json" warnings ──────────────────── */
 
-/* Add one DIAG_WARNING at @p range with a heap copy of @p message to @p out
- * under @p uri. */
+/**
+ * Append a single DIAG_WARNING diagnostic to @p out under @p uri.
+ * The message string is heap-copied and owned by the diagnostic entry.
+ *
+ * @param out      Destination diag_set to append the warning to.
+ * @param uri      Document URI that the warning belongs to.
+ * @param range    Source range in the document where the warning is located.
+ * @param message  Human-readable warning text; a heap copy is stored.
+ */
 static void add_warning(diag_set *out, const char *uri,
                         LspRange range, const char *message) {
     Diagnostic d;
@@ -181,6 +188,14 @@ diag_set *diag_set_new(void) {
     return s;
 }
 
+/**
+ * Return the diag_file bucket for @p uri, creating it if necessary.
+ * The returned pointer is valid until the next structural modification of @p s.
+ *
+ * @param s    Diagnostic set to look up or extend.
+ * @param uri  Document URI whose bucket is required.
+ * @return     Pointer to the existing or newly-created diag_file for @p uri.
+ */
 static diag_file *diag_set_file(diag_set *s, const char *uri) {
     for (int i = 0; i < s->count; i++)
         if (strcmp(s->files[i].uri, uri) == 0)
@@ -225,6 +240,13 @@ void diag_set_free(diag_set *s) {
     free(s);
 }
 
+/**
+ * Test whether @p s contains at least one diagnostic entry for @p uri.
+ *
+ * @param s    Diagnostic set to search; NULL is treated as empty.
+ * @param uri  Document URI to look for.
+ * @return     1 if a bucket for @p uri exists in @p s, 0 otherwise.
+ */
 static int diag_set_has(const diag_set *s, const char *uri) {
     if (!s) return 0;
     for (int i = 0; i < s->count; i++)
