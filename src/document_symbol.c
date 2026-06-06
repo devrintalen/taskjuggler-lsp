@@ -26,10 +26,15 @@
 #include <stdlib.h>
 
 /* LSP SymbolKind values — only used for JSON serialization. */
+/** LSP SymbolKind.Module — used for KW_PROJECT. */
 #define SK_MODULE   2
+/** LSP SymbolKind.Function — used for KW_TASK. */
 #define SK_FUNCTION 12
+/** LSP SymbolKind.Variable — used for KW_ACCOUNT. */
 #define SK_VARIABLE 13
+/** LSP SymbolKind.Object — used for KW_RESOURCE. */
 #define SK_OBJECT   19
+/** LSP SymbolKind.Event — used for KW_SHIFT. */
 #define SK_EVENT    24
 
 int symbol_kind_for(int keyword) {
@@ -104,11 +109,18 @@ yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r) {
 
 /** Growable byte buffer used to assemble the document-symbol JSON payload. */
 typedef struct {
-    char   *data;
-    size_t  len;
-    size_t  cap;
+    char   *data; /**< owned heap buffer */
+    size_t  len;  /**< number of valid bytes currently in `data` */
+    size_t  cap;  /**< allocated capacity of `data` */
 } Buf;
 
+/**
+ * Append @p n bytes from @p s to the growable buffer @p b, reallocating as needed.
+ *
+ * @param b  Buffer to append to.
+ * @param s  Bytes to append.
+ * @param n  Number of bytes to copy from @p s.
+ */
 static void buf_push(Buf *b, const char *s, size_t n) {
     if (b->len + n > b->cap) {
         size_t new_cap = b->cap ? b->cap * 2 : 4096;
@@ -122,6 +134,16 @@ static void buf_push(Buf *b, const char *s, size_t n) {
     b->len += n;
 }
 
+/**
+ * Format the decimal representation of @p v directly into the buffer at @p p.
+ *
+ * The caller must ensure at least 10 bytes of space are available at @p p.
+ * No NUL terminator is written.
+ *
+ * @param p  Destination byte buffer; must have room for at least 10 characters.
+ * @param v  Unsigned 32-bit integer value to format.
+ * @return Number of characters written.
+ */
 static int write_uint(char *p, uint32_t v) {
     if (v == 0) { *p = '0'; return 1; }
     char tmp[10];
@@ -134,6 +156,13 @@ static int write_uint(char *p, uint32_t v) {
     return len;
 }
 
+/**
+ * Append the decimal representation of @p v to buffer @p b, growing the
+ * buffer if necessary.
+ *
+ * @param b  Buffer to append to.
+ * @param v  Unsigned 32-bit integer value to serialize.
+ */
 static void buf_push_uint(Buf *b, uint32_t v) {
     if (b->len + 10 > b->cap) {
         size_t new_cap = b->cap ? b->cap * 2 : 4096;
@@ -146,6 +175,14 @@ static void buf_push_uint(Buf *b, uint32_t v) {
     b->len += (size_t)write_uint(b->data + b->len, v);
 }
 
+/**
+ * Append @p s to buffer @p b as a JSON string literal, including the
+ * surrounding double-quote characters and escaping control characters,
+ * backslashes, and embedded double quotes.
+ *
+ * @param b  Buffer to append to.
+ * @param s  NUL-terminated string to serialize as a JSON string value.
+ */
 static void buf_push_json_str(Buf *b, const char *s) {
     buf_push(b, "\"", 1);
     const char *run = s;
@@ -168,6 +205,15 @@ static void buf_push_json_str(Buf *b, const char *s) {
     buf_push(b, "\"", 1);
 }
 
+/**
+ * Append a compact JSON object representing the LSP Range @p r to buffer @p b.
+ *
+ * The emitted object has the form
+ * {"start":{"line":L,"character":C},"end":{"line":L,"character":C}}.
+ *
+ * @param b  Buffer to append to.
+ * @param r  LSP range value to serialize.
+ */
 static void write_range_buf(Buf *b, LspRange r) {
     PUSH_LIT(b, "{\"start\":{\"line\":");
     buf_push_uint(b, r.start.line);
@@ -180,6 +226,16 @@ static void write_range_buf(Buf *b, LspRange r) {
     PUSH_LIT(b, "}}");
 }
 
+/**
+ * Recursively append a JSON DocumentSymbol object for @p sym (and its
+ * descendants) to buffer @p b.
+ *
+ * The object includes name, detail (id), kind, range, selectionRange, and,
+ * when the node has children, a children array.
+ *
+ * @param b    Buffer to append to.
+ * @param sym  tj_node to serialize; must not be NULL.
+ */
 static void write_node_buf(Buf *b, const tj_node *sym) {
     PUSH_LIT(b, "{\"name\":");
     buf_push_json_str(b, sym->name ? sym->name : "");

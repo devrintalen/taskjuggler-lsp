@@ -24,10 +24,19 @@
 
 #pragma once
 
-/** Convert a file:// URI to a filesystem path (percent-decoded, heap, owned by
- *  caller), or NULL when @p uri is not a file:// URI. */
+/**
+ * Convert a file:// URI to a filesystem path.
+ *
+ * @param uri  Source URI; must begin with "file://" to produce a result.
+ * @return Heap-allocated percent-decoded filesystem path (owned by caller),
+ *         or NULL when @p uri is not a file:// URI.
+ */
 char *uri_to_path(const char *uri);
 
-/** Convert a filesystem path to a percent-encoded file:// URI (heap, owned by
- *  caller). */
+/**
+ * Convert a filesystem path to a percent-encoded file:// URI.
+ *
+ * @param path  Filesystem path to encode.
+ * @return Heap-allocated URI (owned by caller).
+ */
 char *path_to_uri(const char *path);

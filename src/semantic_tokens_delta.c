@@ -24,26 +24,32 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Each semantic token occupies five uint32 entries in the LSP data array.
- * Diffing operates on these five-tuples as atomic elements, which keeps
- * every emitted edit aligned to a token boundary. */
+/** Number of uint32 entries per semantic token in the LSP data array.
+ *  Diffing operates on these five-tuples as atomic elements, which keeps
+ *  every emitted edit aligned to a token boundary. */
 #define TUPLE_LEN 5
 
-/* Maximum edit distance the Myers diff will compute before falling back to
- * a single replace-everything edit.  Sized so that worst-case snapshot
- * storage stays under a few MB.  Realistic deltas (a typing burst inside
- * a kilo-line file) reduce to D < 100 after prefix/suffix trimming. */
+/** Maximum edit distance the Myers diff will compute before falling back
+ *  to a single replace-everything edit.  Sized so worst-case snapshot
+ *  storage stays under a few MB; realistic deltas (a typing burst inside
+ *  a kilo-line file) reduce to D < 100 after prefix/suffix trimming. */
 #define D_BOUND 1024
 
 /** Single coalesced edit operation expressed in token units. */
 typedef struct {
-    size_t start_tok;        /* offset in the previous data buffer (tokens) */
-    size_t delete_tok;       /* number of tokens to remove */
-    size_t insert_b_start;   /* offset in the new data buffer (tokens)      */
-    size_t insert_tok;       /* number of tokens to insert from there       */
+    size_t start_tok;        /**< offset in the previous data buffer (tokens) */
+    size_t delete_tok;       /**< number of tokens to remove */
+    size_t insert_b_start;   /**< offset in the new data buffer (tokens) */
+    size_t insert_tok;       /**< number of tokens to insert from there */
 } EditOp;
 
-/** Compare two five-tuples for byte equality. */
+/**
+ * Compare two five-tuples for byte equality.
+ *
+ * @param a  Pointer to the first five-element uint32_t tuple.
+ * @param b  Pointer to the second five-element uint32_t tuple.
+ * @return   Non-zero if the tuples are identical, zero otherwise.
+ */
 static int tokens_equal(const uint32_t *a, const uint32_t *b) {
     return memcmp(a, b, TUPLE_LEN * sizeof(uint32_t)) == 0;
 }
@@ -73,6 +79,20 @@ static int tokens_equal(const uint32_t *a, const uint32_t *b) {
  *
  * When @p na + @p nb exceeds #D_BOUND the algorithm falls back to a
  * single replace-everything edit to bound snapshot memory.
+ *
+ * @param a          Pointer to the previous (old) token data array.
+ * @param na         Number of tokens in @p a.
+ * @param b          Pointer to the new token data array.
+ * @param nb         Number of tokens in @p b.
+ * @param a_offset   Token index offset added to each edit's start position
+ *                   (accounts for already-trimmed common prefix in @p a).
+ * @param b_offset   Token index offset added to each edit's insert position
+ *                   (accounts for already-trimmed common prefix in @p b).
+ * @param out_ops    Output pointer set to a heap-allocated array of coalesced
+ *                   #EditOp values; caller must free.  Set to NULL when there
+ *                   are no edits.
+ * @param out_n_ops  Output pointer set to the number of entries in
+ *                   @p out_ops.
  */
 static void myers_diff_run(const uint32_t *a, size_t na,
                            const uint32_t *b, size_t nb,

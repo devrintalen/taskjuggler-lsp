@@ -37,9 +37,9 @@
  * compile_commands_free().
  */
 typedef struct {
-    char *file_abs;
-    char *directory;
-    char *command;
+    char *file_abs;  /**< owned absolute path to the .tjp; resolved by compile_commands_load() */
+    char *directory; /**< owned copy of the entry's `directory` field, for future use */
+    char *command;   /**< owned copy of the entry's `command` field, for future use */
 } CompileEntry;
 
 /**
@@ -76,5 +76,11 @@ CompileCommandsResult compile_commands_load(const char *workspace_root,
                                              CompileEntry **out_entries,
                                              int *out_count);
 
-/** Free an array returned by compile_commands_load(). */
+/**
+ * Free an array returned by compile_commands_load().
+ *
+ * @param entries  Array previously returned by compile_commands_load(),
+ *                 or NULL.
+ * @param count    Number of entries in @p entries.
+ */
 void compile_commands_free(CompileEntry *entries, int count);

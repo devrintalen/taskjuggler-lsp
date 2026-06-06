@@ -26,11 +26,11 @@
 #include <stdlib.h>
 
 struct JobQueue {
-    Job             *head;
-    Job             *tail;
-    int              closed;
-    pthread_mutex_t  mutex;
-    pthread_cond_t   cond;
+    Job             *head;   /**< first Job to pop, or NULL when empty */
+    Job             *tail;   /**< last Job in the list, for O(1) push */
+    int              closed; /**< 1 after job_queue_close(); pop returns NULL once drained */
+    pthread_mutex_t  mutex;  /**< guards `head` / `tail` / `closed` */
+    pthread_cond_t   cond;   /**< signalled on push and on close */
 };
 
 JobQueue *job_queue_create(void) {

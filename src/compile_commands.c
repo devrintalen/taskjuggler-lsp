@@ -27,7 +27,14 @@
 #include <string.h>
 #include <sys/stat.h>
 
-/** Concatenate @p a, '/' if needed, and @p b.  Caller frees. */
+/**
+ * Concatenate @p a, '/' if needed, and @p b into a newly-allocated string.
+ * Caller is responsible for freeing the returned pointer.
+ *
+ * @param a  Left-hand path component (must not be NULL).
+ * @param b  Right-hand path component (must not be NULL).
+ * @return   Heap-allocated concatenated path, or NULL on allocation failure.
+ */
 static char *path_join(const char *a, const char *b) {
     size_t la = strlen(a);
     size_t lb = strlen(b);
@@ -41,8 +48,20 @@ static char *path_join(const char *a, const char *b) {
     return out;
 }
 
-/** Resolve @p file against @p directory (or @p workspace_root if @p
- *  directory is NULL/empty) into a newly-allocated absolute path. */
+/**
+ * Resolve @p file against @p directory (or @p workspace_root when @p directory
+ * is NULL or empty) into a newly-allocated absolute path.
+ * If @p file is already absolute it is duplicated directly.
+ *
+ * @param workspace_root  Fallback base directory used when @p directory is
+ *                        NULL or empty.
+ * @param directory       Preferred base directory from the compile-commands
+ *                        entry, or NULL.
+ * @param file            Source file path from the compile-commands entry;
+ *                        may be absolute or relative.
+ * @return                Heap-allocated absolute path, or NULL if @p file is
+ *                        NULL or no usable base is available.
+ */
 static char *resolve_entry_path(const char *workspace_root,
                                  const char *directory,
                                  const char *file) {

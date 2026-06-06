@@ -25,6 +25,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/**
+ * Duplicate @p s if non-NULL, otherwise return NULL.
+ *
+ * @param s  String to duplicate, or NULL.
+ * @return   Heap-allocated copy of @p s, or NULL if @p s is NULL.
+ */
 static char *dup_or_null(const char *s) {
     return s ? strdup(s) : NULL;
 }

@@ -42,6 +42,15 @@ void project_node_append_child(ProjectNode *parent, ProjectNode *child) {
     child->parent_node = parent;
 }
 
+/**
+ * Copy the dependency list from a parsed tj_node into a ProjectNode.
+ *
+ * Each Dependency entry is deep-copied: the path string is duplicated and the
+ * resolved pointer is initialized to PROJECT_DEP_UNRESOLVED.
+ *
+ * @param dst  ProjectNode to receive the copied dependency array.
+ * @param src  Source tj_node whose dependencies are copied.
+ */
 static void copy_dependencies(ProjectNode *dst, const tj_node *src) {
     if (src->num_dependencies <= 0) return;
     dst->dependencies = calloc((size_t)src->num_dependencies, sizeof(ProjectDep));
@@ -101,7 +110,18 @@ void project_node_free_children(ProjectNode *root) {
 
 /* ── Resolution ─────────────────────────────────────────────────────────── */
 
-/** Split a dotted path ("a.b.c") into heap-allocated segments. */
+/**
+ * Split a dotted path ("a.b.c") into heap-allocated segments.
+ *
+ * On success @p *out_segs is a freshly allocated array of @p *out_n
+ * heap-allocated strings (one per dot-delimited component).  The caller
+ * must free each string and then the array itself, e.g. via free_segs().
+ * On failure both outputs are set to NULL / 0.
+ *
+ * @param path      Dot-delimited identifier path to split; may be NULL or empty.
+ * @param out_segs  Receives a pointer to the allocated segment array, or NULL on failure.
+ * @param out_n     Receives the number of segments produced.
+ */
 static void split_dotted_path(const char *path, char ***out_segs, int *out_n) {
     *out_n    = 0;
     *out_segs = NULL;
@@ -118,11 +138,24 @@ static void split_dotted_path(const char *path, char ***out_segs, int *out_n) {
     free(tmp);
 }
 
+/**
+ * Free a segment array produced by split_dotted_path().
+ *
+ * @param segs  Array of heap-allocated strings to free; may be NULL.
+ * @param n     Number of valid entries in @p segs.
+ */
 static void free_segs(char **segs, int n) {
     for (int i = 0; i < n; i++) free(segs[i]);
     free(segs);
 }
 
+/**
+ * Find the direct KW_TASK child of @p parent whose id matches @p id.
+ *
+ * @param parent  ProjectNode whose children are searched.
+ * @param id      Task identifier string to match.
+ * @return Pointer to the matching child, or NULL if not found.
+ */
 static ProjectNode *child_task(ProjectNode *parent, const char *id) {
     for (int i = 0; i < parent->num_children; i++) {
         ProjectNode *c = parent->children[i];
@@ -132,15 +165,24 @@ static ProjectNode *child_task(ProjectNode *parent, const char *id) {
     return NULL;
 }
 
-/** Navigate a dotted task path beginning among @p children.  The assembled
- *  tree holds no project containers (they stay document-local), so this is
- *  a straight id-by-id descent over KW_TASK nodes.
+/**
+ * Navigate a dotted task path beginning among @p children.
  *
- *  TODO: only task targets are resolved today.  Valid reference targets
- *  could also be accounts, resources, and reports; extending support means
- *  capturing those references at parse time (grammar.y currently records
- *  only depends/precedes via tj_node_push_dependency) and relaxing this
- *  KW_TASK filter. */
+ * The assembled tree holds no project containers (they stay document-local),
+ * so this is a straight id-by-id descent over KW_TASK nodes.
+ *
+ * TODO: only task targets are resolved today.  Valid reference targets
+ * could also be accounts, resources, and reports; extending support means
+ * capturing those references at parse time (grammar.y currently records
+ * only depends/precedes via tj_node_push_dependency) and relaxing this
+ * KW_TASK filter.
+ *
+ * @param children  Array of sibling ProjectNode pointers to search at the first level.
+ * @param n         Number of entries in @p children.
+ * @param segs      Dot-split path segments produced by split_dotted_path().
+ * @param nseg      Number of segments in @p segs.
+ * @return Pointer to the matching ProjectNode, or NULL if the path does not resolve.
+ */
 static ProjectNode *find_task(ProjectNode *const *children, int n,
                               char *const *segs, int nseg) {
     if (nseg == 0 || !segs) return NULL;

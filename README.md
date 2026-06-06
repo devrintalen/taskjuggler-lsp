@@ -21,34 +21,55 @@ This program implements that for TaskJuggler.
 
 ## Features
 
-- Diagnostics: unresolved `depends`/`precedes` targets, out-of-scope relative refs, cross-file validation
+- Diagnostics from three independent sources merged per file:
+  - parser (syntax, unresolved local refs);
+  - the real `tj3` scheduler run asynchronously per project (cross-file refs, scheduling errors);
+  - server configuration warnings (e.g. missing `compile_commands.json`).
 - Hover and signature help for 39 TaskJuggler keywords
 - Context-aware completion of keywords and identifiers, including hierarchical and relative (`!`) references
 - Document and workspace symbols across all open and background-loaded files
 - Go to definition and find references for `depends`/`precedes`, cross-file
-- Document highlight, folding ranges, and semantic-token syntax highlighting
+- Document highlight, folding ranges, and semantic-token syntax highlighting (with delta support)
+- Cancellable requests (`$/cancelRequest`) and lock-free parallel query workers backed by immutable refcounted snapshots
 - Incremental document sync, file watching for `**/*.tjp` and `**/*.tji`, and rename tracking
-- Transitive workspace loading via `include` directives
+- Workspace loaded from a top-level `compile_commands.json`, with transitive `include` directives admitting background documents automatically
 
 ## Dependencies
+
+Build-time:
 
 - [yyjson](https://github.com/ibireme/yyjson)
 - [Flex](https://github.com/westes/flex)
 - [Bison](https://www.gnu.org/software/bison/)
-- [Python](https://www.python.org/) (for running unit tests)
-- [Valgrind](https://valgrind.org/) (for profiling)
+- [Python](https://www.python.org/) (test harness and benchmark tooling)
+- [Valgrind](https://valgrind.org/) (optional, for callgrind profiling)
+
+Runtime:
+
+- [TaskJuggler](https://taskjuggler.org/) (`tj3` 3.x, optional but strongly recommended)
+
+If `tj3` is on `PATH` the server invokes it asynchronously per project
+to surface real scheduler diagnostics (cross-file unresolved
+references, scheduling conflicts, date-range errors). Without it the
+server still parses and serves every LSP feature; only the `tj3`-sourced
+diagnostics are missing.
 
 On Debian/Ubuntu:
 
 ```sh
-apt install libyyjson-dev flex bison
+apt install libyyjson-dev flex bison taskjuggler
 ```
 
 On Gentoo:
 
 ```sh
-emerge -a dev-libs/yyjson sys-devel/flex sys-devel/bison
+emerge -a dev-libs/yyjson sys-devel/flex sys-devel/bison dev-lang/ruby
+gem install taskjuggler
 ```
+
+TaskJuggler is not in the main Gentoo portage tree; the upstream
+distribution is a Ruby gem, so install Ruby through portage and then
+pull `taskjuggler` from rubygems.org.
 
 ## Building
 
@@ -131,6 +152,52 @@ standard input/output using the LSP JSON-RPC protocol.
 
 See `doc/usage.rst` for more details on integrating with specific
 IDEs.
+
+### Workspace configuration
+
+Each workspace needs a `compile_commands.json` at its root listing
+the top-level `.tjp` files. This is the sole source of truth for
+which projects exist; without it the server stays alive but loads
+no documents and surfaces the problem as a per-file diagnostic on
+every open `.tjp` / `.tji`.
+
+Minimal schema (only `file` and optional `directory` are read today;
+`command` is preserved for future use):
+
+```json
+[
+  { "directory": ".", "command": "tj3 main.tjp",  "file": "main.tjp" },
+  { "directory": ".", "command": "tj3 other.tjp", "file": "other.tjp" }
+]
+```
+
+Each listed `.tjp` becomes the root of one project; its transitive
+`include` closure (every reachable `.tji` / `.tjp`) joins the same
+project automatically and inherits the includer's prefix.
+
+> **Placeholder — schema flags.** Today `command` is captured but
+> not interpreted. A future revision is likely to honour `-D` style
+> defines and scenario flags from the command string, at which point
+> this section should document which flags are read.
+
+### Architecture overview
+
+For a deeper tour of the runtime — the coordinator/worker thread
+model, the immutable refcounted `doc_snapshot` /
+`workspace_snapshot` layers, the per-project tj3 workers, and how
+the parse output flows to each LSP feature — see the [Module
+guide][module-guide] in the published docs.
+
+[module-guide]: https://taskjuggler-lsp.readthedocs.io/en/latest/modules/index.html
+
+> **Placeholder — Status / roadmap.** This README does not currently
+> track which LSP methods are implemented or planned. The published
+> docs have an exhaustive table at
+> [`doc/lsp_coverage.rst`][lsp-coverage]; if the project gains a
+> public roadmap, a short "Status" section linking to it would
+> belong here.
+
+[lsp-coverage]: https://taskjuggler-lsp.readthedocs.io/en/latest/lsp_coverage.html
 
 ## License
 

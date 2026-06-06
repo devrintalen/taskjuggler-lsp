@@ -31,24 +31,42 @@
  * YY_BUFFER_STATE to avoid pulling in the full flex header.
  */
 
+/** Opaque flex scanner buffer handle; defined in lexer.yy.c. */
 typedef void *YY_BUFFER_STATE;
+/**
+ * Install @p str as the current flex input buffer.  Defined in lexer.yy.c.
+ *
+ * @param str  NUL-terminated input the scanner will tokenize.
+ * @return Buffer handle to release with yy_delete_buffer().
+ */
 extern YY_BUFFER_STATE yy_scan_string(const char *str);
+/**
+ * Release a buffer returned by yy_scan_string().  Defined in lexer.yy.c.
+ *
+ * @param buf  Buffer handle to free.
+ */
 extern void            yy_delete_buffer(YY_BUFFER_STATE buf);
+/** Current column reported by the flex scanner.  Defined in lexer.yy.c. */
 extern int             yycolumn;
+/** Current line reported by the flex scanner.  Defined in lexer.yy.c. */
 extern int             yylineno;
 
 /* ── Shared globals (used by lexer.l and grammar.y via extern) ───────────── */
 
-/** Currently-being-built ParseOutput; lexer/grammar populate this directly. */
-/* Defined in grammar.y.  Called at the start of every parse() so that a
+/**
+ * Defined in grammar.y.  Called at the start of every parse() so that a
  * partial include-body parse from a previous run cannot leak its pending
- * prefix strings into the next parse. */
+ * prefix strings into the next parse.
+ */
 extern void reset_pending_include_state(void);
 
+/** Currently-being-built ParseOutput; lexer/grammar populate this directly. */
 ParseOutput *g_output         = NULL;
 /** Backing storage for the token-span array under construction. */
 TokenSpan   *g_tok_spans      = NULL;
+/** Number of valid entries currently in `g_tok_spans`. */
 int          g_num_tok_spans  = 0;
+/** Allocated capacity of `g_tok_spans`. */
 int          g_tok_span_cap   = 0;
 /** Running upper bound on emitted semantic-token entries (one per source line covered). */
 int          g_num_sem_entries = 0;
@@ -56,6 +74,9 @@ int          g_num_sem_entries = 0;
 /**
  * Test whether a token of @p kind is emitted as a semantic token.
  * Mirrors the skip set in classify() in semantic_tokens.c.
+ *
+ * @param kind  Raw TK_/KW_ token-kind constant to test.
+ * @return Non-zero if the token contributes a semantic-token entry, zero if it is skipped.
  */
 static int is_sem_highlighted(int kind) {
     return kind != TK_LBRACE && kind != TK_RBRACE &&
@@ -65,6 +86,13 @@ static int is_sem_highlighted(int kind) {
 /**
  * Append one TokenSpan to the global accumulator.  Called from lexer.l for
  * every token that callers may need to inspect.
+ *
+ * @param kind  Raw TK_/KW_ constant the lexer matched.
+ * @param sl    Start line.
+ * @param sc    Start column.
+ * @param el    End line.
+ * @param ec    End column.
+ * @param text  Borrowed lexeme; strdup'd into the new TokenSpan, or NULL.
  */
 void g_push_tok_span(int kind,
                      uint32_t sl, uint32_t sc,
@@ -151,6 +179,12 @@ void tj_node_push_dependency(tj_node *task, Dependency dep) {
 
 /* ── ParseOutput helpers ─────────────────────────────────────────────────── */
 
+/**
+ * Allocate and zero-initialize a synthetic root tj_node used as the
+ * invisible container for all top-level declarations produced by a parse.
+ *
+ * @return Pointer to the newly allocated root node; aborts on allocation failure.
+ */
 static tj_node *alloc_synthetic_root(void) {
     tj_node *n = calloc(1, sizeof(tj_node));
     if (!n) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
@@ -217,7 +251,19 @@ void push_include(ParseOutput *po, const char *quoted_text,
  * assign owners to every TokenSpan.
  */
 
-/** Recursively set parent_node and parent_doc fields across one subtree. */
+/**
+ * Recursively set parent_node and parent_doc fields across one subtree.
+ *
+ * @p doc_root is non-NULL only for the immediate children of a per-kind
+ * synthetic root; deeper descendants receive NULL so they are not treated
+ * as top-level document entries.
+ *
+ * @param parent    Node to set as parent_node for each element of @p children.
+ * @param children  Array of child pointers to process.
+ * @param n         Number of entries in @p children.
+ * @param doc_root  Value to assign to parent_doc for each direct child; pass
+ *                  NULL when recursing beyond the first level.
+ */
 static void assign_parent_links(tj_node *parent, tj_node **children, int n,
                                 tj_node *doc_root) {
     /* doc_root is non-NULL only for the top-level frame (children directly
@@ -232,32 +278,50 @@ static void assign_parent_links(tj_node *parent, tj_node **children, int n,
     }
 }
 
-/**
- * Walk the four per-kind trees in source order and assign each TokenSpan
- * its innermost-enclosing tj_node as `owner`.
- *
- * Strategy: take root's top-level children (already in source order),
- * then use the standard single-pass scope-stack algorithm to assign
- * owners.
- */
+/** One frame on the scope stack used by assign_token_owners(). */
 typedef struct {
-    tj_node **children;
-    int       n;
-    int       idx;
-    tj_node  *scope;
+    tj_node **children; /**< borrowed sibling array being walked at this depth */
+    int       n;        /**< number of valid entries in `children` */
+    int       idx;      /**< next child index this frame will visit */
+    tj_node  *scope;    /**< node whose range covers tokens currently being owned */
 } OwnerFrame;
 
+/**
+ * qsort comparator that orders tj_node pointers by their range start position.
+ *
+ * @param a  Pointer to the first element (a `tj_node *`).
+ * @param b  Pointer to the second element (a `tj_node *`).
+ * @return Negative if @p a starts before @p b, zero if equal, positive if after.
+ */
 static int compare_node_starts(const void *a, const void *b) {
     const tj_node *na = *(const tj_node *const *)a;
     const tj_node *nb = *(const tj_node *const *)b;
     return pos_cmp(na->range.start, nb->range.start);
 }
 
+/**
+ * Test whether @p inner is wholly contained within @p outer.
+ *
+ * @param inner  Range to test as the contained range.
+ * @param outer  Range to test as the containing range.
+ * @return Non-zero if @p inner lies entirely within @p outer, zero otherwise.
+ */
 static int range_within(LspRange inner, LspRange outer) {
     return pos_cmp(inner.start, outer.start) >= 0 &&
            pos_cmp(inner.end, outer.end) <= 0;
 }
 
+/**
+ * Walk all token spans in @p po and assign each one its innermost-enclosing
+ * tj_node as the `owner` field.
+ *
+ * Uses a single-pass scope-stack algorithm over the top-level children sorted
+ * by source position.  The project node (if present) is handled specially:
+ * its hoisted body declarations are treated as scope-children for ownership
+ * purposes even though they are siblings under root in the tj_node tree.
+ *
+ * @param po  ParseOutput whose tok_spans array will be annotated in place.
+ */
 static void assign_token_owners(ParseOutput *po) {
     tj_node *root = po->root;
     if (!root) return;

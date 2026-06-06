@@ -12,6 +12,7 @@ struct and function signatures, see the :doc:`../api` reference.
 
    server
    concurrency
+   workspace
    diagnostics
    definition
    references

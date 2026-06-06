@@ -29,24 +29,40 @@
 
 /* ── one project's worker ────────────────────────────────────────────────── */
 
+/**
+ * One long-lived background worker thread that runs tj3 against
+ * successive workspace_snapshots of a single project and publishes
+ * the resulting diagnostics.  Workers coalesce: while busy, a newer
+ * snapshot replaces any unstarted pending request rather than
+ * queuing, so a burst of edits collapses into as few tj3 invocations
+ * as possible while still guaranteeing eventual validation of the
+ * latest snapshot.
+ */
 typedef struct diag_worker {
-    char            *project_id;     /* owned; registry key (root document URI) */
-    tj3_mode         mode;           /* fixed for the worker's lifetime */
+    char            *project_id;     /**< owned; registry key (root document URI) */
+    tj3_mode         mode;           /**< fixed for the worker's lifetime */
 
-    pthread_t        thread;
-    pthread_mutex_t  lock;
-    pthread_cond_t   cond;
+    pthread_t        thread;         /**< worker thread handle */
+    pthread_mutex_t  lock;           /**< guards `pending` / `stop` / `clear_on_stop` */
+    pthread_cond_t   cond;           /**< signalled when `pending` or `stop` changes */
 
-    workspace_snapshot *pending;     /* newest unstarted request; holds 1 ref */
-    int              stop;
-    int              clear_on_stop;  /* publish empties on stop (retired project) or not (shutdown) */
+    workspace_snapshot *pending;     /**< newest unstarted request; holds 1 ref */
+    int              stop;           /**< 1 asks the thread to exit at its next wake */
+    int              clear_on_stop;  /**< publish empties on stop (retired project) or not (shutdown) */
 
-    diag_set        *last_published; /* owned; what this worker last emitted */
+    diag_set        *last_published; /**< owned; what this worker last emitted */
 
-    int              seen;           /* registry bookkeeping (coordinator-only) */
+    int              seen;           /**< registry bookkeeping (coordinator-only) */
 } diag_worker;
 
-/* Publish empties for every URI in @p prev, clearing this worker's marks. */
+/**
+ * Publish empty diagnostic sets for every URI recorded in @p prev,
+ * clearing any markers this worker previously emitted.
+ *
+ * @param prev The diag_set last published by this worker; used only
+ *             to know which URIs need to be cleared.  May be NULL
+ *             (no-op).
+ */
 static void clear_published(diag_set *prev) {
     if (!prev) return;
     diag_set *empty = diag_set_new();
@@ -54,8 +70,18 @@ static void clear_published(diag_set *prev) {
     diag_set_free(empty);
 }
 
-/* Run tj3 once against @p ws for this worker's project and publish the diff.
- * Consumes the snapshot reference held in @p ws. */
+/**
+ * Run tj3 once against @p ws for this worker's project and publish
+ * the resulting diagnostic diff.
+ *
+ * Collects compile-commands warnings and tj3 diagnostics into a new
+ * diag_set, publishes the diff against the worker's previously emitted
+ * set, then frees the old set and consumes the snapshot reference.
+ *
+ * @param w  The diag_worker whose project should be validated.
+ * @param ws The workspace snapshot to validate against; its reference
+ *           is consumed (ws_release() is called before returning).
+ */
 static void run_once(diag_worker *w, workspace_snapshot *ws) {
     const ws_project *proj = NULL;
     for (int i = 0; i < ws->num_projects; i++) {
@@ -80,6 +106,19 @@ static void run_once(diag_worker *w, workspace_snapshot *ws) {
     ws_release(ws);
 }
 
+/**
+ * Background diagnostic worker thread entry point.
+ *
+ * Waits for a pending workspace_snapshot to appear (or for a stop
+ * signal) and calls run_once() to validate it.  Snapshots coalesce:
+ * if a newer request arrives while the worker is busy, the older
+ * pending snapshot is replaced so tj3 is invoked only against the
+ * most recent state.  On stop, if @c clear_on_stop is set, any
+ * previously published diagnostics are cleared before the thread exits.
+ *
+ * @param arg Pointer to the owning diag_worker cast to void *.
+ * @return Always NULL.
+ */
 static void *diag_worker_main(void *arg) {
     diag_worker *w = arg;
     for (;;) {
@@ -107,6 +146,19 @@ static void *diag_worker_main(void *arg) {
     return NULL;
 }
 
+/**
+ * Allocate and start a new diag_worker for @p project_id.
+ *
+ * Initialises the mutex, condition variable, and worker state, then
+ * spawns the diag_worker_main thread.  On any failure the partially
+ * constructed worker is freed and NULL is returned.
+ *
+ * @param project_id Root document URI that identifies the project;
+ *                   a copy is made and owned by the worker.
+ * @param mode       Validation mode (syntax-only or full) to use for
+ *                   every tj3 invocation by this worker.
+ * @return Pointer to the newly created diag_worker, or NULL on failure.
+ */
 static diag_worker *diag_worker_spawn(const char *project_id, tj3_mode mode) {
     diag_worker *w = calloc(1, sizeof(*w));
     if (!w) { return NULL; }
@@ -124,6 +176,18 @@ static diag_worker *diag_worker_spawn(const char *project_id, tj3_mode mode) {
     return w;
 }
 
+/**
+ * Submit a new workspace snapshot for the worker to validate.
+ *
+ * Acquires a reference on @p ws, then under @p w's lock replaces any
+ * previously queued (but not yet started) snapshot with @p ws, releasing
+ * the old reference.  Signals the worker's condition variable so the
+ * thread wakes if it was idle.
+ *
+ * @param w  The worker that should validate the project.
+ * @param ws The workspace snapshot to validate; a reference is acquired
+ *           and will be released by the worker thread after use.
+ */
 static void diag_worker_request(diag_worker *w, workspace_snapshot *ws) {
     ws_acquire(ws);
     pthread_mutex_lock(&w->lock);
@@ -133,6 +197,21 @@ static void diag_worker_request(diag_worker *w, workspace_snapshot *ws) {
     pthread_mutex_unlock(&w->lock);
 }
 
+/**
+ * Signal the worker to stop, wait for it to exit, then free all resources.
+ *
+ * Sets the stop flag and @p clear_on_stop under the worker's lock, signals
+ * the condition variable, and joins the thread.  After the thread exits the
+ * mutex, condition variable, project ID string, and worker struct itself are
+ * destroyed and freed.  The caller must not use @p w after this returns.
+ *
+ * @param w             The worker to retire; ownership is consumed.
+ * @param clear_on_stop Non-zero to instruct the thread to publish empty
+ *                      diagnostic sets for all URIs it previously emitted
+ *                      before exiting (used when a project is removed
+ *                      mid-session).  Pass zero to skip clearing (used at
+ *                      server shutdown when the client is going away).
+ */
 static void diag_worker_retire(diag_worker *w, int clear_on_stop) {
     pthread_mutex_lock(&w->lock);
     w->clear_on_stop = clear_on_stop;
@@ -149,10 +228,25 @@ static void diag_worker_retire(diag_worker *w, int clear_on_stop) {
 
 /* ── registry (coordinator-owned, single-threaded) ───────────────────────── */
 
+/** Heap-allocated array of pointers to all active diag_worker instances. */
 static diag_worker **g_workers;
+
+/** Number of entries currently used in @c g_workers. */
 static int           g_num_workers;
+
+/** Allocated capacity of @c g_workers in entries. */
 static int           g_workers_cap;
 
+/**
+ * Look up a worker in the global registry by project identifier.
+ *
+ * Performs a linear search over @c g_workers comparing each worker's
+ * project_id against @p project_id.
+ *
+ * @param project_id Root document URI of the project to find.
+ * @return Pointer to the matching diag_worker, or NULL if no worker with
+ *         that project_id is currently registered.
+ */
 static diag_worker *registry_find(const char *project_id) {
     for (int i = 0; i < g_num_workers; i++)
         if (strcmp(g_workers[i]->project_id, project_id) == 0)
@@ -160,6 +254,15 @@ static diag_worker *registry_find(const char *project_id) {
     return NULL;
 }
 
+/**
+ * Append a worker to the global registry, growing the array if needed.
+ *
+ * Doubles the capacity of @c g_workers when full, starting from an
+ * initial capacity of four.  Calls exit(1) on allocation failure.
+ *
+ * @param w The worker to add; ownership is shared with the registry
+ *          (the registry stores the pointer but does not free it).
+ */
 static void registry_add(diag_worker *w) {
     if (g_num_workers >= g_workers_cap) {
         int nc = g_workers_cap ? g_workers_cap * 2 : 4;
@@ -171,6 +274,16 @@ static void registry_add(diag_worker *w) {
     g_workers[g_num_workers++] = w;
 }
 
+/**
+ * Remove the worker at position @p idx from the global registry.
+ *
+ * Uses an unordered swap-with-last removal: the last element is moved
+ * into slot @p idx and the count is decremented.  Does not free or stop
+ * the worker; the caller is responsible for calling diag_worker_retire().
+ *
+ * @param idx Zero-based index into @c g_workers of the entry to remove;
+ *            must be less than @c g_num_workers.
+ */
 static void registry_remove_at(int idx) {
     g_workers[idx] = g_workers[--g_num_workers];
 }

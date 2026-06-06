@@ -24,6 +24,14 @@
 
 /* ── Cursor lookup ──────────────────────────────────────────────────────── */
 
+/**
+ * Test whether cursor position @p p lies within the inclusive range @p r.
+ *
+ * @param p  Cursor position to test.
+ * @param r  Source range to test against.
+ * @return   1 if @p p is at or after @p r.start and at or before @p r.end,
+ *           0 otherwise.
+ */
 static int pos_in_range(LspPos p, LspRange r) {
     int after  = (p.line > r.start.line)
               || (p.line == r.start.line && p.character >= r.start.character);
