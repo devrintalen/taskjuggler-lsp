@@ -86,14 +86,14 @@
 /* ── Logging macro ───────────────────────────────────────────────────────── */
 
 /**
- * Emit a log line when category @p cat is configured to admit verbosity
- * @p level.  Because @p cat expands to a compile-time constant, the whole
+ * Emit a log line when category @c cat is configured to admit verbosity
+ * @c level.  Because @c cat expands to a compile-time constant, the whole
  * statement — including evaluation of the format string and its
  * arguments — is removed by the optimiser when the category is disabled
- * or set below @p level.
+ * or set below @c level.
  *
  * Pass the category macro name itself (e.g. DEBUG_PARSER): it is both
- * compared as an integer (its value) and stringified (#cat) to tag the
+ * compared as an integer (its value) and stringified (\#cat) to tag the
  * emitted line.
  */
 #define DLOG(cat, level, ...) \

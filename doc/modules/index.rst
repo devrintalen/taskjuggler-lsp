@@ -17,3 +17,4 @@ struct and function signatures, see the :doc:`../api` reference.
    definition
    references
    document_highlight
+   debugging

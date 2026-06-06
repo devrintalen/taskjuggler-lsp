@@ -30,7 +30,9 @@
  *  its own lock and never touches stdout / stdout_mutex. */
 static pthread_mutex_t debug_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/** Human-readable name for a LOG_* verbosity level. */
+/** Human-readable name for a LOG_* verbosity level.
+ *  @param level  One of the LOG_* constants.
+ *  @return       Static string naming the level; never NULL. */
 static const char *level_name(int level) {
     switch (level) {
     case LOG_INFO:    return "INFO";

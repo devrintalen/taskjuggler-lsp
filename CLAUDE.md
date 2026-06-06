@@ -63,6 +63,49 @@ then flex consumes it. Every `.o` depends on `grammar.tab.h`, so
 `make clean` followed by `make` is the safe way to recover from a
 stale generated header.
 
+## Debug logging
+
+`src/debug.{h,c}` provide compile-time, per-category debug logging.
+Output goes to **stderr** — stdout is reserved for the LSP JSON-RPC
+stream the client watches, so it must never be written to for
+debugging. Most editors surface a server's stderr in a dedicated
+output channel.
+
+Each category is an integer verbosity ceiling that defaults to `0`
+(off). Because the category expands to a compile-time constant, a
+disabled call site is eliminated entirely by the optimizer — no branch,
+no string formatting, not even argument evaluation — so logging has zero
+cost in the default build. Levels are `LOG_INFO` (1), `LOG_VERBOSE` (2),
+and `LOG_TRACE` (3). Categories: `DEBUG_LIFECYCLE`,
+`DEBUG_COMPILE_COMMANDS`, `DEBUG_DOCSTORE`, `DEBUG_INCLUDES`,
+`DEBUG_PARSER`, `DEBUG_REVALIDATE`, `DEBUG_TJ3`, `DEBUG_THREADS`,
+`DEBUG_RPC`.
+
+Emit lines with `DLOG(category, level, fmt, ...)`, passing the category
+macro name itself (it is both compared as an integer and stringified for
+the log tag):
+
+```c
+DLOG(DEBUG_LIFECYCLE, LOG_INFO,  "initialize: root=%s", root);
+DLOG(DEBUG_TJ3,       LOG_TRACE, "token %d kind=%d", i, kind);
+```
+
+Raise a category by editing its default in `src/debug.h`, or override
+at build time without touching the file via `CFLAGS_EXTRA` (wired into
+both `make` and `make debug`):
+
+```sh
+make CFLAGS_EXTRA="-DDEBUG_TJ3=3 -DDEBUG_REVALIDATE=2"
+```
+
+The docs[] table dump (`dump_docs_to_stderr`) is gated behind
+`DEBUG_REVALIDATE >= LOG_VERBOSE`, so it is compiled out of the default
+build rather than printing on every revalidation.
+
+When adding a feature, log its key events under the matching category
+(or add a new category to `src/debug.h` if none fits) so the subsystem
+can be traced without adding ad-hoc `fprintf`s.
+
 ## Architecture
 
 ### Process model
