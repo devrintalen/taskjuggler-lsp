@@ -20,6 +20,7 @@
 
 #include "threadpool.h"
 #include "server.h"
+#include "debug.h"
 
 #include <pthread.h>
 
@@ -64,9 +65,13 @@ static int       pool_started = 0;
  */
 static void *coordinator(void *arg) {
     (void)arg;
+    DLOG(DEBUG_THREADS, LOG_INFO, "coordinator thread started");
     while (1) {
         Job *job = job_queue_pop(work_queue);
         if (!job) break;
+        DLOG(DEBUG_THREADS, LOG_TRACE,
+             "coordinator popped job (notification=%d cancelled=%d)",
+             job->is_notification, job->is_cancelled);
         if (job->is_notification) {
             server_dispatch_notification(job);
             job_free(job);
@@ -82,6 +87,7 @@ static void *coordinator(void *arg) {
         }
     }
     job_queue_close(request_queue);
+    DLOG(DEBUG_THREADS, LOG_INFO, "coordinator thread exiting");
     return NULL;
 }
 
@@ -99,9 +105,12 @@ static void *coordinator(void *arg) {
  */
 static void *query_worker(void *arg) {
     (void)arg;
+    DLOG(DEBUG_THREADS, LOG_INFO, "query worker thread started");
     while (1) {
         Job *job = job_queue_pop(request_queue);
         if (!job) break;
+        DLOG(DEBUG_THREADS, LOG_TRACE, "worker popped query (cancelled=%d)",
+             job->is_cancelled);
         if (job->is_cancelled) {
             server_dispatch_cancelled(job);
         } else {
@@ -109,6 +118,7 @@ static void *query_worker(void *arg) {
         }
         job_free(job);
     }
+    DLOG(DEBUG_THREADS, LOG_INFO, "query worker thread exiting");
     return NULL;
 }
 

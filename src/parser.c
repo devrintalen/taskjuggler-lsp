@@ -19,6 +19,7 @@
 /** @file */
 
 #include "parser.h"
+#include "debug.h"
 #include "grammar.tab.h"  /* yyparse(), KW_* constants */
 
 #include <stdio.h>
@@ -477,6 +478,11 @@ ParseOutput *parse(const char *src) {
     assign_parent_links(po->root, po->root->children,
                         po->root->num_children, po->root);
     assign_token_owners(po);
+
+    DLOG(DEBUG_PARSER, LOG_VERBOSE,
+         "parsed %zu bytes -> %d tokens, %d top-level nodes, %d includes",
+         src ? strlen(src) : 0, po->num_tok_spans, po->root->num_children,
+         po->num_includes);
 
     return po;
 }
