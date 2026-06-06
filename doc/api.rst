@@ -8,12 +8,16 @@ query dispatch, per-feature behaviour — see the :doc:`modules/index`.
 Server core
 -----------
 
-The header reference for the server core is included on the
-:doc:`modules/server` page; the parser and version headers appear
-below.
+The runtime overview for the server core, the threading model, the
+multi-source diagnostic pipeline, and the cross-file resolution tree
+are on the corresponding :doc:`modules/index` pages.  The headers
+linked from those pages are reproduced there; the headers below have
+no dedicated module page and are documented here only.
+
+Parser
+------
 
 .. doxygenfile:: parser.h
-.. doxygenfile:: version.h
 
 LSP features
 ------------
@@ -27,5 +31,12 @@ from their Doxygen comments only.
 .. doxygenfile:: folding_range.h
 .. doxygenfile:: hover.h
 .. doxygenfile:: semantic_tokens.h
+.. doxygenfile:: semantic_tokens_delta.h
 .. doxygenfile:: signature.h
 .. doxygenfile:: workspace_symbol.h
+.. doxygenfile:: code_lens.h
+
+Version
+-------
+
+.. doxygenfile:: version.h

@@ -11,6 +11,8 @@ struct and function signatures, see the :doc:`../api` reference.
    :maxdepth: 1
 
    server
+   concurrency
+   workspace
    diagnostics
    definition
    references

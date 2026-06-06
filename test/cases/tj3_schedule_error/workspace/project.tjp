@@ -1,0 +1,5 @@
+project p "P" 2024-01-01 +3m {
+}
+task a "A" {
+  depends !ghost
+}

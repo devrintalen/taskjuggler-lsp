@@ -19,17 +19,18 @@
 /** @file */
 
 #include "job_queue.h"
+#include "query_context.h"
 
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 struct JobQueue {
-    Job             *head;
-    Job             *tail;
-    int              closed;
-    pthread_mutex_t  mutex;
-    pthread_cond_t   cond;
+    Job             *head;   /**< first Job to pop, or NULL when empty */
+    Job             *tail;   /**< last Job in the list, for O(1) push */
+    int              closed; /**< 1 after job_queue_close(); pop returns NULL once drained */
+    pthread_mutex_t  mutex;  /**< guards `head` / `tail` / `closed` */
+    pthread_cond_t   cond;   /**< signalled on push and on close */
 };
 
 JobQueue *job_queue_create(void) {
@@ -80,6 +81,7 @@ void job_queue_close(JobQueue *q) {
 void job_free(Job *job) {
     if (!job) return;
     yyjson_doc_free(job->request_doc);
+    query_context_free(job->context);
     free(job);
 }
 
@@ -87,12 +89,10 @@ void job_queue_mark_cancelled_by_id(JobQueue *q, int64_t id) {
     if (!q) return;
     pthread_mutex_lock(&q->mutex);
     for (Job *j = q->head; j != NULL; j = j->next) {
-        /* Mutations bypass the worker's is_cancelled check (the coordinator
-         * dispatches them inline), so marking them would be a no-op that
-         * misleads readers into thinking the flag took effect.  Lifecycle
-         * methods (initialize/shutdown) aren't cancellable in practice
-         * either — clients never cancel them. */
-        if (!j->is_mutation && j->has_id && j->id == id) {
+        /* Notifications carry no id (the LSP spec forbids it), so the
+         * has_id guard already excludes them; the explicit check is
+         * kept as a self-documenting belt-and-suspenders. */
+        if (!j->is_notification && j->has_id && j->id == id) {
             j->is_cancelled = 1;
         }
     }

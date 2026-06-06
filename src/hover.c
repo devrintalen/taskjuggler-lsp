@@ -19,7 +19,9 @@
 /** @file */
 
 #include "hover.h"
+#include "document_symbol.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -150,14 +152,14 @@ ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos 
 
 /* ── sym_qualified_id ────────────────────────────────────────────────────── */
 
-char *sym_qualified_id(const DocSymbol *sym) {
+char *sym_qualified_id(const tj_node *sym) {
     if (!sym || !sym->id) return strdup("");
 
-    const DocSymbol *chain[64];
+    const tj_node *chain[64];
     int depth = 0;
-    for (const DocSymbol *s = sym;
+    for (const tj_node *s = sym;
          s != NULL && depth < (int)(sizeof(chain) / sizeof(chain[0]));
-         s = s->parent) {
+         s = s->parent_node) {
         if (s->keyword == sym->keyword && s->id && s->id[0])
             chain[depth++] = s;
     }
@@ -179,6 +181,68 @@ char *sym_qualified_id(const DocSymbol *sym) {
         if (i > 0) *p++ = '.';
     }
     *p = '\0';
+    return out;
+}
+
+/* ── task hover markdown ─────────────────────────────────────────────────── */
+
+/**
+ * Format the task hover Markdown from an already-qualified id and name.
+ *
+ * @param qid   Fully qualified, dot-separated task id.
+ * @param name  Display name; retains any surrounding quotes from the
+ *              source token.  May be the empty string.
+ * @return Heap-allocated Markdown of the form ``**Task `<qid>`** — <name>``,
+ *         or NULL on allocation failure.  Caller must free.
+ */
+static char *task_markdown(const char *qid, const char *name) {
+    /* \xe2\x80\x94 is the UTF-8 em-dash. */
+    const char *fmt = "**Task `%s`** \xe2\x80\x94 %s";
+    int len = snprintf(NULL, 0, fmt, qid, name);
+    char *out = len >= 0 ? malloc((size_t)len + 1) : NULL;
+    if (out) snprintf(out, (size_t)len + 1, fmt, qid, name);
+    return out;
+}
+
+/**
+ * Build the hover Markdown for a resolved declaration node in an assembled
+ * Project tree, of the form ``**Task `<qualified-id>`** — <name>``.  Used when
+ * hovering over a dependency reference that resolves to its target task; the
+ * qualified id reflects the node's position in the tree (so include prefixes
+ * are included).
+ *
+ * @param node  Resolved target ProjectNode.  Must be non-NULL with a valid id.
+ * @return Heap-allocated Markdown string.  Caller must free.
+ */
+char *project_node_hover_markdown(const ProjectNode *node) {
+    if (!node || !node->id) return task_markdown("", node && node->name ? node->name : "");
+
+    const ProjectNode *chain[64];
+    int depth = 0;
+    for (const ProjectNode *n = node;
+         n != NULL && depth < (int)(sizeof(chain) / sizeof(chain[0]));
+         n = n->parent_node) {
+        if (n->keyword == node->keyword && n->id && n->id[0])
+            chain[depth++] = n;
+    }
+
+    size_t total = 0;
+    for (int i = 0; i < depth; i++) total += strlen(chain[i]->id);
+    if (depth > 0) total += (size_t)(depth - 1);
+
+    char *qid = malloc(total + 1);
+    if (!qid) return task_markdown(node->id, node->name ? node->name : "");
+    char *p = qid;
+    for (int i = depth - 1; i >= 0; i--) {
+        size_t len = strlen(chain[i]->id);
+        memcpy(p, chain[i]->id, len);
+        p += len;
+        if (i > 0) *p++ = '.';
+    }
+    *p = '\0';
+
+    char *out = task_markdown(qid, node->name ? node->name : "");
+    free(qid);
     return out;
 }
 

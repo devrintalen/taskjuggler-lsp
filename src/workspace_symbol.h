@@ -36,5 +36,5 @@
  * @param arr    JSON array to append SymbolInformation entries to.
  */
 void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
-                                DocSymbol *const *syms, int n,
+                                tj_node *const *syms, int n,
                                 const char *uri, yyjson_mut_val *arr);

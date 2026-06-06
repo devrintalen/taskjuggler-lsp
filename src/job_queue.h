@@ -20,8 +20,12 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <yyjson.h>
+
+/** Forward declaration; the full struct is defined in query_context.h. */
+struct query_context;
 
 /**
  * One pending unit of work parsed off stdin by the reader thread and
@@ -30,31 +34,31 @@
  * `request_doc` owns the parsed JSON-RPC envelope.  The worker is
  * responsible for freeing it after dispatch.
  *
- * `is_mutation` is set by the reader when classifying the message;
- * the coordinator pops in arrival order and uses it to choose between
- * synchronous dispatch (mutations) and handing the job off to a query
- * worker (read-only queries).
+ * `is_notification` is set by the reader when classifying the message;
+ * it determines which queue the Job lands on (the notification path runs
+ * on a single worker; the query path feeds a pool).  Only true LSP
+ * notifications (no `id`) ride the notification path; LSP requests —
+ * including state-mutating lifecycle ones like initialize/shutdown —
+ * are queries.
  *
- * `id` / `has_id` carry the JSON-RPC request id as a first-class field on
- * the Job, making it the primary key for any per-job operation.  The first
- * such operation is $/cancelRequest: the reader walks both queues looking
- * for a matching id and sets `is_cancelled`, so cancellation is
- * deterministic for any Job still resident in a queue when the cancel
- * arrives.  Notifications and string/null ids leave `has_id = 0` and are
- * therefore not cancellable by id (matching the existing int-only policy
- * in server.c).
+ * `context` is the frozen query_context the coordinator clones (under
+ * docs_mutex) before handing a query Job to a worker, so the worker runs
+ * its handler lock-free against private memory.  NULL for notifications and
+ * for inline-dispatched query methods (initialize / shutdown /
+ * semanticTokens); owned by the Job and released by job_free().
  *
- * `is_cancelled` is set in-place by job_queue_mark_cancelled_by_id when a
- * matching $/cancelRequest is processed.  The worker checks it before
- * dispatching the handler and returns RequestCancelled instead.
+ * `id` / `has_id` carry the JSON-RPC request id as a first-class field
+ * on the Job so $/cancelRequest can mark queued Jobs.  Notifications
+ * and string/null ids leave `has_id = 0`.
  */
 typedef struct Job {
-    yyjson_doc *request_doc;
-    int         is_mutation;
-    int         is_cancelled;
-    int         has_id;
-    int64_t     id;
-    struct Job *next;
+    yyjson_doc            *request_doc;     /**< owned JSON-RPC envelope */
+    int                    is_notification; /**< 1 for LSP notifications, 0 for requests */
+    int                    is_cancelled;    /**< set by $/cancelRequest while queued */
+    int                    has_id;          /**< 1 when `id` is meaningful */
+    int64_t                id;              /**< JSON-RPC request id; valid only if `has_id` */
+    struct query_context  *context;         /**< owned pinned snapshot for query workers; NULL otherwise */
+    struct Job            *next;            /**< intrusive next link inside a queue */
 } Job;
 
 /** Opaque thread-safe FIFO of Job pointers. */
@@ -70,12 +74,17 @@ JobQueue *job_queue_create(void);
 /**
  * Destroy a queue and free its synchronization primitives.  The queue
  * must already be drained and closed.
+ *
+ * @param q  Queue to destroy.
  */
 void      job_queue_destroy(JobQueue *q);
 
 /**
  * Push @p job onto the tail of the queue.  Wakes one waiting worker.
  * Ownership of @p job is transferred to the queue.
+ *
+ * @param q    Target queue.
+ * @param job  Job to enqueue (transfer of ownership).
  */
 void      job_queue_push(JobQueue *q, Job *job);
 
@@ -83,6 +92,9 @@ void      job_queue_push(JobQueue *q, Job *job);
  * Block until a job is available, then return it.  Returns NULL only
  * once the queue is both closed and empty, signalling worker shutdown.
  * Ownership of the returned job is transferred to the caller.
+ *
+ * @param q  Queue to pop from.
+ * @return Owned Job pointer, or NULL when the queue is drained-and-closed.
  */
 Job      *job_queue_pop(JobQueue *q);
 
@@ -90,6 +102,8 @@ Job      *job_queue_pop(JobQueue *q);
  * Mark the queue as closed.  Workers blocked in job_queue_pop() are
  * woken; they continue popping pending jobs until the queue is empty,
  * then their next pop returns NULL.
+ *
+ * @param q  Queue to close.
  */
 void      job_queue_close(JobQueue *q);
 
@@ -97,16 +111,20 @@ void      job_queue_close(JobQueue *q);
  * Free a Job and any heap fields it owns.  NULL-safe per field, so
  * callers may transfer ownership of an owned field elsewhere by
  * NULL-ing it before calling.  Used by workers after dispatch.
+ *
+ * @param job  Job to free.
  */
 void      job_free(Job *job);
 
 /**
- * Walk @p q under its mutex, setting is_cancelled=1 on every read-only
- * Job whose has_id is set and whose id equals @p id.  Mutation jobs are
- * skipped — the coordinator dispatches them inline and never consults
- * is_cancelled, and lifecycle methods aren't cancelled in practice.
- * Called by the reader when a $/cancelRequest arrives.  The worker
- * checks is_cancelled before dispatching the handler and returns
- * RequestCancelled in its place.
+ * Walk @p q under its mutex, setting is_cancelled=1 on every Job whose
+ * has_id is set and whose id equals @p id.  Notification jobs have no
+ * id (LSP notifications never carry one) so are skipped implicitly by
+ * the has_id check.  Called by the reader when a $/cancelRequest
+ * arrives.  The worker checks is_cancelled before dispatching the
+ * handler and returns RequestCancelled in its place.
+ *
+ * @param q   Queue to scan.
+ * @param id  Request id to mark cancelled.
  */
 void      job_queue_mark_cancelled_by_id(JobQueue *q, int64_t id);

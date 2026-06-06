@@ -49,6 +49,9 @@
         },
         "workspaceSymbolProvider": true,
         "workspace": {
+          "workspaceFolders": {
+            "supported": false
+          },
           "fileOperations": {
             "didRename": {
               "filters": [
@@ -106,6 +109,19 @@
   },
   {
     "jsonrpc": "2.0",
+    "id": 4,
+    "result": null
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": {
+      "resultId": "1",
+      "edits": []
+    }
+  },
+  {
+    "jsonrpc": "2.0",
     "id": 2,
     "result": {
       "resultId": "1",
@@ -152,18 +168,5 @@
         0
       ]
     }
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 3,
-    "result": {
-      "resultId": "2",
-      "edits": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "id": 4,
-    "result": null
   }
 ]

@@ -49,6 +49,9 @@
         },
         "workspaceSymbolProvider": true,
         "workspace": {
+          "workspaceFolders": {
+            "supported": false
+          },
           "fileOperations": {
             "didRename": {
               "filters": [

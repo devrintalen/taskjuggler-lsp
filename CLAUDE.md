@@ -67,20 +67,35 @@ stale generated header.
 
 ### Process model
 
-Single-threaded, synchronous JSON-RPC over stdin/stdout. `src/main.c`
-reads `Content-Length`-framed messages and hands each body to
-`server_process()` (`src/server.c`); responses are written back via
-`lsp_send_message()`. There is no worker pool, no async I/O.
+JSON-RPC over stdin/stdout. `src/main.c` reads `Content-Length`-framed
+messages and hands each body to `server_process()` (`src/server.c`),
+which enqueues a `Job` onto an arrival-ordered queue. A single
+**coordinator** thread pops jobs in order (preserving the LSP "process
+in arrival order" rule) and owns the live document store under
+`docs_mutex`: it runs notifications and the inline lifecycle methods
+(`initialize` / `shutdown`) itself. Every other request is a read-only
+query — the coordinator pins the current immutable workspace snapshot
+(an O(1) refcount bump, see "Cross-file revalidation") into the Job's
+`query_context` and hands it to a pool of query **workers**
+(`src/threadpool.c`, `NUM_QUERY_WORKERS`). Workers run their handler
+lock-free against the pinned snapshot and write responses via
+`lsp_send_message()` (serialized by `stdout_mutex`).
 
 ### Document store
 
 `src/server.c` owns a static array of `Document` slots (URI + raw text
 + `ParseResult`). Editor content is authoritative while a file is
 open; `didClose` re-reads the file from disk and keeps it as a
-"background" entry so cross-file references stay valid. The initial
-workspace scan and `workspace/didChangeWatchedFiles` populate
-background entries; watcher events are ignored for files the editor
-already has open.
+"background" entry so cross-file references stay valid.
+
+`compile_commands.json` at the workspace root is the sole startup
+populator of `docs[]`: every listed `.tjp` is loaded as `disk_only`,
+and `follow_includes` cascades into the transitive `.tji` closure.
+If the file is missing or malformed the server stays alive but loads
+no documents and surfaces an Error-severity `window/showMessage`.
+After startup, `workspace/didChangeWatchedFiles` events admit
+individual files into background slots; watcher events are ignored
+for files the editor already has open.
 
 ### Parse pipeline
 
@@ -113,13 +128,42 @@ cross-file edge.
 
 ### Cross-file revalidation
 
-After any document mutation, `server.c` runs
-`revalidate_all_docs()`. For each document it gathers the
-`doc_symbols[]` of every other open / background document as extra
-symbol pools, calls `clear_cross_file_state()` to drop stale
-cross-file links and diagnostics, then `resolve_cross_file_deps()` to
-rebuild them. Each affected URI then gets a
-`textDocument/publishDiagnostics` notification (`src/diagnostics.c`).
+After any document-changing notification, `server.c` runs
+`revalidate_all_docs()`: it polls `compile_commands.json` for on-disk
+changes, calls `build_workspace_snapshot()` to assemble a fresh
+immutable `workspace_snapshot` from the current `docs[]`, atomically
+swaps it in as the published `g_ws` (releasing the previous one), then
+republishes (currently empty) diagnostics on every editor-managed
+document.
+
+Snapshots are refcounted and immutable, so a query that pinned the old
+snapshot keeps reading a consistent revision until it releases its ref;
+the old snapshot is freed only then. Two layers (`src/query_context.{h,c}`):
+
+- `doc_snapshot` — one document's frozen parse output (`tj_node` tree,
+  token spans, source text), created once per parse and **shared by
+  ref**: editing document A produces a new `doc_snapshot` for A while
+  every other document's snapshot is re-referenced unchanged. Each
+  `Document` holds its current `snap` plus the immediately previous
+  `prev_snap` (retained so `semanticTokens/delta` can diff against the
+  version the client last held). A `doc_snapshot` also carries a
+  write-once, compare-exchange–published memo for its semantic-token
+  data; the `resultId` is the document's parse version (`doc_version`).
+- `workspace_snapshot` — a `ws_doc` per parsed document (its `doc_snapshot`
+  ref plus the include-prefixes in force this revision) and a
+  `ws_project` per assembled project. Each `ws_project` owns one synthetic
+  `ProjectNode` root over all kinds, populated by deep-copying every
+  member document's top-level entries under the includer's prefix
+  target. The include BFS stamps each `ws_doc.project_index`; handlers
+  scope cross-file lookups to siblings sharing the requester's project,
+  so two unrelated `.tjp`s in the same workspace stay independent.
+
+Dependency edges resolve lazily: each `ProjectDep` memoizes its resolved
+target write-once in an atomic `resolved` cell (`project_dep_resolve`),
+so concurrent workers pinning the same snapshot resolve safely and
+back-to-back queries on one revision warm the memo. `handle_definition`,
+`handle_references`, and dependency hover resolve against the snapshot's
+`ProjectNode` tree.
 
 ### Feature dispatch
 
@@ -150,6 +194,13 @@ under GPLv2 as a realistic fixture.
 ## Code Style Conventions
 
 Use snake_case rather than camelCase for multi-word identifiers.
+
+This applies to data types as well: new `struct` / `enum` / `typedef`
+names use snake_case (e.g. `doc_snapshot`, `workspace_snapshot`,
+`query_context`), not CamelCase. A number of older types predate this
+rule and remain CamelCase (`Document`, `Job`, `ProjectNode`,
+`TokenSpan`, `ParseOutput`, …); leave those as they are unless you are
+already refactoring them, but do not introduce new CamelCase types.
 
 Use K&R C style for code.
 

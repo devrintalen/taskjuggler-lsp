@@ -1,0 +1,5 @@
+[
+  { "file": "top.tjp" },
+  { "file": "sub/middle.tjp" },
+  { "file": "sub/deeper/deepest.tji" }
+]

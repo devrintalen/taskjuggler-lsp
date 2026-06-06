@@ -49,6 +49,9 @@
         },
         "workspaceSymbolProvider": true,
         "workspace": {
+          "workspaceFolders": {
+            "supported": false
+          },
           "fileOperations": {
             "didRename": {
               "filters": [
@@ -128,7 +131,6 @@
       {
         "name": "\"Design\"",
         "kind": 12,
-        "containerName": "\"ACME\"",
         "location": {
           "uri": "file:///test/tasks.tjp",
           "range": {
@@ -146,7 +148,6 @@
       {
         "name": "\"Build\"",
         "kind": 12,
-        "containerName": "\"ACME\"",
         "location": {
           "uri": "file:///test/tasks.tjp",
           "range": {
@@ -187,7 +188,6 @@
       {
         "name": "\"Design\"",
         "kind": 12,
-        "containerName": "\"ACME\"",
         "location": {
           "uri": "file:///test/tasks.tjp",
           "range": {
@@ -205,7 +205,6 @@
       {
         "name": "\"Build\"",
         "kind": 12,
-        "containerName": "\"ACME\"",
         "location": {
           "uri": "file:///test/tasks.tjp",
           "range": {

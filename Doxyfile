@@ -4,7 +4,7 @@
 # built-in defaults. Run `make docs` to generate HTML output under docs/.
 
 PROJECT_NAME           = "taskjuggler-lsp"
-PROJECT_NUMBER         = 0.5.2
+PROJECT_NUMBER         = 0.5.3
 PROJECT_BRIEF          = "Language Server Protocol implementation for TaskJuggler v3"
 
 OUTPUT_DIRECTORY       = doc/_doxygen
@@ -18,10 +18,21 @@ EXCLUDE                = src/lexer.yy.c src/grammar.tab.c src/grammar.tab.h
 
 # Function-body-local helper macros.  Doxygen extracts them because they
 # are #defines, but they aren't real members of the file's API surface and
-# can't be cleanly associated with their preceding comment.
-EXCLUDE_SYMBOLS        = SIG SIG0
+# can't be cleanly associated with their preceding comment.  `PUSH` is a
+# BFS-local growable-array push used inside one server.c helper; SIG /
+# SIG0 are lexer-state aliases.
+EXCLUDE_SYMBOLS        = SIG SIG0 PUSH
+
+# Strip C11 _Atomic qualifiers before Doxygen ever sees them.  Doxygen
+# handles the keyword internally but propagates it verbatim into its
+# XML output, and Breathe's Sphinx C-domain parser then rejects the
+# resulting declarations.  See doc/strip_atomic.sh.
+INPUT_FILTER           = "doc/strip_atomic.sh"
 
 EXTRACT_ALL            = NO
+# Internal static helpers in *.c files are documented too: every static
+# function carries a doc comment, so extracting them keeps the reference
+# complete rather than stopping at the public header surface.
 EXTRACT_STATIC         = YES
 JAVADOC_AUTOBRIEF      = YES
 OPTIMIZE_OUTPUT_FOR_C  = YES
@@ -46,6 +57,9 @@ XML_PROGRAMLISTING     = YES
 QUIET                  = YES
 WARN_IF_UNDOCUMENTED   = YES
 WARN_NO_PARAMDOC       = YES
+# Promote any remaining warning to a build failure so regressions in the
+# documentation can't sneak past CI.
+WARN_AS_ERROR          = FAIL_ON_WARNINGS
 
 # Requires graphviz to be installed (provides the `dot` binary).
 HAVE_DOT               = YES

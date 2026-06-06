@@ -1,0 +1,8 @@
+project p "Project" 2024-01-01 +3m {
+}
+task lib "Lib" {
+}
+task a "A" {
+  depends lib.x
+}
+include "lib.tji" { taskprefix lib }

@@ -21,6 +21,7 @@
 #pragma once
 
 #include "parser.h"
+#include "project_tree.h"
 #include "grammar.tab.h"
 
 /**
@@ -90,7 +91,11 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
  * @return Heap-allocated dotted id (empty string if @p sym or its id is
  *         NULL).  Caller must free.
  */
-char *sym_qualified_id(const DocSymbol *sym);
+char *sym_qualified_id(const tj_node *sym);
+
+/** @brief Build the hover Markdown for a resolved task node in an assembled
+ *  Project tree (full documentation at the definition in hover.c). */
+char *project_node_hover_markdown(const ProjectNode *node);
 
 /**
  * Return Markdown documentation for a TJP keyword, or NULL if unknown.

@@ -40,9 +40,12 @@ Lifecycle messages
      - Server advertises capabilities for every feature listed below.
        Client capabilities are received but currently not inspected;
        the server behaves as if every advertised capability is
-       supported.  ``rootUri`` and ``workspaceFolders`` are both
-       honoured and deduplicated; the resulting roots drive the
-       initial workspace scan.
+       supported.  Only ``rootUri`` is honoured: the workspace is
+       single-root, and multi-root setups are explicitly advertised
+       as unsupported (``workspace.workspaceFolders.supported`` is
+       ``false`` in the response).  The initial document set is
+       loaded from ``compile_commands.json`` at the root; see the
+       :doc:`installation` page for the expected schema.
    * - ``initialized``
      - Yes
      - On receipt, the server sends a ``client/registerCapability``
@@ -55,10 +58,12 @@ Lifecycle messages
      - Yes
      - Terminates the process immediately.
    * - ``$/cancelRequest``
-     - No
-     - Server is single-threaded and synchronous; every request
-       completes before the next message is read, so cancellation has
-       no effect.
+     - Yes
+     - Handled by the reader thread.  Walks the work queue under its
+       mutex and sets ``is_cancelled`` on every job whose id matches;
+       the worker that eventually pops the job returns
+       ``RequestCancelled`` in place of running the handler.  Jobs
+       already in flight are not interrupted.
    * - ``$/progress``
      - No
      - No long-running operations are reported back to the client.
@@ -109,9 +114,12 @@ Language features
    * - ``textDocument/publishDiagnostics``
      - Yes
      - Pushed after every parse and after every cross-file
-       revalidation cycle.  Diagnostics cover syntax errors,
-       in-file dependency resolution, and cross-file dependency
-       resolution.
+       revalidation cycle, and asynchronously by the per-project tj3
+       workers.  Diagnostics cover syntax errors (parser), cross-file
+       dependency resolution and scheduling errors (``tj3``), and a
+       server-level "Missing compile_commands.json" warning when the
+       workspace is misconfigured.  The three sources are merged per
+       URI before publishing; see :doc:`modules/diagnostics`.
    * - ``textDocument/diagnostic`` (pull)
      - No
      - Push diagnostics already cover every editor that observes
@@ -136,8 +144,9 @@ Language features
    * - ``textDocument/definition``
      - Yes
      - Resolves to the declaring symbol.  Cross-file edges are
-       followed via the ``DefinitionLink`` produced during
-       revalidation.
+       resolved on demand against the workspace snapshot's
+       ``ProjectNode`` tree via ``project_dep_resolve()``, which
+       memoizes the result write-once on the dependency cell.
    * - ``textDocument/declaration``
      - No
      - TaskJuggler does not distinguish declarations from
@@ -151,16 +160,19 @@ Language features
      - No interface / implementation split in the language.
    * - ``textDocument/references``
      - Yes
-     - Returns every ``ReferenceLink`` recorded on the target
-       symbol, including cross-file references.
+     - Walks the project's ``ProjectNode`` tree on demand, collecting
+       every dependency that resolves to the cursor's task —
+       including cross-file references.
    * - ``textDocument/documentHighlight``
      - Yes
      - Highlights every occurrence of the identifier under the
        cursor within the current document.
    * - ``textDocument/documentSymbol``
      - Yes
-     - Hierarchical symbols.  Tasks → ``Function``, resources →
-       ``Object``, accounts → ``Variable``, shifts → ``Event``.
+     - Hierarchical symbols, written directly from the document's
+       ``tj_node`` root.  Tasks → ``Function``, resources →
+       ``Object``, accounts → ``Variable``, shifts → ``Event``,
+       projects → ``Module``.
    * - ``textDocument/codeAction``
      - No
      - No quick-fixes or refactorings have been implemented yet.
@@ -209,7 +221,8 @@ Language features
      - Depends on ``rename``.
    * - ``textDocument/foldingRange``
      - Yes
-     - Brace-block folding driven by the ``doc_symbols[]`` tree.
+     - Brace-block folding driven by the document's ``tj_node`` tree
+       plus token-driven folding for ``/* … */`` comment blocks.
    * - ``textDocument/selectionRange``
      - No
      - Not implemented.  Would require walking the symbol tree
@@ -233,18 +246,22 @@ Language features
      - Yes
      - Legend exposes the token types ``keyword``, ``comment``,
        ``string``, ``number``, ``variable``, ``function`` and the
-       single modifier ``declaration``.  The whole-document encoding
-       is recomputed on every request; there is no per-document
-       cache.  This dominates server CPU on large workspaces
-       (see :doc:`performance`).
+       single modifier ``declaration``.  The encoded buffer is
+       computed once per ``doc_snapshot`` and memoized write-once on
+       it, so a re-request without an edit reuses the same buffer
+       (see :doc:`modules/concurrency`).
    * - ``textDocument/semanticTokens/full/delta``
-     - No
-     - Requires storing a ``resultId`` per document and computing a
-       token diff against the previously returned set.  Tracked as a
-       TODO in ``src/server.c``.
+     - Yes
+     - The ``resultId`` returned to the client is the document's
+       ``doc_version``.  On a delta request the server diffs the
+       current ``doc_snapshot`` against the retained ``prev_snap``
+       (kept across exactly one revision) using a Myers diff over
+       semantic-token tuples; if the client's ``previousResultId``
+       no longer matches ``prev_snap`` it falls back to a full
+       response.
    * - ``textDocument/semanticTokens/range``
      - No
-     - Requires filtering ``tok_spans[]`` to the requested range
+     - Requires filtering the token spans to the requested range
        before encoding.  Tracked as a TODO in ``src/server.c``.
    * - ``textDocument/linkedEditingRange``
      - No
@@ -278,8 +295,10 @@ Workspace features
      - Notes
    * - ``workspace/symbol``
      - Yes
-     - Returns every top-level declaration across open and
-       background documents that matches the query.
+     - Returns every top-level declaration across the workspace's
+       projects whose name or id matches the query.  Background
+       (disk-only) documents loaded through ``compile_commands.json``
+       are included alongside editor-managed ones.
    * - ``workspaceSymbol/resolve``
      - No
      - Symbols are returned fully resolved.
@@ -291,8 +310,9 @@ Workspace features
        authoritative for those).
    * - ``workspace/didChangeWorkspaceFolders``
      - No
-     - Workspace roots are read once at ``initialize``.  Adding or
-       removing folders mid-session is not yet supported.
+     - The workspace is single-root by design (see ``initialize``).
+       Multi-root setups are intentionally out of scope, so notifications
+       to add or remove folders mid-session are ignored.
    * - ``workspace/didChangeConfiguration``
      - No
      - The server has no user-tunable configuration.
@@ -337,8 +357,10 @@ Window and client utility messages
      - Notes
    * - ``window/showMessage``
      - No
-     - Server never surfaces messages to the user; errors are
-       reported as diagnostics or via stderr.
+     - Server never surfaces messages to the user; configuration
+       problems (e.g. missing ``compile_commands.json``) are
+       surfaced as per-file diagnostics instead, and internal errors
+       go to stderr.  See :doc:`modules/diagnostics`.
    * - ``window/showMessageRequest``
      - No
      - As above.

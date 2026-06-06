@@ -20,29 +20,23 @@
 
 #pragma once
 
-#include "parser.h"
+#include "project_tree.h"
 #include <yyjson.h>
 
 /**
- * Build a Location[] JSON array for textDocument/references.
+ * Build the textDocument/references response for a task declaration.
  *
- * Values are allocated in @p doc; caller owns @p doc.
+ * Walks @p project_root's task tree, resolving each dependency
+ * (memoizing in-node) and collecting those that target @p wanted.
+ * Returns an LSP `Location[]` of the matching dependency references
+ * (empty when @p wanted has no incoming dependencies), or NULL when
+ * @p wanted is NULL.
  *
- * @param doc         Destination mutable JSON document.
- * @param cursor_uri  URI of the document the cursor is in (used for
- *                    same-document references where source_uri is NULL).
- * @param tokens      Token spans of the cursor document (carry `.owner`
- *                    links that let symbol_at() locate the declaration
- *                    under cursor).
- * @param num_tokens  Length of @p tokens.
- * @param cursor      Cursor position.
- * @return An array of Location objects (one per dependency reference that
- *         resolves to the task under @p cursor, collected from the
- *         target's ref_links); an empty array when no dependency points
- *         to that task; or NULL when @p cursor is not on a task
- *         declaration identifier.
+ * @param doc           Destination mutable JSON document.
+ * @param project_root  The requester's Project synthetic root.
+ * @param wanted        The assembled-tree task the references point at.
+ * @return A `Location[]` JSON array, or NULL.
  */
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
-                                       const char *cursor_uri,
-                                       const TokenSpan *tokens, int num_tokens,
-                                       LspPos cursor);
+                                       ProjectNode *project_root,
+                                       const ProjectNode *wanted);

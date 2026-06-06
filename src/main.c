@@ -20,6 +20,7 @@
 
 #include "server.h"
 #include "threadpool.h"
+#include "diag_worker.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,5 +86,6 @@ int main(void) {
         free(body);
     }
     threadpool_stop();
+    diag_registry_shutdown();
     return 0;
 }

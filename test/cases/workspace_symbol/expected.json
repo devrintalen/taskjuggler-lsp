@@ -49,6 +49,9 @@
         },
         "workspaceSymbolProvider": true,
         "workspace": {
+          "workspaceFolders": {
+            "supported": false
+          },
           "fileOperations": {
             "didRename": {
               "filters": [
@@ -128,7 +131,6 @@
       {
         "name": "\"Backend\"",
         "kind": 12,
-        "containerName": "\"My Project\"",
         "location": {
           "uri": "file:///test/sample.tjp",
           "range": {
@@ -164,7 +166,6 @@
       {
         "name": "\"Frontend\"",
         "kind": 12,
-        "containerName": "\"My Project\"",
         "location": {
           "uri": "file:///test/sample.tjp",
           "range": {
@@ -182,7 +183,6 @@
       {
         "name": "\"Developer\"",
         "kind": 19,
-        "containerName": "\"My Project\"",
         "location": {
           "uri": "file:///test/sample.tjp",
           "range": {
@@ -206,7 +206,6 @@
       {
         "name": "\"Backend\"",
         "kind": 12,
-        "containerName": "\"My Project\"",
         "location": {
           "uri": "file:///test/sample.tjp",
           "range": {
@@ -230,7 +229,6 @@
       {
         "name": "\"Frontend\"",
         "kind": 12,
-        "containerName": "\"My Project\"",
         "location": {
           "uri": "file:///test/sample.tjp",
           "range": {

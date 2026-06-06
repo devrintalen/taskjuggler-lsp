@@ -19,6 +19,7 @@
 /** @file */
 
 #include "code_lens.h"
+#include "document_symbol.h"
 #include "grammar.tab.h"
 
 #include <ctype.h>
@@ -32,13 +33,19 @@
  * Mon-Fri, no holidays.  The project-level `dailyworkinghours`,
  * `weekdays`, and holiday declarations are not yet captured by the
  * parser, so this lens treats them as fixed. */
+/** Working minutes per day used to convert `length` / `effort` values. */
 #define WORKING_MINUTES_PER_DAY (8 * 60)
+/** Working days per week assumed by the lens. */
 #define WORKING_DAYS_PER_WEEK   5
-#define WORKING_DAYS_PER_MONTH  22   /* ≈ yearlyworkingdays(260) / 12 */
+/** Working days per month assumed by the lens (≈ 260 / 12). */
+#define WORKING_DAYS_PER_MONTH  22
+/** Working days per year assumed by the lens (TaskJuggler default). */
 #define WORKING_DAYS_PER_YEAR   260
 
 /* Calendar approximations for `duration`: a month is 30 days, a year
  * is 365 days. */
+
+/** Seconds in one calendar day, used to convert `duration` values. */
 #define CALENDAR_SECONDS_PER_DAY   (24L * 60 * 60)
 
 /**
@@ -47,6 +54,10 @@
  *
  * The returned value uses `'i'` for "min" to disambiguate from `'m'`
  * (month).
+ *
+ * @param s  Null-terminated unit string (e.g. "min", "h", "d", "w", "m", "y").
+ * @return   Canonical single character (`'i'`, `'h'`, `'d'`, `'w'`, `'m'`,
+ *           `'y'`), or `0` if @p s is NULL or unrecognized.
  */
 static char canon_unit(const char *s) {
     if (!s) return 0;
@@ -62,6 +73,12 @@ static char canon_unit(const char *s) {
 /**
  * Parse a compact `TK_DURATION` token text like `"5d"`, `"+4m"`, or
  * `"-2h"` (regex from `lexer.l`).
+ *
+ * @param text      Null-terminated token text to parse.
+ * @param out_value Receives the parsed integer value (sign included).
+ * @param out_unit  Receives the canonical unit character (see canon_unit()).
+ * @return          1 on success, 0 if @p text is empty, has no leading digit,
+ *                  or ends with an unrecognized unit.
  */
 static int parse_compact_duration(const char *text,
                                   int *out_value, char *out_unit) {
@@ -87,6 +104,14 @@ static int parse_compact_duration(const char *text,
  * Read a `dur_val` (grammar.y:1264) starting at @p start_idx in the
  * token stream — either a compact `TK_DURATION` or
  * `TK_INTEGER`|`TK_FLOAT` + `TK_IDENT`.
+ *
+ * @param spans      Array of token spans from the parse result.
+ * @param num_spans  Number of entries in @p spans.
+ * @param start_idx  Index of the first token of the `dur_val` to read.
+ * @param out_value  Receives the parsed integer value.
+ * @param out_unit   Receives the canonical unit character (see canon_unit()).
+ * @return           1 on success, 0 if @p start_idx is out of range, the token
+ *                   kind is unsupported, or the unit is unrecognized.
  */
 static int parse_dur_val_at(const TokenSpan *spans, int num_spans,
                             int start_idx,
@@ -115,6 +140,11 @@ static int parse_dur_val_at(const TokenSpan *spans, int num_spans,
  * Convert a duration to a count of calendar days.  Sub-day units
  * collapse to zero — the lens shows the same calendar day as the base
  * in that case (the task starts and ends on the same day).
+ *
+ * @param value  Numeric magnitude of the duration (may be negative).
+ * @param unit   Canonical unit character as returned by canon_unit().
+ * @return       Number of calendar days corresponding to @p value and @p unit,
+ *               or 0 for sub-day units or an unrecognized unit.
  */
 static long duration_to_calendar_days(int value, char unit) {
     switch (unit) {
@@ -131,6 +161,11 @@ static long duration_to_calendar_days(int value, char unit) {
 /**
  * Convert a `length` value to working days.  Sub-day units collapse to
  * one working day (the task is contained inside a single workday).
+ *
+ * @param value  Numeric magnitude of the length (may be negative).
+ * @param unit   Canonical unit character as returned by canon_unit().
+ * @return       Number of working days corresponding to @p value and @p unit,
+ *               or 0 for an unrecognized unit.
  */
 static long length_to_working_days(int value, char unit) {
     switch (unit) {
@@ -144,12 +179,23 @@ static long length_to_working_days(int value, char unit) {
     }
 }
 
-/** Step @p t forward or backward by one calendar day. */
+/**
+ * Step @p t forward or backward by one calendar day.
+ *
+ * @param t          Unix timestamp to advance.
+ * @param direction  +1 to move forward, -1 to move backward.
+ * @return           Timestamp shifted by one calendar day in @p direction.
+ */
 static time_t step_day(time_t t, int direction) {
     return t + (long)direction * CALENDAR_SECONDS_PER_DAY;
 }
 
-/** Non-zero if @p t falls on Saturday or Sunday (UTC). */
+/**
+ * Non-zero if @p t falls on Saturday or Sunday (UTC).
+ *
+ * @param t  Unix timestamp to test.
+ * @return   Non-zero if @p t is a Saturday or Sunday, zero otherwise.
+ */
 static int is_weekend(time_t t) {
     struct tm tm;
     gmtime_r(&t, &tm);
@@ -163,6 +209,13 @@ static int is_weekend(time_t t) {
  *
  * For `length 5d` starting Mon, this returns the following Friday
  * (Mon=1, Tue=2, Wed=3, Thu=4, Fri=5).  Symmetric for backward walks.
+ *
+ * @param base       Starting Unix timestamp (typically a task start or end date).
+ * @param days       Number of working days to walk (must be positive; callers
+ *                   pass `labs()` of the converted value).
+ * @param direction  +1 to walk forward, -1 to walk backward.
+ * @return           Timestamp of the last working day in the walk, or @p base
+ *                   if @p days is zero or negative.
  */
 static time_t walk_working_days_inclusive(time_t base, long days,
                                           int direction) {
@@ -181,6 +234,13 @@ static time_t walk_working_days_inclusive(time_t base, long days,
  * Walk @p days calendar days from @p base, inclusive of @p base.
  *
  * For `duration 5d` starting Mon, this returns Fri (Mon=1, …, Fri=5).
+ *
+ * @param base       Starting Unix timestamp.
+ * @param days       Number of calendar days to walk (must be positive; callers
+ *                   pass `labs()` of the converted value).
+ * @param direction  +1 to walk forward, -1 to walk backward.
+ * @return           Timestamp of the final calendar day in the walk, or @p base
+ *                   if @p days is zero or negative.
  */
 static time_t walk_calendar_days_inclusive(time_t base, long days,
                                            int direction) {
@@ -188,7 +248,13 @@ static time_t walk_calendar_days_inclusive(time_t base, long days,
     return base + (long)direction * (days - 1) * CALENDAR_SECONDS_PER_DAY;
 }
 
-/** Format @p t as `YYYY-MM-DD` into @p buf (must hold ≥ 16 bytes). */
+/**
+ * Format @p t as `YYYY-MM-DD` into @p buf (must hold >= 16 bytes).
+ *
+ * @param t         Unix timestamp to format (interpreted as UTC).
+ * @param buf       Output buffer to write the formatted date string into.
+ * @param buf_size  Size of @p buf in bytes; must be at least 16.
+ */
 static void format_date(time_t t, char *buf, size_t buf_size) {
     struct tm tm;
     gmtime_r(&t, &tm);
@@ -196,7 +262,14 @@ static void format_date(time_t t, char *buf, size_t buf_size) {
              tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
 }
 
-/** Add a `Position` object {line, character} under @p key. */
+/**
+ * Add a `Position` object {line, character} under @p key.
+ *
+ * @param doc     Mutable JSON document used for allocation.
+ * @param parent  JSON object to add the new `Position` value to.
+ * @param key     Property name under which the position is stored.
+ * @param p       LSP position value containing line and character offsets.
+ */
 static void put_position(yyjson_mut_doc *doc, yyjson_mut_val *parent,
                           const char *key, LspPos p) {
     yyjson_mut_val *obj = yyjson_mut_obj(doc);
@@ -208,6 +281,11 @@ static void put_position(yyjson_mut_doc *doc, yyjson_mut_val *parent,
 /**
  * Append one CodeLens object to @p arr.  Inert: `command.command` is
  * the empty string so the editor renders only the title.
+ *
+ * @param doc    Mutable JSON document used for allocation.
+ * @param arr    JSON array to append the new CodeLens object to.
+ * @param range  Source range the lens is anchored to.
+ * @param title  Display string shown by the editor above the token.
  */
 static void push_lens(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                        LspRange range, const char *title) {
@@ -230,7 +308,7 @@ static void push_lens(yyjson_mut_doc *doc, yyjson_mut_val *arr,
  *
  * Single linear scan of tok_spans[]: for each `length` / `duration`
  * keyword whose owning task has an explicit `start` or `end` date
- * (precomputed during parse and stored on the DocSymbol), compute the
+ * (precomputed during parse and stored on the tj_node), compute the
  * complementary endpoint and emit a lens.
  *
  * The `symbols` / `num_symbols` parameters are unused — endpoint data
@@ -239,7 +317,7 @@ static void push_lens(yyjson_mut_doc *doc, yyjson_mut_val *arr,
  */
 yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
                                      const TokenSpan *spans, int num_spans,
-                                     DocSymbol *const *symbols,
+                                     tj_node *const *symbols,
                                      int num_symbols) {
     (void)symbols;
     (void)num_symbols;
@@ -250,7 +328,7 @@ yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
     for (int i = 0; i < num_spans; i++) {
         const TokenSpan *t = &spans[i];
         if (t->token_kind != KW_LENGTH && t->token_kind != KW_DURATION) continue;
-        DocSymbol *owner = t->owner;
+        tj_node *owner = t->owner;
         if (!owner || owner->keyword != KW_TASK) continue;
         if (!owner->has_start && !owner->has_end) continue;
 

@@ -24,6 +24,34 @@
 #include <yyjson.h>
 
 /**
+ * Return the innermost tj_node whose range contains @p pos (inclusive
+ * start, exclusive end), using the precomputed `.owner` field on @p tokens.
+ *
+ * @param tokens      Token spans of the current document.
+ * @param num_tokens  Length of @p tokens.
+ * @param pos         Position to look up.
+ * @return The matching node, or NULL when @p pos is outside every tj_node.
+ */
+tj_node *tj_node_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
+
+/**
+ * Navigate a tj_node tree by following @p path (an array of @p plen
+ * identifier strings).  Used to resolve dotted task paths against the
+ * task tree.
+ *
+ * @param syms   Top-level nodes to start from.
+ * @param n      Length of @p syms.
+ * @param path   Identifiers to follow, outermost first.
+ * @param plen   Length of @p path.
+ * @param out_n  Receives the length of the returned children array.
+ * @return Children array of the matched node, or NULL with `*out_n = 0`
+ *         when the path does not resolve.
+ */
+tj_node *const *tj_node_find_path(tj_node *const *syms, int n,
+                                  const char **path, int plen,
+                                  int *out_n);
+
+/**
  * Serialise an LspRange to a mutable JSON object allocated in @p doc.
  *
  * @param doc  Destination mutable JSON document.
@@ -41,13 +69,13 @@ yyjson_mut_val *range_json(yyjson_mut_doc *doc, LspRange r);
 int symbol_kind_for(int keyword);
 
 /**
- * Serialise the documentSymbol tree to a heap-allocated, NUL-terminated JSON
- * array string.  Intended to be cached and later embedded via
+ * Serialise the document's tj_node forest to a heap-allocated,
+ * NUL-terminated JSON array string.  Intended to be embedded via
  * yyjson_mut_rawncpy.
  *
- * @param syms     Top-level symbols of the document.
+ * @param syms     Top-level nodes to render.
  * @param n        Length of @p syms.
  * @param out_len  Receives the byte length of the result, excluding the NUL.
  * @return Heap-allocated JSON; caller owns and must free().
  */
-char *build_document_symbols_json(DocSymbol *const *syms, int n, size_t *out_len);
+char *build_document_symbols_json(tj_node *const *syms, int n, size_t *out_len);

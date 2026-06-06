@@ -5,7 +5,7 @@
     "method": "initialize",
     "params": {
       "processId": null,
-      "rootUri": null,
+      "rootUri": "file://${CASE_DIR}/workspace",
       "capabilities": {}
     }
   },
@@ -19,10 +19,10 @@
     "method": "textDocument/didOpen",
     "params": {
       "textDocument": {
-        "uri": "file:///test/project.tjp",
+        "uri": "file://${CASE_DIR}/workspace/project.tjp",
         "languageId": "taskjuggler",
         "version": 1,
-        "text": "project p \"Project\" 2024-01-01 +3m {\n}\ntask backend \"Backend\" {\n}\ntask frontend \"Frontend\" {\n  depends backend\n}\n"
+        "text": "project p \"Project\" 2024-01-01 +3m {\n}\ntask backend \"Backend\" {\n}\ntask frontend \"Frontend\" {\n  depends backend\n}\ninclude \"tasks.tji\"\n"
       }
     }
   },
@@ -31,7 +31,7 @@
     "method": "textDocument/didOpen",
     "params": {
       "textDocument": {
-        "uri": "file:///test/tasks.tji",
+        "uri": "file://${CASE_DIR}/workspace/tasks.tji",
         "languageId": "taskjuggler",
         "version": 1,
         "text": "task qa \"QA\" {\n  depends backend\n}\n"
@@ -44,7 +44,7 @@
     "method": "textDocument/definition",
     "params": {
       "textDocument": {
-        "uri": "file:///test/project.tjp"
+        "uri": "file://${CASE_DIR}/workspace/project.tjp"
       },
       "position": {
         "line": 5,
@@ -58,7 +58,7 @@
     "method": "textDocument/definition",
     "params": {
       "textDocument": {
-        "uri": "file:///test/tasks.tji"
+        "uri": "file://${CASE_DIR}/workspace/tasks.tji"
       },
       "position": {
         "line": 1,

@@ -18,114 +18,27 @@
 
 /** @file */
 
-/* See doc/modules/document_highlight.rst for the module overview. */
-
 #include "document_highlight.h"
 #include "document_symbol.h"
-#include "hover.h"
 #include "grammar.tab.h"
 #include <string.h>
 
-/**
- * Test whether @p p falls within range @p r (endpoints inclusive).
- *
- * @param p  Position to test.
- * @param r  Range.
- * @return 1 when @p p is inside @p r, 0 otherwise.
- */
-static int pos_in_range(LspPos p, LspRange r) {
-    int after  = (p.line > r.start.line)
-              || (p.line == r.start.line && p.character >= r.start.character);
-    int before = (p.line < r.end.line)
-              || (p.line == r.end.line && p.character <= r.end.character);
-    return after && before;
-}
+/* Document highlight resolves the cursor to a single target task and reports
+ * every same-document occurrence of that task: its declaration as Write
+ * (kind 3) and each dependency that resolves to it as Read (kind 2).  The
+ * cursor → target resolution (which triggers from both declaration and
+ * reference sites) runs in the handler against the pinned snapshot's
+ * ProjectNode tree; this file walks that same tree to collect the
+ * occurrences, mirroring references.c but emitting highlight kinds instead
+ * of cross-file Locations. */
 
 /**
- * Test whether ranges @p a and @p b have identical start and end positions.
+ * Append a single document highlight object to @p arr.
  *
- * @param a  First range.
- * @param b  Second range.
- * @return 1 when the ranges are exactly equal, 0 otherwise.
- */
-static int range_eq(LspRange a, LspRange b) {
-    return pos_cmp(a.start, b.start) == 0 && pos_cmp(a.end, b.end) == 0;
-}
-
-/**
- * Find the innermost DocSymbol whose selection_range contains @p pos.
- *
- * @param tokens      Token spans of the current document.
- * @param num_tokens  Length of @p tokens.
- * @param pos         Position to look up.
- * @return The matching symbol, or NULL when @p pos sits outside every
- *         selection range.  Runs in O(log T + D) where T is @p num_tokens
- *         and D is the symbol nesting depth.
- */
-static const DocSymbol *find_symbol_at(const TokenSpan *tokens, int num_tokens,
-                                       LspPos pos) {
-    for (DocSymbol *sym = symbol_at(tokens, num_tokens, pos);
-         sym != NULL; sym = sym->parent) {
-        if (pos_in_range(pos, sym->selection_range))
-            return sym;
-    }
-    return NULL;
-}
-
-/**
- * Walk the symbol tree depth-first to find the first node whose id
- * matches @p id.  Used for intermediate segments in dotted dependency
- * paths where no def_link directly targets the segment.
- *
- * @param syms  Sibling symbols to search.
- * @param n     Length of @p syms.
- * @param id    Identifier to match.
- * @return The matching symbol, or NULL when no symbol carries @p id.
- */
-static const DocSymbol *find_symbol_by_id(DocSymbol *const *syms, int n,
-                                          const char *id) {
-    for (int i = 0; i < n; i++) {
-        if (syms[i]->id && strcmp(syms[i]->id, id) == 0)
-            return syms[i];
-        const DocSymbol *found =
-            find_symbol_by_id(syms[i]->children, syms[i]->num_children, id);
-        if (found) return found;
-    }
-    return NULL;
-}
-
-/**
- * Find a same-document DefinitionLink whose source range contains @p pos
- * and return its target.  Uses symbol_at() to locate the innermost
- * enclosing symbol, then scans def_links walking up parents on miss.
- *
- * @param tokens      Token spans of the current document.
- * @param num_tokens  Length of @p tokens.
- * @param pos         Position to look up.
- * @return The target symbol, or NULL when @p pos is not on a same-document
- *         dependency reference.
- */
-static const DocSymbol *find_link_target_at(const TokenSpan *tokens,
-                                            int num_tokens, LspPos pos) {
-    for (DocSymbol *sym = symbol_at(tokens, num_tokens, pos);
-         sym != NULL; sym = sym->parent) {
-        for (int j = 0; j < sym->num_def_links; j++) {
-            const DefinitionLink *link = &sym->def_links[j];
-            if (link->target_uri) continue;
-            if (pos_in_range(pos, link->source))
-                return link->target;
-        }
-    }
-    return NULL;
-}
-
-/**
- * Append a DocumentHighlight object to @p arr.
- *
- * @param doc    Destination mutable JSON document.
- * @param arr    DocumentHighlight[] array.
- * @param range  Source range of the highlight.
- * @param kind   LSP DocumentHighlightKind: 2 = Read, 3 = Write.
+ * @param doc    yyjson mutable document used for all allocations.
+ * @param arr    JSON array to append the highlight object to.
+ * @param range  Source range covered by this highlight.
+ * @param kind   LSP DocumentHighlightKind value (2 = Read, 3 = Write).
  */
 static void push_highlight(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                            LspRange range, int kind) {
@@ -136,84 +49,90 @@ static void push_highlight(yyjson_mut_doc *doc, yyjson_mut_val *arr,
 }
 
 /**
- * Collect Read highlights from @p target's ref_links into @p arr.
+ * Find the last TK_IDENT token whose start position falls within @p range
+ * and write its range into @p out.
  *
- * For each same-document reference, find the specific token within the
- * ref source range that matches the target's id.
+ * A dependency's source_range spans the whole reference (leading bangs and
+ * every dotted segment); the highlight covers only the identifier token that
+ * names the resolved target, i.e. the path's final segment.
  *
- * @param doc         Destination mutable JSON document.
- * @param arr         DocumentHighlight[] array to append to.
- * @param target      Symbol whose incoming references are being collected.
- * @param tokens      Token spans of the current document.
- * @param num_tokens  Length of @p tokens.
+ * @param tokens      Array of token spans for the current document.
+ * @param num_tokens  Number of entries in @p tokens.
+ * @param range       Source range to search within.
+ * @param out         Output parameter set to the range of the last matching
+ *                    TK_IDENT token when one is found.
+ * @return            1 if a matching token was found, 0 otherwise.
  */
-static void collect_ref_highlights(yyjson_mut_doc *doc, yyjson_mut_val *arr,
-                                   const DocSymbol *target,
-                                   const TokenSpan *tokens, int num_tokens) {
-    for (int i = 0; i < target->num_ref_links; i++) {
-        const ReferenceLink *ref = &target->ref_links[i];
-        if (ref->source_uri) continue;
+static int last_ident_in_range(const TokenSpan *tokens, int num_tokens,
+                               LspRange range, LspRange *out) {
+    int found = 0;
+    for (int t = 0; t < num_tokens; t++) {
+        if (tokens[t].token_kind != TK_IDENT) continue;
+        if (pos_cmp(tokens[t].start, range.start) < 0) continue;
+        if (pos_cmp(tokens[t].start, range.end) > 0) continue;
+        out->start = tokens[t].start;
+        out->end   = tokens[t].end;
+        found = 1;
+    }
+    return found;
+}
 
-        /* Scan only tokens within the ref source range */
-        for (int t = 0; t < num_tokens; t++) {
-            if (pos_cmp(tokens[t].start, ref->source.end) > 0) break;
-            if (pos_cmp(tokens[t].end, ref->source.start) < 0) continue;
-            if (tokens[t].token_kind != TK_IDENT) continue;
-            if (!tokens[t].text) continue;
-            if (strcmp(tokens[t].text, target->id) != 0) continue;
-
-            LspRange token_range = { tokens[t].start, tokens[t].end };
-            if (range_eq(token_range, target->selection_range)) continue;
-
-            push_highlight(doc, arr, token_range, 2);
+/**
+ * Recursively walk the project tree depth-first, appending a Read highlight
+ * (kind 2) for each dependency that is declared in @p doc_uri and resolves to
+ * @p wanted.  Cross-file dependencies are skipped because highlight ranges
+ * are document-local.
+ *
+ * @param doc           yyjson mutable document used for all allocations.
+ * @param arr           JSON array to append highlight objects to.
+ * @param node          Current node in the depth-first traversal.
+ * @param wanted        Target node that dependencies must resolve to.
+ * @param project_root  Root of the project tree, passed to
+ *                      project_dep_resolve() for resolution.
+ * @param doc_uri       URI of the document being highlighted; only
+ *                      dependencies whose source_uri matches are emitted.
+ * @param tokens        Array of token spans for the current document.
+ * @param num_tokens    Number of entries in @p tokens.
+ */
+static void collect_read_highlights(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                                    ProjectNode *node, const ProjectNode *wanted,
+                                    ProjectNode *project_root,
+                                    const char *doc_uri,
+                                    const TokenSpan *tokens, int num_tokens) {
+    if (!node) return;
+    if (node->source_uri && strcmp(node->source_uri, doc_uri) == 0) {
+        for (int i = 0; i < node->num_dependencies; i++) {
+            if (project_dep_resolve(node, i, project_root) != wanted) continue;
+            LspRange segment;
+            if (last_ident_in_range(tokens, num_tokens,
+                                    node->dependencies[i].source_range,
+                                    &segment))
+                push_highlight(doc, arr, segment, 2);
         }
     }
+    for (int i = 0; i < node->num_children; i++)
+        collect_read_highlights(doc, arr, node->children[i], wanted,
+                                project_root, doc_uri, tokens, num_tokens);
 }
 
 yyjson_mut_val *build_document_highlight_json(
     yyjson_mut_doc *doc,
-    DocSymbol *const *symbols, int num_symbols,
-    const TokenSpan *tokens, int num_tokens,
-    LspPos cursor) {
+    ProjectNode *project_root,
+    const ProjectNode *wanted,
+    const char *doc_uri,
+    const TokenSpan *tokens, int num_tokens) {
 
-    /* Step 1: find the token at cursor. */
-    TokenSpan tok = tok_span_at(tokens, num_tokens, cursor);
-    if (tok.token_kind != TK_IDENT) {
-        free(tok.text);
-        return NULL;
-    }
+    if (!project_root || !wanted || !doc_uri) return NULL;
 
-    const DocSymbol *target = NULL;
-
-    /* Step 2a: check if cursor is on a definition site. */
-    target = find_symbol_at(tokens, num_tokens, cursor);
-
-    /* Step 2b: check if cursor is on a reference site. */
-    if (!target) {
-        const DocSymbol *link_target =
-            find_link_target_at(tokens, num_tokens, cursor);
-        if (link_target) {
-            if (link_target->id && tok.text
-                    && strcmp(link_target->id, tok.text) == 0) {
-                target = link_target;
-            } else {
-                target = find_symbol_by_id(symbols, num_symbols, tok.text);
-            }
-        }
-    }
-
-    free(tok.text);
-
-    if (!target || !target->id) return NULL;
-
-    /* Step 3: collect highlights. */
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
 
-    /* 3a: definition site — Write. */
-    push_highlight(doc, arr, target->selection_range, 3);
+    /* Write: the declaration itself, only when it lives in this document. */
+    if (wanted->source_uri && strcmp(wanted->source_uri, doc_uri) == 0)
+        push_highlight(doc, arr, wanted->selection_range, 3);
 
-    /* 3b: reference sites — Read. */
-    collect_ref_highlights(doc, arr, target, tokens, num_tokens);
+    /* Read: every in-document dependency resolving to the target. */
+    collect_read_highlights(doc, arr, project_root, wanted, project_root,
+                            doc_uri, tokens, num_tokens);
 
     return arr;
 }

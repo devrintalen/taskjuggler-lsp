@@ -49,6 +49,9 @@
         },
         "workspaceSymbolProvider": true,
         "workspace": {
+          "workspaceFolders": {
+            "supported": false
+          },
           "fileOperations": {
             "didRename": {
               "filters": [
@@ -98,14 +101,6 @@
   },
   {
     "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-      "diagnostics": []
-    }
-  },
-  {
-    "jsonrpc": "2.0",
     "id": 2,
     "result": [
       {
@@ -129,11 +124,8 @@
   },
   {
     "jsonrpc": "2.0",
-    "method": "textDocument/publishDiagnostics",
-    "params": {
-      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
-      "diagnostics": []
-    }
+    "id": 4,
+    "result": null
   },
   {
     "jsonrpc": "2.0",
@@ -160,7 +152,10 @@
   },
   {
     "jsonrpc": "2.0",
-    "id": 4,
-    "result": null
+    "method": "textDocument/publishDiagnostics",
+    "params": {
+      "uri": "file://${CASE_DIR}/workspace/tasks.tji",
+      "diagnostics": []
+    }
   }
 ]

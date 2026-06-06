@@ -19,6 +19,7 @@ import argparse
 import difflib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -87,12 +88,72 @@ def collect_server_output(stdout, output_list):
         output_list.append(message)
 
 
-def run_server(server_binary, input_messages):
-    """Start the server, send all messages, and return the collected output."""
+def _wait_for_response_id(collected, expected_id, deadline_seconds=5.0):
+    """Block until a response with @p expected_id appears in @p collected.
+
+    The reader thread appends to the list as messages arrive.  Returns
+    True on success, False on timeout.
+    """
+    import time
+    deadline = time.monotonic() + deadline_seconds
+    seen = 0
+    while time.monotonic() < deadline:
+        while seen < len(collected):
+            message = collected[seen]
+            seen += 1
+            if _is_response(message) and message.get('id') == expected_id:
+                return True
+        time.sleep(0.01)
+    return False
+
+
+def _wait_quiescent(collected, quiet_seconds=0.5, max_wait=15.0):
+    """Block until @p collected stops growing for @p quiet_seconds (or timeout).
+
+    Used for tj3 cases, whose diagnostics arrive asynchronously from a worker
+    thread after the triggering notification is processed.  We wait for the
+    output stream to go quiet rather than guessing a fixed delay.
+    """
+    import time
+    last_len = -1
+    last_change = time.monotonic()
+    deadline = last_change + max_wait
+    while time.monotonic() < deadline:
+        if len(collected) != last_len:
+            last_len = len(collected)
+            last_change = time.monotonic()
+        elif time.monotonic() - last_change >= quiet_seconds:
+            return
+        time.sleep(0.02)
+
+
+def run_server(server_binary, input_messages, use_tj3=False, wait_async=False):
+    """Start the server, send all messages, and return the collected output.
+
+    Honors LSP spec ordering for `initialize`: per the spec, the client
+    must wait for the response to `initialize` before sending any other
+    message.  After sending an `initialize` message with an id, the
+    harness blocks until that response arrives before sending the next
+    message.  Other requests are sent without waiting; the server may
+    answer them in any order, and diff_output matches responses by id.
+
+    By default the asynchronous tj3 diagnostics workers are suppressed so the
+    golden output stays deterministic and independent of whether tj3 is
+    installed.  Cases that opt in via `uses_tj3` run with tj3 enabled; cases
+    that opt in via either `uses_tj3` or `uses_async_diag` set @p wait_async
+    and block until the async diagnostics settle before closing (e.g. the
+    "Missing compile_commands.json" warnings, which a worker emits even with
+    tj3 disabled).
+    """
+    env = dict(os.environ)
+    if not use_tj3:
+        env["TASKJUGGLER_LSP_DISABLE_TJ3"] = "1"
+
     process = subprocess.Popen(
         [server_binary],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
+        env=env,
     )
 
     collected = []
@@ -106,6 +167,16 @@ def run_server(server_binary, input_messages):
     for message in input_messages:
         process.stdin.write(frame_message(message))
         process.stdin.flush()
+        if isinstance(message, dict) \
+                and message.get('method') == 'initialize' \
+                and 'id' in message:
+            _wait_for_response_id(collected, message['id'])
+
+    # Worker-emitted diagnostics (tj3 results and "Missing compile_commands.json"
+    # warnings) are published asynchronously; let them settle so the captured
+    # stream is complete before we close stdin.
+    if wait_async:
+        _wait_quiescent(collected)
 
     process.stdin.close()
     reader.join(timeout=10.0)
@@ -171,14 +242,42 @@ def _partition(messages):
     return responses, notifications, duplicate_ids
 
 
-def diff_output(expected, actual):
+def _collapse_diagnostics(notifications):
+    """Reduce publishDiagnostics to the final state per URI, sorted by URI.
+
+    Only used for cases that opt into asynchronous diagnostics.  Those markers
+    are emitted by per-project worker threads that interleave nondeterministically
+    with the coordinator's synchronous empty baselines, so neither the order nor
+    the count of intermediate publishes is reproducible.  What *is* deterministic
+    — and all the client ultimately renders — is the last diagnostics array
+    published for each URI.  We keep every non-publishDiagnostics notification in
+    order and replace the publishes with one entry per URI (its final state),
+    ordered by URI.
+    """
+    pub = 'textDocument/publishDiagnostics'
+    others = [m for m in notifications
+              if not (isinstance(m, dict) and m.get('method') == pub)]
+    final = {}
+    for m in notifications:
+        if isinstance(m, dict) and m.get('method') == pub:
+            final[m['params']['uri']] = m
+    pubs = [final[uri] for uri in sorted(final)]
+    return others + pubs
+
+
+def diff_output(expected, actual, collapse_diagnostics=False):
     """Return a colored diff string, or empty string if equal.
 
     Responses are matched by id (order-insensitive); notifications and
-    server-initiated requests are diffed in order.
+    server-initiated requests are diffed in order.  When @p collapse_diagnostics
+    is set (asynchronous-diagnostics cases), publishDiagnostics are compared by
+    final-state-per-URI instead of positionally (see _collapse_diagnostics).
     """
     exp_responses, exp_notifications, exp_dups = _partition(expected)
     act_responses, act_notifications, act_dups = _partition(actual)
+    if collapse_diagnostics:
+        exp_notifications = _collapse_diagnostics(exp_notifications)
+        act_notifications = _collapse_diagnostics(act_notifications)
 
     sections = []
 
@@ -260,14 +359,32 @@ def run_test_case(server_binary, case_dir, record):
         print(f"  {yellow('SKIP')}  {case_name}  {dim('no input.json')}")
         return True
 
+    # A `uses_tj3` marker opts the case into running the real tj3 compiler.
+    # Such cases need tj3 on PATH; skip them (rather than fail) where it is
+    # absent, so the rest of the suite stays runnable without tj3 installed.
+    use_tj3 = os.path.isfile(os.path.join(case_dir, 'uses_tj3'))
+    if use_tj3 and shutil.which('tj3') is None:
+        print(f"  {yellow('SKIP')}  {case_name}  {dim('tj3 not on PATH')}")
+        return True
+
+    # A `uses_async_diag` marker opts the case into waiting for worker-emitted
+    # diagnostics to settle (without enabling tj3) — needed for the "Missing
+    # compile_commands.json" warnings, which a worker publishes asynchronously.
+    uses_async_diag = os.path.isfile(os.path.join(case_dir, 'uses_async_diag'))
+    wait_async = use_tj3 or uses_async_diag
+
     abs_case_dir = os.path.abspath(case_dir)
     with open(input_path, 'r') as input_file:
         input_messages = apply_substitutions(json.load(input_file), abs_case_dir)
 
-    actual = run_server(server_binary, input_messages)
+    actual = run_server(server_binary, input_messages,
+                        use_tj3=use_tj3, wait_async=wait_async)
 
     if record:
-        redacted = apply_redactions(actual, abs_case_dir)
+        # For async-diagnostics cases, store the canonical final-state-per-URI
+        # form so the golden file does not capture a racy intermediate ordering.
+        to_write = _collapse_diagnostics(actual) if wait_async else actual
+        redacted = apply_redactions(to_write, abs_case_dir)
         with open(expected_path, 'w') as expected_file:
             json.dump(redacted, expected_file, indent=2)
             expected_file.write('\n')
@@ -281,7 +398,7 @@ def run_test_case(server_binary, case_dir, record):
     with open(expected_path, 'r') as expected_file:
         expected = apply_substitutions(json.load(expected_file), abs_case_dir)
 
-    diff = diff_output(expected, actual)
+    diff = diff_output(expected, actual, collapse_diagnostics=wait_async)
     if not diff:
         print(f"  {green('✓')}  {case_name}")
         return True

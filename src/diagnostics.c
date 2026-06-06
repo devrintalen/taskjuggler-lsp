@@ -18,68 +18,46 @@
 
 /** @file */
 
-/* See doc/modules/diagnostics.rst for the module overview. */
-
 #include "diagnostics.h"
-#include "parser.h"
 #include "server.h"
+#include "query_context.h"
+#include "grammar.tab.h"   /* KW_INCLUDE */
 
 #include <yyjson.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Diagnostic accumulation ─────────────────────────────────────────────── */
+/* ── publishDiagnostics notification ─────────────────────────────────────── */
 
-/* Append a diagnostic to r's diagnostics array, growing it if needed.
- * range    — source range to highlight in the editor
- * severity — DIAG_ERROR or DIAG_WARNING
- * msg      — human-readable message; a heap copy is made and owned by r
- */
-void push_diagnostic(ParseResult *r, LspRange range, int severity,
-                     const char *msg) {
-    if (r->num_diagnostics >= r->diag_cap) {
-        int nc = r->diag_cap ? r->diag_cap * 2 : 4;
-        Diagnostic *tmp = realloc(r->diagnostics,
-                                  (size_t)nc * sizeof(Diagnostic));
-        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        r->diagnostics = tmp;
-        r->diag_cap = nc;
-    }
-    r->diagnostics[r->num_diagnostics++] =
-        (Diagnostic){ range, severity, strdup(msg) };
-}
-
-/* ── LSP publishDiagnostics notification ─────────────────────────────────── */
-
-/* Must only be called from the coordinator thread.  The test harness in
- * tools/lsp_test.py compares notifications positionally (responses are
- * matched by id, but notifications are an ordered list), so a worker
- * emitting publishDiagnostics concurrently with the coordinator would
- * interleave nondeterministically with mutation-emitted notifications
- * and break golden-file diffs.  Today every call site sits inside a
- * mutation handler (or revalidate_all_docs, which is called from one). */
-void publish_diagnostics(const char *uri, const ParseResult *r) {
+void publish_diagnostics_list(const char *uri, const Diagnostic *diags, int count) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
 
     yyjson_mut_val *diag_arr = yyjson_mut_arr(doc);
-    for (int i = 0; i < r->num_diagnostics; i++) {
-        const Diagnostic *d = &r->diagnostics[i];
-        yyjson_mut_val *dj = yyjson_mut_obj(doc);
+    for (int i = 0; i < count; i++) {
+        const Diagnostic *d = &diags[i];
 
-        yyjson_mut_val *range = yyjson_mut_obj(doc);
         yyjson_mut_val *start = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_uint(doc, start, "line",      d->range.start.line);
         yyjson_mut_obj_add_uint(doc, start, "character", d->range.start.character);
+
         yyjson_mut_val *end = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_uint(doc, end, "line",      d->range.end.line);
         yyjson_mut_obj_add_uint(doc, end, "character", d->range.end.character);
+
+        yyjson_mut_val *range = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_val(doc, range, "start", start);
         yyjson_mut_obj_add_val(doc, range, "end",   end);
-        yyjson_mut_obj_add_val(doc,  dj, "range",    range);
-        yyjson_mut_obj_add_uint(doc, dj, "severity", (uint64_t)d->severity);
-        yyjson_mut_obj_add_str(doc,  dj, "message",  d->message);
-        yyjson_mut_arr_add_val(diag_arr, dj);
+
+        yyjson_mut_val *diag = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, diag, "range",    range);
+        yyjson_mut_obj_add_int(doc, diag, "severity", d->severity);
+        if (d->source)
+            yyjson_mut_obj_add_str(doc, diag, "source", d->source);
+        yyjson_mut_obj_add_str(doc, diag, "message", d->message ? d->message : "");
+
+        yyjson_mut_arr_append(diag_arr, diag);
     }
 
     yyjson_mut_val *params = yyjson_mut_obj(doc);
@@ -94,6 +72,199 @@ void publish_diagnostics(const char *uri, const ParseResult *r) {
     yyjson_mut_doc_set_root(doc, notif);
     char *text = yyjson_mut_write(doc, 0, NULL);
     yyjson_mut_doc_free(doc);
-    lsp_send_message(text);
-    free(text);
+    if (text) {
+        lsp_send_message(text);
+        free(text);
+    }
+}
+
+void publish_diagnostics(const char *uri) {
+    publish_diagnostics_list(uri, NULL, 0);
+}
+
+/* ── "Missing/Malformed compile_commands.json" warnings ──────────────────── */
+
+/**
+ * Append a single DIAG_WARNING diagnostic to @p out under @p uri.
+ * The message string is heap-copied and owned by the diagnostic entry.
+ *
+ * @param out      Destination diag_set to append the warning to.
+ * @param uri      Document URI that the warning belongs to.
+ * @param range    Source range in the document where the warning is located.
+ * @param message  Human-readable warning text; a heap copy is stored.
+ */
+static void add_warning(diag_set *out, const char *uri,
+                        LspRange range, const char *message) {
+    Diagnostic d;
+    d.range    = range;
+    d.severity = DIAG_WARNING;
+    d.source   = "taskjuggler-lsp";
+    d.message  = strdup(message);
+    diag_set_add(out, uri, d);
+}
+
+/**
+ * See diagnostics.h for the full contract.
+ *
+ * @param ws    Workspace snapshot whose cc_status drives this collection.
+ * @param proj  Project whose member documents are inspected.
+ * @param out   Output diag_set; new warnings are appended.
+ */
+void diag_collect_cc_missing(const workspace_snapshot *ws,
+                             const ws_project *proj, diag_set *out) {
+    if (!ws || !proj || !out || ws->cc_status == CC_STATUS_OK) return;
+
+    int pindex = -1;
+    for (int i = 0; i < ws->num_projects; i++)
+        if (ws->projects[i] == proj) { pindex = i; break; }
+    if (pindex < 0) return;
+
+    for (int i = 0; i < ws->num_docs; i++) {
+        const ws_doc *w = &ws->docs[i];
+        if (w->project_index != pindex || w->disk_only || !w->snap) continue;
+        const doc_snapshot *s = w->snap;
+
+        size_t uri_len = strlen(s->uri);
+        int is_tji = uri_len >= 4 && strcmp(s->uri + (uri_len - 4), ".tji") == 0;
+        if (is_tji) {
+            /* An include fragment opened with no including .tjp is parsed in
+             * isolation; warn once at the top of the file.
+             *
+             * TODO: offer an LSP code action to generate a compile_commands.json
+             * for the user when it is missing for a .tjp that includes this
+             * fragment. */
+            LspRange r = { { 0, 0 }, { 0, (uint32_t)INT_MAX } };
+            if (ws->cc_status == CC_STATUS_MALFORMED)
+                add_warning(out, s->uri, r,
+                    "Malformed compile_commands.json, this file will be parsed "
+                    "stand-alone, not as part of any other loaded .tjp file "
+                    "that includes it.");
+            else
+                add_warning(out, s->uri, r,
+                    "Missing compile_commands.json, this file will be parsed "
+                    "stand-alone, not as part of any other loaded .tjp file "
+                    "that includes it.");
+            continue;
+        }
+
+        /* .tjp: one warning per `include` directive, located on its
+         * KW_INCLUDE token.  A .tjp with no includes loses nothing
+         * cross-file and gets no warning. */
+        for (int t = 0; t < s->num_tok_spans; t++) {
+            if (s->tok_spans[t].token_kind != KW_INCLUDE) continue;
+            LspRange r = { s->tok_spans[t].start, s->tok_spans[t].end };
+            if (ws->cc_status == CC_STATUS_MALFORMED)
+                add_warning(out, s->uri, r,
+                    "Malformed compile_commands.json, cross-file LSP features "
+                    "are disabled.");
+            else
+                add_warning(out, s->uri, r,
+                    "Missing compile_commands.json, cross-file LSP features "
+                    "are disabled.");
+        }
+    }
+}
+
+/* ── diag_set ────────────────────────────────────────────────────────────── */
+
+/** One URI's bucket inside a diag_set: every diagnostic appended for
+ *  that URI through diag_set_add() in source order. */
+typedef struct diag_file {
+    char       *uri;     /**< owned */
+    Diagnostic *items;   /**< owned; each .message owned */
+    int         count;   /**< number of valid entries in `items` */
+    int         cap;     /**< allocated capacity of `items` */
+} diag_file;
+
+struct diag_set {
+    diag_file *files;    /**< owned ordered map URI -> diag_file */
+    int        count;    /**< number of valid entries in `files` */
+    int        cap;      /**< allocated capacity of `files` */
+};
+
+diag_set *diag_set_new(void) {
+    diag_set *s = calloc(1, sizeof(*s));
+    if (!s) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    return s;
+}
+
+/**
+ * Return the diag_file bucket for @p uri, creating it if necessary.
+ * The returned pointer is valid until the next structural modification of @p s.
+ *
+ * @param s    Diagnostic set to look up or extend.
+ * @param uri  Document URI whose bucket is required.
+ * @return     Pointer to the existing or newly-created diag_file for @p uri.
+ */
+static diag_file *diag_set_file(diag_set *s, const char *uri) {
+    for (int i = 0; i < s->count; i++)
+        if (strcmp(s->files[i].uri, uri) == 0)
+            return &s->files[i];
+
+    if (s->count >= s->cap) {
+        int nc = s->cap ? s->cap * 2 : 4;
+        diag_file *tmp = realloc(s->files, (size_t)nc * sizeof(diag_file));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        s->files = tmp;
+        s->cap   = nc;
+    }
+    diag_file *f = &s->files[s->count++];
+    f->uri   = strdup(uri);
+    f->items = NULL;
+    f->count = 0;
+    f->cap   = 0;
+    return f;
+}
+
+void diag_set_add(diag_set *s, const char *uri, Diagnostic d) {
+    diag_file *f = diag_set_file(s, uri);
+    if (f->count >= f->cap) {
+        int nc = f->cap ? f->cap * 2 : 4;
+        Diagnostic *tmp = realloc(f->items, (size_t)nc * sizeof(Diagnostic));
+        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+        f->items = tmp;
+        f->cap   = nc;
+    }
+    f->items[f->count++] = d;
+}
+
+void diag_set_free(diag_set *s) {
+    if (!s) return;
+    for (int i = 0; i < s->count; i++) {
+        for (int j = 0; j < s->files[i].count; j++)
+            free(s->files[i].items[j].message);
+        free(s->files[i].items);
+        free(s->files[i].uri);
+    }
+    free(s->files);
+    free(s);
+}
+
+/**
+ * Test whether @p s contains at least one diagnostic entry for @p uri.
+ *
+ * @param s    Diagnostic set to search; NULL is treated as empty.
+ * @param uri  Document URI to look for.
+ * @return     1 if a bucket for @p uri exists in @p s, 0 otherwise.
+ */
+static int diag_set_has(const diag_set *s, const char *uri) {
+    if (!s) return 0;
+    for (int i = 0; i < s->count; i++)
+        if (strcmp(s->files[i].uri, uri) == 0)
+            return 1;
+    return 0;
+}
+
+void diag_set_publish(const diag_set *current, const diag_set *previous) {
+    if (current) {
+        for (int i = 0; i < current->count; i++)
+            publish_diagnostics_list(current->files[i].uri,
+                                     current->files[i].items,
+                                     current->files[i].count);
+    }
+    if (previous) {
+        for (int i = 0; i < previous->count; i++)
+            if (!diag_set_has(current, previous->files[i].uri))
+                publish_diagnostics(previous->files[i].uri);
+    }
 }

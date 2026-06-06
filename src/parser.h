@@ -20,7 +20,6 @@
 
 #pragma once
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <time.h>
@@ -66,15 +65,7 @@ typedef struct {
  *
  * Token is used only for values passed between bison grammar rules via the
  * %union yylval mechanism.  It is not the persistent token store; that is
- * TokenSpan.  For example, the bison rule for a quoted string:
- *
- *   string_rule : TK_STR
- *                 { $$ = (Token){ .kind  = TK_STR,
- *                                 .start = @1.start,
- *                                 .end   = @1.end,
- *                                 .text  = strdup(yytext) }; }
- *
- * After the rule fires, $$ holds the Token; the caller frees .text when done.
+ * TokenSpan.
  */
 typedef struct {
     int    kind;         /**< one of the TK_* / KW_* values from grammar.tab.h */
@@ -92,472 +83,272 @@ typedef struct {
 void token_free(Token *t);
 
 
-/** Forward declaration; the full struct is defined below. */
-typedef struct DocSymbol DocSymbol;
-/** Forward declaration; the full struct is defined further down. */
-typedef struct DefinitionLink DefinitionLink;
-/** Forward declaration; the full struct is defined further down. */
-typedef struct ReferenceLink ReferenceLink;
+/* ── tj_node ─────────────────────────────────────────────────────────────── *
+ *
+ * Generic node type representing a named TaskJuggler declaration:
+ * task, account, resource (and shift), report (and related report-type
+ * declarations), or project.  The node kind is encoded by the `keyword`
+ * field — a raw KW_* / TK_* constant from grammar.tab.h.
+ *
+ * Memory ownership: Documents own every tj_node they parse.  When this
+ * Document is freed, the entire owned subtree is freed.  Per-Document
+ * tj_node trees are immutable after parse — cross-Document hoisting
+ * lives in a wholly separate global tree built by server.c, not on
+ * these nodes.
+ */
+typedef struct tj_node tj_node;
+
+/** Direction of a dependency reference. */
+typedef enum {
+    DEP_KIND_DEPENDS,   /**< `depends <ref>` — this task waits for ref */
+    DEP_KIND_PRECEDES   /**< `precedes <ref>` — ref waits for this task */
+} DepKind;
 
 /**
- * A named declaration (project, task, resource, account, shift) in the
- * document's symbol tree.
+ * One captured `depends`/`precedes` reference on a task tj_node.
  *
- * Mirrors LSP DocumentSymbol.  Used for
- * textDocument/documentSymbol, completion identifiers, and dep validation.
+ * Populated by the grammar action for `dep_ref` at parse time.  The
+ * resolver (to be reinstated in a follow-up commit) walks each
+ * Project's task tree once per rebuild and fills `resolved_target`
+ * with the matching tj_node; until then it stays NULL.
  *
- * name is the human-readable label (the quoted string after the identifier in
- * TJP).  id is the short identifier used in dependency paths and cross-
- * references.  Both are heap-allocated.
- *
- * range covers the full declaration including its body; selection_range covers
- * only the identifier token, which is what the editor highlights on navigation.
- *
- * Example TJP input (task at line 0, subtask at line 2):
- *
- *   task spec "Specification" {     <- line 0
- *       task gui "GUI" {}           <- line 2
- *   }                               <- line 3
- *
- * Produces a DocSymbol tree:
- *
- *   DocSymbol {
- *     .name           = "Specification",
- *     .id         = "spec",
- *     .kind           = SK_FUNCTION,
- *     .range          = { {0,0}, {3,1} },   // full task block
- *     .selection_range= { {0,5}, {0,9} },   // just "spec"
- *     .num_children   = 1,
- *     .children       = [
- *       DocSymbol {
- *         .name           = "GUI",
- *         .id         = "gui",
- *         .kind           = SK_FUNCTION,
- *         .range          = { {2,4}, {2,22} },
- *         .selection_range= { {2,9}, {2,12} },
- *         .num_children   = 0,
- *       }
- *     ]
- *   }
+ * Memory ownership: the enclosing tj_node owns `path` (heap-allocated)
+ * and the `dependencies` array.  `resolved_target` is a borrowed
+ * pointer into the project's tj_node tree, never owned here.
  */
-struct DocSymbol {
-    char      *name;           /**< display name, heap-allocated */
-    char      *id;             /**< TJP identifier, heap-allocated */
-    int        keyword;        /**< KW_* constant from grammar.tab.h */
-    LspRange   range;          /**< full declaration range, including body */
-    LspRange   selection_range;/**< range of just the identifier token */
-    /* Date attributes parsed from the body.  Meaningful only when
-     * keyword == KW_TASK; otherwise has_start/has_end remain 0.
-     * Populated by grammar actions for `start <date>` / `end <date>`. */
-    time_t     start_date;     /**< explicit `start` date, valid if has_start */
-    time_t     end_date;       /**< explicit `end` date, valid if has_end */
-    int        has_start;      /**< 1 if `start_date` is populated */
-    int        has_end;        /**< 1 if `end_date` is populated */
-    DocSymbol *parent;         /**< parent node; NULL for root-level symbols */
-    DocSymbol **children;      /**< array of pointers to heap-allocated children */
-    int        num_children;   /**< number of entries in children */
-    int        children_cap;   /**< allocated capacity of children */
-    DefinitionLink *def_links; /**< outgoing resolved references */
-    int        num_def_links;  /**< number of entries in def_links */
-    int        def_links_cap;  /**< allocated capacity of def_links */
-    ReferenceLink *ref_links;  /**< incoming references from other symbols */
-    int        num_ref_links;  /**< number of entries in ref_links */
-    int        ref_links_cap;  /**< allocated capacity of ref_links */
+typedef struct Dependency {
+    DepKind   kind;             /**< whether this dep is `depends` or `precedes` */
+    int       bang_count;       /**< number of leading `!` characters */
+    char     *path;             /**< dotted identifier path, e.g. "foo.bar" */
+    LspRange  source_range;     /**< spans the bang(s) + dotted path in source */
+    tj_node  *resolved_target;  /**< NULL until the resolver runs */
+} Dependency;
+
+/**
+ * One named declaration in a parsed document: a task, account,
+ * resource (or shift), report (or related report-kind), or project.
+ * The node kind is identified by the raw `keyword` field, which
+ * holds the KW_/TK_ constant the grammar matched.  Generic enough
+ * to back document-symbol, completion, definition, references,
+ * folding, and dependency resolution — handlers branch on `keyword`
+ * when they need to distinguish kinds.
+ *
+ * Memory: all heap fields (`id`, `name`, `dependencies`, `children`)
+ * and every transitively reachable child node are owned by the
+ * tj_node and freed by tj_node_free().  Cross-tree pointers
+ * (`parent_node`, `parent_doc`, `Dependency.resolved_target`) are
+ * borrowed and never freed here.
+ */
+struct tj_node {
+    /* ── Identity ── */
+    int        keyword;        /**< KW_ / TK_ constant from grammar.tab.h; 0 for synthetic per-doc roots */
+    char      *id;              /**< TJP identifier, heap-allocated; NULL on synthetic roots */
+    char      *name;            /**< display name (quoted-string), heap-allocated; NULL on synthetic roots */
+
+    /* ── Source location ── */
+    LspRange   range;           /**< full declaration including body */
+    LspRange   selection_range; /**< just the identifier (or keyword) token */
+
+    /* ── Task-only attributes (zero on other kinds) ── */
+    time_t     start_date;      /**< explicit `start` date, valid if has_start */
+    time_t     end_date;        /**< explicit `end` date, valid if has_end */
+    int        has_start;       /**< 1 when start_date is populated */
+    int        has_end;         /**< 1 when end_date is populated */
+
+    /* ── Task-only dependencies (zero on other kinds) ──
+     *
+     * Captured at parse time from `depends` / `precedes` attributes,
+     * one entry per dep_ref in source order.  Empty on tasks that
+     * declare no dependencies and on every non-task node.  Owned by
+     * this node; freed by tj_node_free(). */
+    Dependency *dependencies;     /**< owned array; @see num_dependencies */
+    int         num_dependencies; /**< number of valid entries in `dependencies` */
+    int         dependencies_cap; /**< allocated capacity of `dependencies` */
+
+    /* ── Tree links ──
+     *
+     * parent_node    — semantic parent in the global tree.  May cross
+     *                  document boundaries: when this Document is
+     *                  included with a taskprefix, top-level tasks of
+     *                  this Document point at the prefix-target node
+     *                  in the includer's Document.  In-document
+     *                  parents stay within the same Document.
+     *                  NULL on the document's synthetic root.
+     *
+     * parent_doc     — when this node is a top-level entry in its
+     *                  Document (i.e. declared at file scope, not
+     *                  nested inside another declaration), points to
+     *                  the Document's synthetic root (which is what
+     *                  Document.root stores).  NULL otherwise.  Walk
+     *                  parent_node upward until you hit a node with
+     *                  non-NULL parent_doc to find the owning
+     *                  Document.
+     *
+     * children       — locally declared children in source order.
+     *                  Owned by this node; freed by tj_node_free().
+     */
+    tj_node   *parent_node;  /**< borrowed; see comment above */
+    tj_node   *parent_doc;   /**< borrowed; see comment above */
+    tj_node  **children;     /**< owned array; @see num_children */
+    int        num_children; /**< number of valid entries in `children` */
+    int        children_cap; /**< allocated capacity of `children` */
 };
 
-/* ── Diagnostic severity ─────────────────────────────────────────────────── */
-
-/** LSP DiagnosticSeverity for hard errors. */
-#define DIAG_ERROR   1
-/** LSP DiagnosticSeverity for warnings. */
-#define DIAG_WARNING 2
+/**
+ * Recursively free a tj_node subtree.  Frees the node's own strings, its
+ * children (recursively, via the owned `children` array), and the node
+ * itself.  Does NOT walk `parent_node` upward.
+ *
+ * @param n  Root of the subtree to free.  Safe to call with NULL.
+ */
+void tj_node_free(tj_node *n);
 
 /**
- * A single error or warning to be reported to the editor.
+ * Append @p child as a locally declared child of @p parent (growing the
+ * `children` array as needed) and set @p child's `parent_node` to @p parent.
  *
- * severity uses the LSP DiagnosticSeverity values (DIAG_ERROR=1, DIAG_WARNING=2).
- *
- * Two sources of diagnostics are stored together in ParseResult, distinguished
- * by dep_diag_start:
- *   [0 .. dep_diag_start-1]  ->  permanent diagnostics emitted during parse()
- *                                (syntax errors, in-file dep resolution errors)
- *   [dep_diag_start .. end]  ->  cross-file dep diagnostics, cleared and
- *                                regenerated on every revalidation cycle
- *
- * Example TJP input with an unresolved dependency:
- *
- *   task gui "GUI" {
- *       depends missing_task       <- line 1, characters 16-28
- *   }
- *
- * Produces:
- *
- *   Diagnostic {
- *     .range    = { {1,16}, {1,28} },
- *     .severity = DIAG_ERROR,
- *     .message  = "Unknown task: missing_task",
- *   }
+ * @param parent  Owning node.
+ * @param child   Child to attach (transfer of ownership).
  */
+void tj_node_append_child(tj_node *parent, tj_node *child);
 
-typedef struct {
-    LspRange  range;     /**< source range the diagnostic applies to */
-    int       severity;  /**< DIAG_ERROR or DIAG_WARNING */
-    char     *message;   /**< heap-allocated */
-} Diagnostic;
+/**
+ * Append a captured dependency reference onto @p task's `dependencies`
+ * array, growing it as needed.  Takes ownership of @p dep.path.
+ * `resolved_target` is initialized to NULL.
+ *
+ * @param task  Task tj_node (caller guarantees keyword == KW_TASK).
+ * @param dep   Source-position-bearing Dependency whose `path` is heap-owned.
+ */
+void tj_node_push_dependency(tj_node *task, Dependency dep);
+
+/** Forward declaration; the full struct is defined in diagnostics.h. */
+typedef struct Diagnostic Diagnostic;
 
 /**
  * A lexical token with its source location.
  *
  * Used as a flat, ordered sequence for all cursor-position queries: hover,
- * completion, signature help, and semantic highlighting.  (Distinct from
- * LSP "semantic tokens", which is a separate highlighting protocol.)
+ * completion, signature help, semantic highlighting, folding ranges, etc.
  *
  * Populated by the lexer for every token that callers may need to inspect:
  *   - All KW_* keyword tokens (including TK_DATE, TK_DURATION, TK_STR, …)
  *   - TK_IDENT, TK_LBRACE, TK_RBRACE, TK_BANG, TK_DOT, TK_COMMA
  *   - TK_LINE_COMMENT, TK_BLOCK_COMMENT
  *
- * token_kind holds the raw TK_* / KW_* constant from grammar.tab.h.
- * text is heap-allocated (strdup of yytext); NULL only for tokens where
- * the text is never needed (e.g. comments).  Caller must not modify it;
- * parse_result_free() frees it.
+ * `token_kind` holds the raw TK_* / KW_* constant from grammar.tab.h.
+ * `text` is heap-allocated (strdup of yytext); NULL only for tokens where
+ * the text is never needed.  Caller must not modify it; the owning
+ * ParseOutput frees it via parse_output_free().
  *
- * Example TJP input (line 0):
- *
- *   task spec "Specification" {
- *
- * Produces this sequence in tok_spans[]:
- *
- *   [0] { .token_kind=KW_TASK, .start={0,0},  .end={0,4},  .text="task"            }
- *   [1] { .token_kind=TK_IDENT,.start={0,5},  .end={0,9},  .text="spec"            }
- *   [2] { .token_kind=TK_STR,  .start={0,10}, .end={0,25}, .text="Specification"   }
- *   [3] { .token_kind=TK_LBRACE,.start={0,26},.end={0,27}, .text="{"               }
- *
- * Feature code binary-searches or scans this array by position.  For example,
- * hover at character 6 lands in [1], so the server knows the cursor is on an
- * identifier.  Completion at character 27 (after '{') scans backwards through
- * the array to find the enclosing keyword context.
+ * `owner` points to the innermost enclosing tj_node in this same
+ * document's per-kind tree (whichever tree the enclosing declaration
+ * lives in).  NULL when the token sits outside every declaration.
  */
 typedef struct {
-    int    token_kind;   /**< raw TK_* / KW_* constant from grammar.tab.h */
-    LspPos start;        /**< source position of the first character */
-    LspPos end;          /**< source position one past the last character */
-    char  *text;         /**< heap-allocated; may be NULL */
-    DocSymbol *owner;    /**< enclosing symbol node; NULL if outside any symbol */
+    int       token_kind;   /**< raw TK_/KW_ constant from grammar.tab.h */
+    LspPos    start;        /**< inclusive start position in the source */
+    LspPos    end;          /**< exclusive end position in the source */
+    char     *text;         /**< owned strdup of the lexeme; may be NULL */
+    tj_node  *owner;        /**< borrowed innermost enclosing tj_node, or NULL */
 } TokenSpan;
 
 /**
- * A resolved outgoing reference stored on the DocSymbol that declared the dependency.
- *
- * source is the range of the reference expression (e.g. a dependency path),
- * target points to the DocSymbol being referred to.
- *
- * Populated by revalidate_dep_refs() for every successfully resolved
- * dependency reference.  Each link is owned by the declaring DocSymbol
- * (the task containing the `depends` or `precedes` clause).
- *
- * target_uri is heap-allocated and is NULL when the target is in the same
- * document as the source.  For cross-file references it holds the URI of
- * the file that defines the target symbol.
- *
- * Example TJP input:
- *
- *   task database "Database" {}     <- line 0; "database" is at {0,5}..{0,13}
- *   task gui "GUI" {
- *       depends database            <- line 2; "database" is at {2,16}..{2,24}
- *   }
- *
- * After revalidate_dep_refs() resolves the dependency, gui's def_links[]
- * contains:
- *
- *   DefinitionLink {
- *     .source     = { {2,16}, {2,24} },   // range of "database" in depends expr
- *     .target     = &database_sym,         // resolved target DocSymbol
- *     .target_uri = NULL,                  // same document
- *   }
- *
- * When the user invokes go-to-definition with the cursor anywhere in source,
- * the server finds this link and jumps the editor to the target's
- * selection_range.
- */
-struct DefinitionLink {
-    LspRange   source;     /**< range of the reference expression */
-    DocSymbol *target;     /**< resolved target symbol */
-    char      *target_uri; /**< heap-allocated; NULL means same document */
-};
-
-/**
- * An incoming reference to a DocSymbol — the inverse of DefinitionLink.
- *
- * While DefinitionLink lives on the *declaring* symbol and points outward
- * to the target, ReferenceLink lives on the *target* symbol and points
- * back to each site that references it.
- *
- * source is the range of the reference expression at the call site.
- * origin points to the DocSymbol that made the reference (the owner of
- * the corresponding DefinitionLink).
- *
- * source_uri is heap-allocated and is NULL when the reference originates
- * from the same document as the target.  For cross-file references it
- * holds the URI of the file containing the reference.
- *
- * Example TJP input:
- *
- *   task database "Database" {}     <- line 0
- *   task gui "GUI" {
- *       depends database            <- line 2; "database" is at {2,16}..{2,24}
- *   }
- *
- * After resolution, database's ref_links[] contains:
- *
- *   ReferenceLink {
- *     .source     = { {2,16}, {2,24} },   // range of "database" in depends expr
- *     .origin     = &gui_sym,              // the symbol that declared the dep
- *     .source_uri = NULL,                  // same document
- *   }
- */
-struct ReferenceLink {
-    LspRange   source;     /**< range of the reference expression */
-    DocSymbol *origin;     /**< symbol that contains the reference */
-    char      *source_uri; /**< heap-allocated; NULL means same document */
-};
-
-/**
- * A `depends`/`precedes` reference captured during parsing.
- *
- * Used transiently by the grammar→parser resolver (via g_dep_refs[] in
- * parser.c), and also stored on ParseResult.cross_file_deps[] for 0-bang
- * references that failed in-file resolution — those are retried each
- * revalidation against other open documents.
- *
- * path is dot-separated (e.g. "deliveries.start") and heap-allocated.
- * owner points to the DocSymbol that declared the reference; it lives in
- * the same ParseResult's doc_symbols tree and is freed separately.
- * range is the source location of the reference expression (for diagnostics
- * and go-to-definition).
+ * One entry per `include` directive seen in the source.  `filename` is the
+ * unquoted target as it appeared in the include statement.  The four
+ * `*_prefix` fields carry the matching attribute from the include body
+ * (e.g. `include "bar.tji" { taskprefix t1.t2 }` produces
+ * `task_prefix = "t1.t2"`); each is NULL when the corresponding attribute
+ * was not present.  All strings are heap-allocated and owned by the
+ * ParseOutput / Document that holds the IncludeRef.
  */
 typedef struct {
-    int        bang_count; /**< number of leading '!' characters in the reference */
-    char      *path;       /**< dot-separated, heap-allocated */
-    DocSymbol *owner;      /**< owning symbol in the same ParseResult */
-    LspRange   range;      /**< source range of the reference expression */
-} RawDepRef;
+    char *filename;        /**< owned unquoted target as it appeared in the include statement */
+    char *task_prefix;     /**< owned `taskprefix` argument, or NULL when not present */
+    char *resource_prefix; /**< owned `resourceprefix` argument, or NULL when not present */
+    char *account_prefix;  /**< owned `accountprefix` argument, or NULL when not present */
+    char *report_prefix;   /**< owned `reportprefix` argument, or NULL when not present */
+} IncludeRef;
 
 /**
- * The complete output of a single parse() call.
+ * The complete output of a single parse() call for one document.
  *
- * All dynamic arrays are owned by this struct and freed by parse_result_free().
+ * One ParseOutput per parse — its lifetime is tied to the owning Document
+ * (the server creates a fresh one on every didOpen/didChange and frees the
+ * previous one).  All arrays and tj_node subtrees referenced from here are
+ * owned by this struct and freed by parse_output_free().
  *
- * Example TJP input:
- *
- *   task database "Database" {}
- *   task gui "GUI" {
- *       depends database
- *   }
- *
- * After parse():
- *
- *   ParseResult {
- *     .num_diagnostics = 0,          // no errors
- *     .dep_diag_start  = 0,
- *
- *     .doc_symbols = [               // two top-level tasks
- *       DocSymbol { .id="database", .keyword=KW_TASK, ... },
- *       DocSymbol { .id="gui", .keyword=KW_TASK, ... },
- *     ],
- *     .num_doc_symbols = 2,
- *
- *     .tok_spans = [                 // every token, in order; each has owner
- *       {KW_TASK,"task", .owner=&database_sym, ...}, ...
- *     ],
- *     .num_tok_spans = N,
- *
- *     // dep_edges are resolved and freed during parse(); after return,
- *     // def_links/ref_links on each DocSymbol hold the resolved links
- *     // and diagnostics[] contains errors for any broken references.
- *   }
+ * The synthetic `root` is always non-NULL.  Its `keyword` is 0; its
+ * `children` array holds every top-level declaration of the document —
+ * tasks, accounts, resources/shifts, the report family, and the project
+ * block — in source order.  A `project ... { ... }` block's own body
+ * declarations are hoisted to siblings under `root` (the project node
+ * keeps no children); `assign_token_owners()` restores that nesting for
+ * token ownership only.  The tree is immutable after parse —
+ * cross-Document hoisting happens in a separately allocated global tree
+ * built by server.c.
  */
-
 typedef struct {
-    _Atomic int     refcount;           /**< reference count; managed by parse_result_acquire/release */
-    Diagnostic     *diagnostics;        /**< parse + cross-file diagnostics */
-    int             num_diagnostics;    /**< number of entries in diagnostics */
-    int             diag_cap;           /**< allocated capacity of diagnostics */
-    int             dep_diag_start;     /**< diagnostics[0..dep_diag_start-1] survive revalidation */
-    DocSymbol     **doc_symbols;        /**< array of pointers to heap-allocated symbols */
-    int             num_doc_symbols;    /**< number of entries in doc_symbols */
-    int             doc_sym_cap;        /**< allocated capacity of doc_symbols */
-    TokenSpan      *tok_spans;          /**< flat ordered token stream */
-    int             num_tok_spans;      /**< number of entries in tok_spans */
-    int             tok_span_cap;       /**< allocated capacity of tok_spans */
-    int             num_sem_entries;    /**< upper bound on push_entry calls for semantic tokens */
-    char          **included_files;     /**< unquoted filenames from include statements */
-    int             num_included_files; /**< number of entries in included_files */
-    int             included_files_cap; /**< allocated capacity of included_files */
-    RawDepRef      *cross_file_deps;    /**< 0-bang refs that failed in-file resolution */
-    int             num_cross_file_deps;/**< number of entries in cross_file_deps */
-    int             cross_file_deps_cap;/**< allocated capacity of cross_file_deps */
-} ParseResult;
+    tj_node   *root;         /**< synthetic root; children are all top-level declarations in source order */
+
+    TokenSpan *tok_spans;       /**< owned flat array of every captured token */
+    int        num_tok_spans;   /**< number of valid entries in `tok_spans` */
+    int        tok_span_cap;    /**< allocated capacity of `tok_spans` */
+    int        num_sem_entries; /**< upper bound on semantic-token entries (one per source line covered) */
+
+    IncludeRef *includes;       /**< owned array; one entry per `include` directive */
+    int         num_includes;   /**< number of valid entries in `includes` */
+    int         includes_cap;   /**< allocated capacity of `includes` */
+} ParseOutput;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
 /**
- * Parse @p src into a ParseResult.  Single entry point for the lexer +
- * grammar pipeline.  The returned ParseResult is heap-allocated with an
- * initial refcount of 1; release with parse_result_release().
+ * Parse @p src into a ParseOutput.  Single entry point for the lexer +
+ * grammar pipeline.
  *
  * @param src  NUL-terminated TaskJuggler source text.
- * @return Fully populated ParseResult with refcount=1.
+ * @return Heap-allocated ParseOutput.  Free with parse_output_free().
  */
-ParseResult *parse(const char *src);
+ParseOutput *parse(const char *src);
 
 /**
- * Increment @p r's reference count and return @p r.  Use when storing an
- * additional shared reference to an already-allocated ParseResult.
+ * Release every dynamic allocation owned by @p po and free @p po itself.
+ * Safe to call with @p po == NULL.
  *
- * @param r  ParseResult to acquire; must be non-NULL.
- * @return @p r.
+ * @param po  ParseOutput to free.
  */
-ParseResult *parse_result_acquire(ParseResult *r);
+void parse_output_free(ParseOutput *po);
 
 /**
- * Decrement @p r's reference count.  When the count reaches zero, releases
- * every dynamic allocation owned by @p r and frees the struct itself.
- * Safe to call with @p r == NULL.
+ * Append an `include` directive entry to @p po->includes.  The four prefix
+ * pointers may be NULL (attribute not present); when non-NULL each is
+ * deep-copied so the caller retains ownership of its inputs.
  *
- * @param r  ParseResult reference to release.
+ * @param po              ParseOutput being populated.
+ * @param quoted_text     Raw `include` argument as it appears in source;
+ *                        the surrounding quotes are stripped before storing.
+ * @param task_prefix     Value of `taskprefix` attribute, or NULL.
+ * @param resource_prefix Value of `resourceprefix` attribute, or NULL.
+ * @param account_prefix  Value of `accountprefix` attribute, or NULL.
+ * @param report_prefix   Value of `reportprefix` attribute, or NULL.
  */
-void        parse_result_release(ParseResult *r);
-
-/**
- * Release every dynamic allocation owned by @p r and zero its fields.
- * Does not free @p r itself or touch its refcount.  Intended for internal
- * use by parse_result_release() and for stack-allocated ParseResults used
- * as throwaway sentinels.
- *
- * @param r  ParseResult to release; the struct itself is not freed.
- */
-void        parse_result_free(ParseResult *r);
-
-/**
- * Recursively free a DocSymbol and all of its children.
- *
- * @param s  Root of the DocSymbol subtree to free.
- */
-void        doc_symbol_free(DocSymbol *s);
-
-/**
- * Record an `include` directive's target in @p r->included_files.
- *
- * @param r            ParseResult being populated.
- * @param quoted_text  Raw `include` argument as it appears in source; the
- *                     surrounding quotes are stripped before storing.
- */
-void        push_included_file(ParseResult *r, const char *quoted_text);
-
-/**
- * Push a `depends`/`precedes` reference into the parser's transient
- * accumulator.  Called from grammar.y as the rules fire.
- *
- * @param bang_count  Number of leading `!` characters in the reference.
- * @param path        Dot-separated reference path (e.g. `"deliveries.start"`).
- * @param owner       DocSymbol that declared the reference.
- * @param start       Start position of the reference expression.
- * @param end         End position of the reference expression.
- */
-void push_dep_ref(int bang_count, const char *path,
-                  DocSymbol *owner, LspPos start, LspPos end);
-
-/** Reset the transient dep-ref accumulator before a new parse. */
-void dep_refs_reset(void);
+void push_include(ParseOutput *po, const char *quoted_text,
+                  const char *task_prefix,
+                  const char *resource_prefix,
+                  const char *account_prefix,
+                  const char *report_prefix);
 
 /**
  * Parse a `YYYY-MM-DD` date prefix from a TaskJuggler `TK_DATE` token's
  * text into a UTC `time_t`.  Trailing time and timezone components
- * (e.g. `-09:00`, `+0100`) are accepted but ignored — callers that
- * need day-level resolution can pass token text as-is.
+ * (e.g. `-09:00`, `+0100`) are accepted but ignored.
  *
  * @param text  NUL-terminated token text.  May be NULL.
  * @param out   Receives the parsed time_t on success.
  * @return 1 on success, 0 if @p text does not start with a valid date.
  */
 int parse_tjp_date(const char *text, time_t *out);
-
-/**
- * Resolve @p r->cross_file_deps[] against the given set of other documents'
- * top-level symbols.
- *
- * For each ref: if a match is found, adds a cross-file DefinitionLink on
- * the owner (with target_uri) and a ReferenceLink on the target (with
- * source_uri = @p self_uri).  Otherwise emits an "unresolved dependency"
- * diagnostic onto @p r->diagnostics.
- *
- * Matches go through the same KW_PROJECT-transparent find_task() used for
- * in-file resolution, so only top-level symbols (as surfaced by include
- * statements) are visible.
- *
- * Call clear_cross_file_state(@p r) before calling this to wipe any
- * cross-file state left over from a previous resolution pass.
- *
- * @param r            ParseResult whose cross_file_deps[] are resolved.
- * @param extra_roots  Per-document arrays of top-level symbols to consult.
- * @param extra_counts Per-document lengths matching @p extra_roots.
- * @param extra_uris   URIs corresponding to each entry in @p extra_roots.
- * @param num_extra    Length of @p extra_roots, @p extra_counts, and
- *                     @p extra_uris.
- * @param self_uri     URI of the document owning @p r, stored on each
- *                     ReferenceLink's `source_uri` for matches.
- */
-void resolve_cross_file_deps(ParseResult *r,
-                             DocSymbol *const *const *extra_roots,
-                             const int *extra_counts,
-                             const char *const *extra_uris,
-                             int num_extra,
-                             const char *self_uri);
-
-/**
- * Strip cross-file state from @p r.
- *
- * Removes def_links entries with a non-NULL target_uri and ref_links
- * entries with a non-NULL source_uri (freeing the URI strings), and
- * truncates @p r->diagnostics back to dep_diag_start.  Called by the
- * server before each cross-file resolution cycle.
- *
- * @param r  ParseResult whose cross-file state should be cleared.
- */
-void clear_cross_file_state(ParseResult *r);
-
-/**
- * Return the innermost DocSymbol whose range contains @p pos (inclusive
- * start, exclusive end), using the precomputed `.owner` field on
- * @p tokens.
- *
- * @param tokens      Token spans of the current document.
- * @param num_tokens  Length of @p tokens.
- * @param pos         Position to look up.
- * @return The matching symbol, or NULL when @p pos is outside every
- *         DocSymbol.  Runs in O(log T + D) where T is @p num_tokens
- *         and D is the symbol nesting depth at @p pos.
- */
-DocSymbol *symbol_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
-
-/**
- * Navigate the DocSymbol tree by following @p path (an array of @p plen
- * identifier strings).
- *
- * Only SK_FUNCTION nodes are traversed (i.e. tasks).
- *
- * @param syms   Top-level symbols.
- * @param n      Length of @p syms.
- * @param path   Identifiers to follow, outermost first.
- * @param plen   Length of @p path.
- * @param out_n  Receives the length of the returned children array.
- * @return Children array of the matched node, or NULL with `*out_n = 0`
- *         when the path does not resolve.
- */
-DocSymbol *const *doc_symbol_find_path(DocSymbol *const *syms, int n,
-                                       const char **path, int plen,
-                                       int *out_n);
 
 /**
  * Compare two positions in source order.

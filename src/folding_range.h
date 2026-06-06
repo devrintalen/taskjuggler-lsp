@@ -44,5 +44,5 @@
 yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
                                            const TokenSpan *spans,
                                            int num_spans,
-                                           DocSymbol *const *symbols,
+                                           tj_node *const *symbols,
                                            int num_symbols);

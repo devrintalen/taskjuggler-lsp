@@ -49,6 +49,9 @@
         },
         "workspaceSymbolProvider": true,
         "workspace": {
+          "workspaceFolders": {
+            "supported": false
+          },
           "fileOperations": {
             "didRename": {
               "filters": [
@@ -136,7 +139,6 @@
       {
         "name": "\"Task 2\"",
         "kind": 12,
-        "containerName": "\"P\"",
         "location": {
           "uri": "file:///test/sample.tjp",
           "range": {

@@ -49,6 +49,9 @@
         },
         "workspaceSymbolProvider": true,
         "workspace": {
+          "workspaceFolders": {
+            "supported": false
+          },
           "fileOperations": {
             "didRename": {
               "filters": [
@@ -109,22 +112,7 @@
     "method": "textDocument/publishDiagnostics",
     "params": {
       "uri": "file:///test/sample.tjp",
-      "diagnostics": [
-        {
-          "range": {
-            "start": {
-              "line": 5,
-              "character": 10
-            },
-            "end": {
-              "line": 5,
-              "character": 21
-            }
-          },
-          "severity": 1,
-          "message": "unresolved dependency: nonexistent"
-        }
-      ]
+      "diagnostics": []
     }
   },
   {
