@@ -20,6 +20,8 @@
 
 #include "definition.h"
 #include "document_symbol.h"  /* range_json */
+#include "dependency.h"       /* dependency_at_cursor */
+#include "rpc.h"
 
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
                                        ProjectNode *owner, int dep_index,
@@ -36,4 +38,32 @@ yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
     yyjson_mut_obj_add_val(doc, location, "range",
                            range_json(doc, target->selection_range));
     return location;
+}
+
+yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
+                                  yyjson_val *params, const query_context *qc,
+                                  const query_doc *d) {
+    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
+    yyjson_val *pos_obj = yyjson_obj_get(params, "position");
+    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    LspPos pos = json_to_pos(pos_obj);
+    if (!qc->project_root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    tj_node          *owner = NULL;
+    const Dependency *dep   = NULL;
+    yyjson_mut_val   *result = NULL;
+    if (dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
+                             &owner, &dep)) {
+        ProjectNode *merged_owner =
+            project_node_for_doc_task(qc->project_root, d->task_prefix, owner);
+        if (merged_owner) {
+            int ordinal = (int)(dep - owner->dependencies);
+            if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
+                result = build_definition_json(doc, merged_owner, ordinal,
+                                               qc->project_root);
+        }
+    }
+    if (!result) return make_response(doc, id, yyjson_mut_null(doc));
+    return make_response(doc, id, result);
 }

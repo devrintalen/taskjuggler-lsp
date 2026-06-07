@@ -20,7 +20,9 @@
 
 #include "document_highlight.h"
 #include "document_symbol.h"
+#include "dependency.h"
 #include "grammar.tab.h"
+#include "rpc.h"
 #include <string.h>
 
 /* Document highlight resolves the cursor to a single target task and reports
@@ -135,4 +137,46 @@ yyjson_mut_val *build_document_highlight_json(
                             doc_uri, tokens, num_tokens);
 
     return arr;
+}
+
+yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc, yyjson_val *id,
+                                          yyjson_val *params,
+                                          const query_context *qc,
+                                          const query_doc *d) {
+    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
+    yyjson_val *pos_obj = yyjson_obj_get(params, "position");
+    if (!pos_obj || !d || !d->root || !qc->project_root)
+        return make_response(doc, id, yyjson_mut_null(doc));
+
+    LspPos pos = json_to_pos(pos_obj);
+
+    /* Resolve the cursor to a single target task, triggering from either a
+     * task declaration or a dependency reference (the target is the same in
+     * both directions).  Resolution runs against the pinned snapshot's
+     * ProjectNode tree, exactly as definition/references do. */
+    ProjectNode *wanted = NULL;
+    tj_node *decl = task_decl_at_cursor(d->tok_spans, d->num_tok_spans, pos);
+    if (decl) {
+        wanted = project_node_for_doc_task(qc->project_root, d->task_prefix, decl);
+    } else {
+        tj_node          *owner = NULL;
+        const Dependency *dep   = NULL;
+        if (dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
+                                 &owner, &dep)) {
+            ProjectNode *merged_owner =
+                project_node_for_doc_task(qc->project_root, d->task_prefix, owner);
+            if (merged_owner) {
+                int ordinal = (int)(dep - owner->dependencies);
+                if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
+                    wanted = project_dep_resolve(merged_owner, ordinal,
+                                                 qc->project_root);
+            }
+        }
+    }
+
+    yyjson_mut_val *result =
+        build_document_highlight_json(doc, qc->project_root, wanted,
+                                      d->uri, d->tok_spans, d->num_tok_spans);
+    if (!result) return make_response(doc, id, yyjson_mut_null(doc));
+    return make_response(doc, id, result);
 }

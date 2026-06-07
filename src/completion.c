@@ -22,6 +22,7 @@
 #include "document_symbol.h"
 #include "hover.h"
 #include "signature.h"
+#include "rpc.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -971,4 +972,48 @@ done:
     yyjson_mut_obj_add_bool(doc, list, "isIncomplete", (bool)is_incomplete);
     yyjson_mut_obj_add_val(doc, list, "items", items);
     return list;
+}
+
+yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
+                                  yyjson_val *params, const query_context *qc,
+                                  const query_doc *d) {
+    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
+    yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
+    if (!tdp) tdp = params;
+
+    yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
+    if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
+    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    /* Every non-primary doc in the context is a sibling in the requester's
+     * project (the clone step already restricted membership), so each one's
+     * top-level pool is an extra cross-file completion source.  Orphans
+     * have no siblings, so the loop naturally yields no extras for them. */
+    tj_node *const *extra_pools[MAX_DOCS];
+    int             extra_counts[MAX_DOCS];
+    int             num_extra = 0;
+    for (int i = 0; i < qc->num_docs && num_extra < MAX_DOCS; i++) {
+        if (qc->docs[i].is_primary) continue;
+        tj_node *const *top; int n;
+        doc_symbol_pool(&qc->docs[i], &top, &n);
+        if (!top) continue;
+        extra_pools[num_extra]  = top;
+        extra_counts[num_extra] = n;
+        num_extra++;
+    }
+
+    tj_node *const *self_top; int self_n;
+    doc_symbol_pool(d, &self_top, &self_n);
+
+    LspPos pos             = json_to_pos(pos_obj);
+    yyjson_mut_val *result = build_completions_json(doc,
+                                                    d->tok_spans,
+                                                    d->num_tok_spans,
+                                                    pos,
+                                                    self_top, self_n,
+                                                    extra_pools,
+                                                    extra_counts,
+                                                    num_extra,
+                                                    d->text);
+    return make_response(doc, id, result);
 }

@@ -17,10 +17,10 @@
  */
 
 /** @file
- *  Shared file:// <-> filesystem-path helpers.  The definitions live in
- *  server.c (where the document store also lives); other modules that need to
- *  translate URIs — e.g. the tj3 diagnostics runner — include this header
- *  rather than duplicating the percent-encoding logic. */
+ *  Shared file:// <-> filesystem-path helpers.  Modules that need to
+ *  translate URIs — e.g. the document store in server.c or the tj3
+ *  diagnostics runner — include this header rather than duplicating the
+ *  percent-encoding logic. */
 
 #pragma once
 
@@ -40,3 +40,16 @@ char *uri_to_path(const char *uri);
  * @return Heap-allocated URI (owned by caller).
  */
 char *path_to_uri(const char *path);
+
+/**
+ * Canonicalize @p raw_uri: decode percent-encoding, resolve the path
+ * through realpath() (falling back to a lexical normalization that
+ * collapses redundant separators and single-dot segments), and re-encode
+ * the result as a file:// URI.  Non-file URIs are returned unchanged
+ * (duplicated).
+ *
+ * @param raw_uri  The raw URI string to normalize; may be NULL.
+ * @return Freshly allocated canonical URI string (owned by caller), or NULL
+ *         on allocation failure or a NULL input.
+ */
+char *normalize_uri(const char *raw_uri);

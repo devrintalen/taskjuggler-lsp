@@ -19,7 +19,8 @@
 /** @file */
 
 #include "project_tree.h"
-#include "grammar.tab.h"   /* KW_TASK */
+#include "grammar.tab.h"   /* KW_* keyword constants */
+#include "hover.h"         /* sym_qualified_id */
 
 #include <stdatomic.h>
 #include <stdint.h>
@@ -237,4 +238,67 @@ ProjectNode *project_dep_resolve(ProjectNode *owner_task, int dep_index,
     uintptr_t to_publish = resolved ? (uintptr_t)resolved : PROJECT_DEP_RESOLVED_NULL;
     atomic_store_explicit(&dep->resolved, to_publish, memory_order_release);
     return resolved;
+}
+
+/* ── Tree navigation / id-namespace classification ───────────────────────── */
+
+NodeKind node_kind_of(int keyword) {
+    switch (keyword) {
+    case KW_TASK:     return NODE_KIND_TASK;
+    case KW_ACCOUNT:  return NODE_KIND_ACCOUNT;
+    case KW_RESOURCE:
+    case KW_SHIFT:    return NODE_KIND_RESOURCE;
+    case KW_PROJECT:  return NODE_KIND_OTHER;
+    default:          return NODE_KIND_REPORT;
+    }
+}
+
+ProjectNode *find_node_by_dotted_path(ProjectNode *start, const char *path,
+                                      NodeKind kind) {
+    if (!start) return NULL;
+    if (!path || !path[0]) return start;
+
+    char *copy = strdup(path);
+    if (!copy) return NULL;
+    ProjectNode *cur = start;
+    char *save = NULL;
+    for (char *seg = strtok_r(copy, ".", &save); seg && cur;
+         seg = strtok_r(NULL, ".", &save)) {
+        ProjectNode *next = NULL;
+        for (int i = 0; i < cur->num_children && !next; i++) {
+            ProjectNode *child = cur->children[i];
+            if (node_kind_of(child->keyword) == kind &&
+                child->id && strcmp(child->id, seg) == 0)
+                next = child;
+        }
+        cur = next;
+    }
+    free(copy);
+    return cur;
+}
+
+ProjectNode *project_node_for_doc_task(ProjectNode *project_root,
+                                       const char *task_prefix,
+                                       const tj_node *per_doc_task) {
+    if (!project_root || !per_doc_task) return NULL;
+
+    char *qid = sym_qualified_id(per_doc_task);   /* unprefixed in-file path */
+    if (!qid || !qid[0]) { free(qid); return NULL; }
+
+    ProjectNode *cur = find_node_by_dotted_path(project_root, task_prefix,
+                                                NODE_KIND_TASK);
+    char *save = NULL;
+    for (char *seg = strtok_r(qid, ".", &save); seg && cur;
+         seg = strtok_r(NULL, ".", &save)) {
+        ProjectNode *next = NULL;
+        for (int i = 0; i < cur->num_children && !next; i++) {
+            ProjectNode *child = cur->children[i];
+            if (child->keyword == KW_TASK && child->id &&
+                strcmp(child->id, seg) == 0)
+                next = child;
+        }
+        cur = next;
+    }
+    free(qid);
+    return cur;
 }

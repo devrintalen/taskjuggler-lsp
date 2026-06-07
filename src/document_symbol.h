@@ -21,6 +21,7 @@
 #pragma once
 
 #include "parser.h"
+#include "query_context.h"   /* query_doc */
 #include <yyjson.h>
 
 /**
@@ -79,3 +80,16 @@ int symbol_kind_for(int keyword);
  * @return Heap-allocated JSON; caller owns and must free().
  */
 char *build_document_symbols_json(tj_node *const *syms, int n, size_t *out_len);
+
+/**
+ * Handle "textDocument/documentSymbol": return a flat list of all top-level
+ * declarations in the primary document.
+ *
+ * @param doc     Mutable document for building the response.
+ * @param id      Request id from the incoming JSON-RPC message.
+ * @param params  Request params (unused; present for dispatch symmetry).
+ * @param d       Primary query document; may be NULL.
+ * @return JSON-RPC response containing the symbol array.
+ */
+yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
+                                       yyjson_val *params, const query_doc *d);

@@ -21,6 +21,7 @@
 #pragma once
 
 #include "parser.h"
+#include "query_context.h"   /* query_doc */
 #include <yyjson.h>
 
 /**
@@ -46,3 +47,16 @@ yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
                                            int num_spans,
                                            tj_node *const *symbols,
                                            int num_symbols);
+
+/**
+ * Handle "textDocument/foldingRange": compute folding ranges for all block
+ * constructs in the primary document.
+ *
+ * @param doc     Mutable document for building the response.
+ * @param id      Request id from the incoming JSON-RPC message.
+ * @param params  Request params (unused).
+ * @param d       Primary query document; may be NULL.
+ * @return JSON-RPC response containing the folding-range array.
+ */
+yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
+                                     yyjson_val *params, const query_doc *d);

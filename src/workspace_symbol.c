@@ -20,6 +20,7 @@
 
 #include "workspace_symbol.h"
 #include "document_symbol.h"  /* symbol_kind_for() */
+#include "rpc.h"
 
 #include <string.h>
 #include <strings.h>
@@ -88,4 +89,21 @@ void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
                                 const char *uri, yyjson_mut_val *arr)
 {
     collect_recursive(doc, query, syms, n, uri, NULL, arr);
+}
+
+yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
+                                        yyjson_val *params,
+                                        const query_context *qc) {
+    const char *query = params ? json_str(params, "query") : NULL;
+    if (!query) query = "";
+
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+    for (int i = 0; i < qc->num_docs; i++) {
+        if (!qc->docs[i].root) continue;
+        tj_node *const *top; int n;
+        doc_symbol_pool(&qc->docs[i], &top, &n);
+        if (!top) continue;
+        collect_workspace_symbols(doc, query, top, n, qc->docs[i].uri, arr);
+    }
+    return make_response(doc, id, arr);
 }

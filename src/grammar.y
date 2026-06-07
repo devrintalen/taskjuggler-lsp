@@ -1607,7 +1607,6 @@ dep_ref
                     .bang_count      = $1.bang_count,
                     .path            = $1.path,   /* transfer ownership */
                     .source_range    = { $1.start, $1.end },
-                    .resolved_target = NULL,
                 };
                 tj_node_push_dependency(task, dep);
             } else {

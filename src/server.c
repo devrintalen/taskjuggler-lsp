@@ -38,7 +38,6 @@
 #include "job_queue.h"
 #include "threadpool.h"
 #include "diagnostics.h"
-#include "dependency.h"
 #include "definition.h"
 #include "references.h"
 #include "document_highlight.h"
@@ -53,13 +52,12 @@
 #include "code_lens.h"
 #include "compile_commands.h"
 #include "pathutil.h"
+#include "rpc.h"
 #include "diag_worker.h"
 #include "debug.h"
 #include "version.h"
 
 #include <yyjson.h>
-#include <ctype.h>
-#include <inttypes.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -71,12 +69,11 @@
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Document store
-   ═══════════════════════════════════════════════════════════════════════════ */
 
-/** Maximum number of simultaneously tracked documents (editor-managed
- *  and disk-only combined).  Sized to comfortably exceed real-world
- *  TaskJuggler workspaces. */
-#define MAX_DOCS 64
+   MAX_DOCS (the slot count bounding docs[] and every per-snapshot array built
+   from it) is defined in query_context.h, since the workspace_snapshot arrays
+   share the same bound.
+   ═══════════════════════════════════════════════════════════════════════════ */
 
 /** Document store slot.  Each slot owns the parse-derived state directly
  *  (per-kind synthetic roots, tokens, include filenames); parse() returns
@@ -159,7 +156,6 @@ static int    g_cc_attempted   = 0;
 static cc_status g_cc_status   = CC_STATUS_OK;
 
 /* Forward declarations. */
-static char *normalize_uri(const char *raw_uri);
 static void  load_file_from_disk(const char *path);
 static void  follow_includes(const char *file_path, const ParseOutput *po);
 static workspace_snapshot *build_workspace_snapshot(void);
@@ -268,7 +264,6 @@ static void doc_install_parse(Document *d, ParseOutput *po) {
         po->root            = NULL;
         po->tok_spans       = NULL;
         po->num_tok_spans   = 0;
-        po->tok_span_cap    = 0;
         po->num_sem_entries = 0;
         parse_output_free(po);
     }
@@ -333,132 +328,11 @@ static void show_message(int type, const char *message) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   URI / path helpers (unchanged from pre-refactor)
+   File I/O
+
+   URI <-> path translation lives in pathutil.{h,c}; this is just the
+   document-store file reader.
    ═══════════════════════════════════════════════════════════════════════════ */
-
-/** Decode a percent-encoded string, replacing %XX escape sequences with
- *  the corresponding byte.
- *  @param src  Null-terminated percent-encoded string.
- *  @return     Freshly allocated decoded string; caller must free. */
-static char *percent_decode(const char *src) {
-    size_t len = strlen(src);
-    char *dst = malloc(len + 1);
-    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    size_t wi = 0;
-    for (size_t ri = 0; ri < len; ri++) {
-        if (src[ri] == '%' && ri + 2 < len
-                && isxdigit((unsigned char)src[ri + 1])
-                && isxdigit((unsigned char)src[ri + 2])) {
-            char hex[3] = { src[ri + 1], src[ri + 2], '\0' };
-            dst[wi++] = (char)strtol(hex, NULL, 16);
-            ri += 2;
-        } else {
-            dst[wi++] = src[ri];
-        }
-    }
-    dst[wi] = '\0';
-    return dst;
-}
-
-/** Percent-encode a filesystem path for use in a file:// URI, preserving
- *  '/' separators and unreserved characters (A-Z, a-z, 0-9, '-', '_', '.', '~').
- *  @param src  Null-terminated path string.
- *  @return     Freshly allocated encoded string; caller must free. */
-static char *percent_encode_path(const char *src) {
-    size_t len = strlen(src);
-    char *dst = malloc(len * 3 + 1);
-    if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    size_t wi = 0;
-    for (size_t ri = 0; ri < len; ri++) {
-        unsigned char c = (unsigned char)src[ri];
-        if (c == '/'
-                || (c >= 'A' && c <= 'Z')
-                || (c >= 'a' && c <= 'z')
-                || (c >= '0' && c <= '9')
-                || c == '-' || c == '_' || c == '.' || c == '~') {
-            dst[wi++] = (char)c;
-        } else {
-            dst[wi++] = '%';
-            dst[wi++] = "0123456789ABCDEF"[c >> 4];
-            dst[wi++] = "0123456789ABCDEF"[c & 0xf];
-        }
-    }
-    dst[wi] = '\0';
-    return dst;
-}
-
-char *uri_to_path(const char *uri) {
-    if (!uri || strncmp(uri, "file://", 7) != 0) return NULL;
-    return percent_decode(uri + 7);
-}
-
-char *path_to_uri(const char *path) {
-    char *encoded = percent_encode_path(path);
-    size_t enc_len = strlen(encoded);
-    char *uri = malloc(7 + enc_len + 1);
-    if (!uri) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    memcpy(uri, "file://", 7);
-    memcpy(uri + 7, encoded, enc_len + 1);
-    free(encoded);
-    return uri;
-}
-
-/** Lexically normalize @p path by collapsing redundant separators and
- *  removing single-dot segments, without consulting the filesystem.
- *  Used as a fallback when realpath() fails.
- *  @param path  Null-terminated filesystem path.
- *  @return      Freshly allocated normalized path, or NULL on allocation failure. */
-static char *lexical_normalize_path(const char *path) {
-    if (!path) return NULL;
-    size_t len = strlen(path);
-    char *out = malloc(len + 2);
-    if (!out) return NULL;
-
-    int absolute = (len > 0 && path[0] == '/');
-    size_t wi = 0;
-    if (absolute) out[wi++] = '/';
-
-    size_t i = 0;
-    int wrote_segment = 0;
-    while (i < len) {
-        while (i < len && path[i] == '/') i++;
-        if (i >= len) break;
-        size_t seg_start = i;
-        while (i < len && path[i] != '/') i++;
-        size_t seg_len = i - seg_start;
-        if (seg_len == 1 && path[seg_start] == '.') continue;
-        if (wrote_segment) out[wi++] = '/';
-        memcpy(out + wi, path + seg_start, seg_len);
-        wi += seg_len;
-        wrote_segment = 1;
-    }
-    out[wi] = '\0';
-    return out;
-}
-
-/** Canonicalize @p raw_uri: decode percent-encoding, resolve the path
- *  through realpath() (falling back to lexical_normalize_path()), and
- *  re-encode the result as a file:// URI.  Non-file URIs are returned
- *  unchanged.
- *  @param raw_uri  The raw URI string to normalize.
- *  @return         Freshly allocated canonical URI string, or NULL on
- *                  allocation failure. */
-static char *normalize_uri(const char *raw_uri) {
-    if (!raw_uri) return NULL;
-    if (strncmp(raw_uri, "file://", 7) != 0) return strdup(raw_uri);
-
-    char *path = uri_to_path(raw_uri);
-    if (!path) return strdup(raw_uri);
-
-    char *canon = realpath(path, NULL);
-    if (!canon) canon = lexical_normalize_path(path);
-    free(path);
-    if (!canon) return NULL;
-
-    char *uri = path_to_uri(canon);
-    free(canon);
-    return uri;
-}
 
 /** Read the entire contents of the file at @p path into a newly allocated
  *  null-terminated buffer.
@@ -621,21 +495,12 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   JSON helpers
-   ═══════════════════════════════════════════════════════════════════════════ */
+   Incremental text-change application
 
-/** Extract an LSP Position object from the JSON value @p obj.
- *  @param obj  A yyjson object with "line" and "character" numeric fields.
- *  @return     The decoded position; both fields default to 0 on missing keys. */
-static LspPos json_to_pos(yyjson_val *obj) {
-    LspPos p = {0};
-    if (!obj) return p;
-    yyjson_val *ln = yyjson_obj_get(obj, "line");
-    yyjson_val *ch = yyjson_obj_get(obj, "character");
-    if (ln && yyjson_is_num(ln)) p.line      = (uint32_t)yyjson_get_num(ln);
-    if (ch && yyjson_is_num(ch)) p.character = (uint32_t)yyjson_get_num(ch);
-    return p;
-}
+   JSON-RPC envelope construction and request-param extraction (make_response,
+   json_to_pos, json_str, …) live in rpc.{h,c}; this is the one text helper the
+   coordinator needs for didChange.
+   ═══════════════════════════════════════════════════════════════════════════ */
 
 /** Apply a single LSP incremental text change to @p src: replace the
  *  substring covered by @p range with @p new_text and return the
@@ -683,132 +548,12 @@ static char *apply_incremental_change(const char *src,
     return result;
 }
 
-/** Return the string value of @p key inside the JSON object @p obj, or NULL
- *  when @p obj is NULL, the key is absent, or the value is not a string.
- *  @param obj  JSON object to query.
- *  @param key  Key name to look up.
- *  @return     Borrowed string pointer into the parsed document, or NULL. */
-static const char *json_str(yyjson_val *obj, const char *key) {
-    if (!obj) return NULL;
-    yyjson_val *item = yyjson_obj_get(obj, key);
-    return (item && yyjson_is_str(item)) ? yyjson_get_str(item) : NULL;
-}
-
-/** Copy the JSON-RPC request @p id into the mutable document @p doc,
- *  preserving its original type (string, integer, real, or null).
- *  @param doc  Mutable document that will own the new value.
- *  @param id   Immutable id value from the incoming request; may be NULL.
- *  @return     A mutable copy of @p id, or a JSON null when @p id is
- *              NULL or null. */
-static yyjson_mut_val *copy_id(yyjson_mut_doc *doc, yyjson_val *id) {
-    if (!id || yyjson_is_null(id)) return yyjson_mut_null(doc);
-    if (yyjson_is_str(id))  return yyjson_mut_strcpy(doc, yyjson_get_str(id));
-    if (yyjson_is_uint(id)) return yyjson_mut_uint(doc, yyjson_get_uint(id));
-    if (yyjson_is_sint(id)) return yyjson_mut_int(doc, yyjson_get_int(id));
-    if (yyjson_is_real(id)) return yyjson_mut_real(doc, yyjson_get_real(id));
-    return yyjson_mut_null(doc);
-}
-
-/** Build a JSON-RPC 2.0 success response object containing @p result.
- *  @param doc     Mutable document that will own the response object.
- *  @param id      Request id to echo back; copied via copy_id().
- *  @param result  Value to place in the "result" field.
- *  @return        A mutable JSON object representing the response. */
-static yyjson_mut_val *make_response(yyjson_mut_doc *doc, yyjson_val *id,
-                                      yyjson_mut_val *result) {
-    yyjson_mut_val *resp = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, resp, "jsonrpc", "2.0");
-    yyjson_mut_obj_add_val(doc, resp, "id", copy_id(doc, id));
-    yyjson_mut_obj_add_val(doc, resp, "result", result);
-    return resp;
-}
-
-/** Build a JSON-RPC 2.0 error response object.
- *  @param doc      Mutable document that will own the response object.
- *  @param id       Request id to echo back; copied via copy_id().
- *  @param code     JSON-RPC error code (e.g. -32800 for request-cancelled).
- *  @param message  Human-readable error message.
- *  @return         A mutable JSON object representing the error response. */
-static yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
-                                            int code, const char *message) {
-    yyjson_mut_val *resp = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, resp, "jsonrpc", "2.0");
-    yyjson_mut_obj_add_val(doc, resp, "id", copy_id(doc, id));
-    yyjson_mut_val *err = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_int(doc, err, "code", code);
-    yyjson_mut_obj_add_str(doc, err, "message", message);
-    yyjson_mut_obj_add_val(doc, resp, "error", err);
-    return resp;
-}
-
 /* ═══════════════════════════════════════════════════════════════════════════
-   tj_node tree-building helpers (shared by per-Project rebuild)
+   Workspace snapshot build
+
+   The id-namespace classification and dotted-path navigation helpers used
+   below (node_kind_of, find_node_by_dotted_path) live in project_tree.{h,c}.
    ═══════════════════════════════════════════════════════════════════════════ */
-
-/**
- * Coarse kind bucket for a node, collapsing the keyword set into the four
- * id namespaces TaskJuggler keeps separate.  KW_PROJECT maps to NODE_KIND_OTHER
- * but is never inserted into a Project tree (it stays document-local).
- */
-typedef enum {
-    NODE_KIND_TASK,     /**< KW_TASK */
-    NODE_KIND_ACCOUNT,  /**< KW_ACCOUNT */
-    NODE_KIND_RESOURCE, /**< KW_RESOURCE / KW_SHIFT */
-    NODE_KIND_REPORT,   /**< report-family keywords (KW_REPORT, KW_NAVIGATOR, …) */
-    NODE_KIND_OTHER     /**< anything else; never inserted into a project tree */
-} NodeKind;
-
-/** Map a Bison keyword constant to the coarse NodeKind bucket that governs
- *  its id namespace in the project tree.
- *  @param keyword  A KW_* keyword constant from grammar.tab.h.
- *  @return         The NodeKind bucket for @p keyword. */
-static NodeKind node_kind_of(int keyword) {
-    switch (keyword) {
-    case KW_TASK:     return NODE_KIND_TASK;
-    case KW_ACCOUNT:  return NODE_KIND_ACCOUNT;
-    case KW_RESOURCE:
-    case KW_SHIFT:    return NODE_KIND_RESOURCE;
-    case KW_PROJECT:  return NODE_KIND_OTHER;
-    default:          return NODE_KIND_REPORT;
-    }
-}
-
-/** Walk @p start's children along the dot-separated @p path and return
- *  the matched node, considering only children whose kind matches @p kind.
- *  Returns @p start when @p path is NULL or empty.  Used to locate an
- *  includer's prefix target inside a Project tree; the kind filter keeps
- *  same-named declarations in different namespaces from colliding now that
- *  all kinds share one root.
- *  @param start  Root node to begin the walk from; NULL returns NULL.
- *  @param path   Dot-separated segment string (e.g. "proj.sub"); may be NULL.
- *  @param kind   NodeKind filter applied to each child during the walk.
- *  @return       The deepest matching node, or NULL when the path fails to
- *                resolve. */
-static ProjectNode *find_node_by_dotted_path(ProjectNode *start, const char *path,
-                                             NodeKind kind) {
-    if (!start) return NULL;
-    if (!path || !path[0]) return start;
-
-    char *copy = strdup(path);
-    if (!copy) return NULL;
-    ProjectNode *cur = start;
-    char *save = NULL;
-    for (char *seg = strtok_r(copy, ".", &save); seg && cur;
-         seg = strtok_r(NULL, ".", &save)) {
-        ProjectNode *next = NULL;
-        for (int i = 0; i < cur->num_children && !next; i++) {
-            ProjectNode *child = cur->children[i];
-            if (node_kind_of(child->keyword) == kind &&
-                child->id && strcmp(child->id, seg) == 0)
-                next = child;
-        }
-        cur = next;
-    }
-    free(copy);
-    return cur;
-}
-
-/* ── Workspace snapshot build ──────────────────────────────────────────── */
 
 /* docs[] slot index -> ws_doc index in the snapshot being built, or -1 when
  * the slot is unused / unparsed.  Set up once per build_workspace_snapshot()
@@ -1262,7 +1007,12 @@ static void revalidate_all_docs(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   Handlers
+   Lifecycle & notification handlers
+
+   These run on the coordinator thread under docs_mutex and mutate the live
+   document store.  The read-only per-feature query handlers (hover,
+   completion, definition, …) now live in their respective feature modules
+   and are invoked from server_run_query() below.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /** Handle the LSP "initialize" request: extract the workspace root URI,
@@ -1686,518 +1436,6 @@ static void handle_didclose(yyjson_val *params) {
     free(path);
 
     revalidate_all_docs();
-}
-
-/* ── Read-only query handlers ─────────────────────────────────────────────
- *
- * Each handler takes `d` (the primary query_doc, cloned from the live store
- * by server_coordinate_query() under docs_mutex) and returns the response
- * JSON.  Handlers run on a query worker with no lock held: every pointer
- * they touch lives inside the Job's private query_context, so a concurrent
- * notification mutating the live store cannot disturb them.  Cross-document
- * handlers also receive `qc` for its sibling-document pools and project
- * tree.
- */
-
-/** Retrieve a document's top-level symbol pool: the children of its synthetic
- *  root node in source order, or an empty pool when @p d has no parse.
- *  The pointers are borrowed from @p d — never freed by the caller.
- *  @param d        Query document to inspect; may be NULL.
- *  @param out_top  Set to the array of top-level tj_node pointers, or NULL.
- *  @param out_n    Set to the number of entries in @p *out_top. */
-static void doc_symbol_pool(const query_doc *d, tj_node *const **out_top, int *out_n) {
-    if (d && d->root) {
-        *out_top = (tj_node *const *)d->root->children;
-        *out_n   = d->root->num_children;
-    } else {
-        *out_top = NULL;
-        *out_n   = 0;
-    }
-}
-
-/** Handle the "textDocument/documentSymbol" request by returning a flat list
- *  of all top-level declarations in the primary document.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  Request params (unused; present for dispatch symmetry).
- *  @param d       Primary query document; may be NULL.
- *  @return        JSON-RPC response containing the symbol array. */
-static yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                               yyjson_val *params, const query_doc *d) {
-    (void)params;
-    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    /* root->children are already every top-level declaration in source
-     * order (project block included).  TODO(document-symbol): once the
-     * project block reliably contains its children in the hierarchical
-     * sense, nest the in-project entries under it. */
-    tj_node *const *top = (tj_node *const *)d->root->children;
-    int             w   = d->root->num_children;
-
-    size_t  json_len = 0;
-    char   *json     = build_document_symbols_json(top, w, &json_len);
-    if (!json) return make_response(doc, id, yyjson_mut_null(doc));
-    yyjson_mut_val *raw = yyjson_mut_rawncpy(doc, json, json_len);
-    free(json);
-    return make_response(doc, id, raw);
-}
-
-/** Map a per-document task tj_node to its clone in @p qc's assembled
- *  Project tree.  Cursor lookups (dependency_at_cursor / task_decl_at_cursor)
- *  return per-document nodes, but cross-file resolution lives in the
- *  ProjectNode tree, so callers bridge through here first.
- *
- *  The per-document task's unprefixed dotted id (its in-file ancestry) is
- *  appended to @p d's task prefix target inside the Project tree.
- *  @param qc            Query context containing the assembled project tree.
- *  @param d             Primary query document that owns @p per_doc_task.
- *  @param per_doc_task  Per-document tj_node representing the task declaration.
- *  @return              Matching ProjectNode in the merged tree, or NULL when
- *                       the project tree is absent, the prefix target is
- *                       missing, or the path does not resolve. */
-static ProjectNode *project_node_for_doc_task(const query_context *qc,
-                                              const query_doc *d,
-                                              const tj_node *per_doc_task) {
-    if (!qc || !qc->project_root || !d || !per_doc_task) return NULL;
-
-    char *qid = sym_qualified_id(per_doc_task);   /* unprefixed in-file path */
-    if (!qid || !qid[0]) { free(qid); return NULL; }
-
-    ProjectNode *cur = find_node_by_dotted_path(qc->project_root, d->task_prefix,
-                                                NODE_KIND_TASK);
-    char *save = NULL;
-    for (char *seg = strtok_r(qid, ".", &save); seg && cur;
-         seg = strtok_r(NULL, ".", &save)) {
-        ProjectNode *next = NULL;
-        for (int i = 0; i < cur->num_children && !next; i++) {
-            ProjectNode *child = cur->children[i];
-            if (child->keyword == KW_TASK && child->id &&
-                strcmp(child->id, seg) == 0)
-                next = child;
-        }
-        cur = next;
-    }
-    free(qid);
-    return cur;
-}
-
-/** Handle the "textDocument/foldingRange" request by computing folding
- *  ranges for all block constructs in the primary document.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  Request params (unused).
- *  @param d       Primary query document; may be NULL.
- *  @return        JSON-RPC response containing the folding-range array. */
-static yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
-                                             yyjson_val *params, const query_doc *d) {
-    (void)params;
-    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    tj_node *const *top; int n;
-    doc_symbol_pool(d, &top, &n);
-    yyjson_mut_val *arr = build_folding_ranges_json(doc,
-                                                     d->tok_spans,
-                                                     d->num_tok_spans,
-                                                     top, n);
-    return make_response(doc, id, arr);
-}
-
-/** Handle the "textDocument/codeLens" request by building code-lens
- *  annotations (e.g. dependency counts) for the primary document.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  Request params (unused).
- *  @param d       Primary query document; may be NULL.
- *  @return        JSON-RPC response containing the code-lens array. */
-static yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
-                                         yyjson_val *params, const query_doc *d) {
-    (void)params;
-    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    tj_node *const *top; int n;
-    doc_symbol_pool(d, &top, &n);
-    yyjson_mut_val *arr = build_code_lens_json(doc,
-                                                d->tok_spans,
-                                                d->num_tok_spans,
-                                                top, n);
-    return make_response(doc, id, arr);
-}
-
-/** Handle the "textDocument/hover" request: if the cursor is on a dependency
- *  reference, resolve its target and return its qualified id; otherwise
- *  return keyword documentation for the active keyword under the cursor.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  Request params containing a "position" object.
- *  @param qc      Query context with the assembled project tree.
- *  @param d       Primary query document; may be NULL.
- *  @return        JSON-RPC response with a hover object, or a null result. */
-static yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
-                                     yyjson_val *params, const query_context *qc,
-                                     const query_doc *d) {
-    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
-
-    yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
-    if (!tdp) tdp = params;
-
-    yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
-    if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    LspPos pos = json_to_pos(pos_obj);
-
-    /* A cursor on a dependency reference resolves to its target task; show
-     * the target's qualified id and name.  Falls through to keyword docs
-     * when the cursor is not on a dependency or the reference is unresolved. */
-    tj_node          *owner = NULL;
-    const Dependency *dep   = NULL;
-    if (qc->project_root &&
-        dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
-                             &owner, &dep)) {
-        ProjectNode *merged_owner = project_node_for_doc_task(qc, d, owner);
-        ProjectNode *target = NULL;
-        if (merged_owner) {
-            int ordinal = (int)(dep - owner->dependencies);
-            if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
-                target = project_dep_resolve(merged_owner, ordinal,
-                                             qc->project_root);
-        }
-        if (target) {
-            char *value = project_node_hover_markdown(target);
-            yyjson_mut_val *contents = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_str(doc, contents, "kind", "markdown");
-            yyjson_mut_obj_add_strcpy(doc, contents, "value", value);
-            free(value);
-
-            yyjson_mut_val *hover = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_val(doc, hover, "contents", contents);
-            yyjson_mut_obj_add_val(doc, hover, "range",
-                                   range_json(doc, dep->source_range));
-            return make_response(doc, id, hover);
-        }
-    }
-
-    ActiveKeyword ak = active_keyword_at(d->tok_spans,
-                                          d->num_tok_spans, pos);
-    if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));
-
-    const char *doc_text = keyword_docs(ak.keyword);
-    free(ak.keyword);
-    if (!doc_text) return make_response(doc, id, yyjson_mut_null(doc));
-
-    yyjson_mut_val *contents = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, contents, "kind",  "markdown");
-    yyjson_mut_obj_add_str(doc, contents, "value", doc_text);
-
-    yyjson_mut_val *hover = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_val(doc, hover, "contents", contents);
-    yyjson_mut_obj_add_val(doc, hover, "range",    range_json(doc, ak.range));
-
-    return make_response(doc, id, hover);
-}
-
-/** Handle the "textDocument/signatureHelp" request by returning parameter
- *  signature information for the keyword active at the cursor position.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  Request params containing a "position" object.
- *  @param d       Primary query document; may be NULL.
- *  @return        JSON-RPC response with a SignatureHelp object, or null. */
-static yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id,
-                                              yyjson_val *params, const query_doc *d) {
-    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
-
-    yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
-    if (!tdp) tdp = params;
-
-    yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
-    if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    LspPos pos = json_to_pos(pos_obj);
-    ActiveContext ac = active_context(d->tok_spans,
-                                       d->num_tok_spans, pos);
-    if (!ac.keyword) return make_response(doc, id, yyjson_mut_null(doc));
-
-    yyjson_mut_val *sig = build_signature_help_json(doc, ac.keyword, ac.arg_count);
-    free(ac.keyword);
-    if (!sig) return make_response(doc, id, yyjson_mut_null(doc));
-    return make_response(doc, id, sig);
-}
-
-/** Format the semanticTokens resultId for snapshot @p s into @p buf.
- *  The resultId is the document's parse version (a decimal uint64), which is
- *  stable per snapshot so delta diffs can match by version without write-back.
- *  @param s       Doc snapshot whose version to encode.
- *  @param buf     Output buffer to receive the null-terminated decimal string.
- *  @param buflen  Capacity of @p buf in bytes. */
-static void sem_tokens_result_id(doc_snapshot *s, char *buf, size_t buflen) {
-    snprintf(buf, buflen, "%" PRIu64, s->doc_version);
-}
-
-/** Handle the "textDocument/semanticTokens/full" request by returning the
- *  complete encoded semantic-token buffer for the primary document.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  Request params (unused).
- *  @param d       Primary query document; may be NULL.
- *  @return        JSON-RPC response with a SemanticTokens object. */
-static yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
-                                                    yyjson_val *params, const query_doc *d) {
-    (void)params;
-    if (!d || !d->snap || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    const uint32_t *buf = NULL;
-    size_t          count = 0;
-    docsnap_sem_tokens(d->snap, &buf, &count);
-
-    char result_id[32];
-    sem_tokens_result_id(d->snap, result_id, sizeof(result_id));
-    yyjson_mut_val *result =
-        build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
-    return make_response(doc, id, result);
-}
-
-/** Handle the "textDocument/semanticTokens/full/delta" request: diff the
- *  current token buffer against the snapshot the client last received
- *  (identified by @c previousResultId), falling back to a full response
- *  when no matching base snapshot is available.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  Request params with an optional "previousResultId" string.
- *  @param qc      Query context; consulted for the previous snapshot.
- *  @param d       Primary query document; may be NULL.
- *  @return        JSON-RPC response with a SemanticTokensDelta or full
- *                 SemanticTokens object. */
-static yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yyjson_val *id,
-                                                          yyjson_val *params,
-                                                          const query_context *qc,
-                                                          const query_doc *d) {
-    const char *previous_result_id = params ? json_str(params, "previousResultId") : NULL;
-    if (!d || !d->snap || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    const uint32_t *new_buf = NULL;
-    size_t          new_count = 0;
-    docsnap_sem_tokens(d->snap, &new_buf, &new_count);
-
-    char result_id[32];
-    sem_tokens_result_id(d->snap, result_id, sizeof(result_id));
-
-    /* Identify the snapshot the client is holding by its resultId (== that
-     * snapshot's parse version): either the current parse (no change since)
-     * or the immediately previous one retained on the query_context.  Diff
-     * against that base; otherwise fall back to a full response. */
-    doc_snapshot *base = NULL;
-    if (previous_result_id) {
-        uint64_t prev_version = strtoull(previous_result_id, NULL, 10);
-        if (prev_version == d->snap->doc_version)
-            base = d->snap;
-        else if (qc->prev_snap && prev_version == qc->prev_snap->doc_version)
-            base = qc->prev_snap;
-    }
-
-    yyjson_mut_val *result;
-    if (base) {
-        const uint32_t *old_buf = NULL;
-        size_t          old_count = 0;
-        docsnap_sem_tokens(base, &old_buf, &old_count);
-        result = build_semantic_tokens_delta_json(doc, old_buf, old_count,
-                                                   new_buf, new_count, result_id);
-    } else {
-        result = build_semantic_tokens_json_from_buf(doc, new_buf, new_count, result_id);
-    }
-    return make_response(doc, id, result);
-}
-
-/** Handle the "textDocument/references" request by finding all
- *  depends/precedes references to the task declaration under the cursor
- *  across the project tree.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  Request params containing a "position" object.
- *  @param qc      Query context with the assembled project tree.
- *  @param d       Primary query document; may be NULL.
- *  @return        JSON-RPC response containing the locations array. */
-static yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params, const query_context *qc,
-                                          const query_doc *d) {
-    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
-    yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    LspPos pos = json_to_pos(pos_obj);
-    if (!qc->project_root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    tj_node *task = task_decl_at_cursor(d->tok_spans, d->num_tok_spans, pos);
-    ProjectNode *wanted = project_node_for_doc_task(qc, d, task);
-    yyjson_mut_val *result = build_references_json(doc,
-                                                    qc->project_root,
-                                                    wanted);
-    if (!result) return make_response(doc, id, yyjson_mut_null(doc));
-    return make_response(doc, id, result);
-}
-
-/** Handle the "textDocument/documentHighlight" request by highlighting all
- *  occurrences of the task under the cursor (declaration and references)
- *  within the primary document.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  Request params containing a "position" object.
- *  @param qc      Query context with the assembled project tree.
- *  @param d       Primary query document; may be NULL.
- *  @return        JSON-RPC response containing the highlight array. */
-static yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc,
-                                                  yyjson_val *id,
-                                                  yyjson_val *params,
-                                                  const query_context *qc,
-                                                  const query_doc *d) {
-    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
-    yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->root || !qc->project_root)
-        return make_response(doc, id, yyjson_mut_null(doc));
-
-    LspPos pos = json_to_pos(pos_obj);
-
-    /* Resolve the cursor to a single target task, triggering from either a
-     * task declaration or a dependency reference (the target is the same in
-     * both directions).  Resolution runs against the pinned snapshot's
-     * ProjectNode tree, exactly as definition/references do. */
-    ProjectNode *wanted = NULL;
-    tj_node *decl = task_decl_at_cursor(d->tok_spans, d->num_tok_spans, pos);
-    if (decl) {
-        wanted = project_node_for_doc_task(qc, d, decl);
-    } else {
-        tj_node          *owner = NULL;
-        const Dependency *dep   = NULL;
-        if (dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
-                                 &owner, &dep)) {
-            ProjectNode *merged_owner = project_node_for_doc_task(qc, d, owner);
-            if (merged_owner) {
-                int ordinal = (int)(dep - owner->dependencies);
-                if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
-                    wanted = project_dep_resolve(merged_owner, ordinal,
-                                                 qc->project_root);
-            }
-        }
-    }
-
-    yyjson_mut_val *result =
-        build_document_highlight_json(doc, qc->project_root, wanted,
-                                      d->uri, d->tok_spans, d->num_tok_spans);
-    if (!result) return make_response(doc, id, yyjson_mut_null(doc));
-    return make_response(doc, id, result);
-}
-
-/** Handle the "textDocument/definition" request by resolving the dependency
- *  reference under the cursor to the target task's declaration location.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  Request params containing a "position" object.
- *  @param qc      Query context with the assembled project tree.
- *  @param d       Primary query document; may be NULL.
- *  @return        JSON-RPC response with a Location or null result. */
-static yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params, const query_context *qc,
-                                          const query_doc *d) {
-    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
-    yyjson_val *pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    LspPos pos = json_to_pos(pos_obj);
-    if (!qc->project_root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    tj_node          *owner = NULL;
-    const Dependency *dep   = NULL;
-    yyjson_mut_val   *result = NULL;
-    if (dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
-                             &owner, &dep)) {
-        ProjectNode *merged_owner = project_node_for_doc_task(qc, d, owner);
-        if (merged_owner) {
-            int ordinal = (int)(dep - owner->dependencies);
-            if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
-                result = build_definition_json(doc, merged_owner, ordinal,
-                                               qc->project_root);
-        }
-    }
-    if (!result) return make_response(doc, id, yyjson_mut_null(doc));
-    return make_response(doc, id, result);
-}
-
-/** Handle the "textDocument/completion" request by computing keyword and
- *  task-id completion items for the cursor position, drawing on the
- *  primary document's token spans and all same-project sibling documents.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  Request params containing a "position" object.
- *  @param qc      Query context; sibling documents supply cross-file ids.
- *  @param d       Primary query document; may be NULL.
- *  @return        JSON-RPC response containing the CompletionList. */
-static yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params, const query_context *qc,
-                                          const query_doc *d) {
-    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
-    yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
-    if (!tdp) tdp = params;
-
-    yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
-    if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
-    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
-
-    /* Every non-primary doc in the context is a sibling in the requester's
-     * project (the clone step already restricted membership), so each one's
-     * top-level pool is an extra cross-file completion source.  Orphans
-     * have no siblings, so the loop naturally yields no extras for them. */
-    tj_node *const *extra_pools[MAX_DOCS];
-    int             extra_counts[MAX_DOCS];
-    int             num_extra = 0;
-    for (int i = 0; i < qc->num_docs && num_extra < MAX_DOCS; i++) {
-        if (qc->docs[i].is_primary) continue;
-        tj_node *const *top; int n;
-        doc_symbol_pool(&qc->docs[i], &top, &n);
-        if (!top) continue;
-        extra_pools[num_extra]  = top;
-        extra_counts[num_extra] = n;
-        num_extra++;
-    }
-
-    tj_node *const *self_top; int self_n;
-    doc_symbol_pool(d, &self_top, &self_n);
-
-    LspPos pos             = json_to_pos(pos_obj);
-    yyjson_mut_val *result = build_completions_json(doc,
-                                                     d->tok_spans,
-                                                     d->num_tok_spans,
-                                                     pos,
-                                                     self_top, self_n,
-                                                     extra_pools,
-                                                     extra_counts,
-                                                     num_extra,
-                                                     d->text);
-    return make_response(doc, id, result);
-}
-
-/** Handle the "workspace/symbol" request by collecting all named symbols
- *  across every document in the query context that match the query string.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  Request params with a "query" string (empty string matches all).
- *  @param qc      Query context containing all workspace documents.
- *  @return        JSON-RPC response containing the SymbolInformation array. */
-static yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                                yyjson_val *params,
-                                                const query_context *qc) {
-    const char *query = params ? json_str(params, "query") : NULL;
-    if (!query) query = "";
-
-    yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    for (int i = 0; i < qc->num_docs; i++) {
-        if (!qc->docs[i].root) continue;
-        tj_node *const *top; int n;
-        doc_symbol_pool(&qc->docs[i], &top, &n);
-        if (!top) continue;
-        collect_workspace_symbols(doc, query, top, n, qc->docs[i].uri, arr);
-    }
-    return make_response(doc, id, arr);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

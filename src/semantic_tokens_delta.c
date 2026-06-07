@@ -20,6 +20,7 @@
 
 #include "semantic_tokens_delta.h"
 #include "semantic_tokens.h"
+#include "rpc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -327,4 +328,44 @@ yyjson_mut_val *build_semantic_tokens_delta_json(yyjson_mut_doc *doc,
     free(ops);
     yyjson_mut_obj_add_val(doc, result, "edits", edits);
     return result;
+}
+
+yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yyjson_val *id,
+                                                  yyjson_val *params,
+                                                  const query_context *qc,
+                                                  const query_doc *d) {
+    const char *previous_result_id = params ? json_str(params, "previousResultId") : NULL;
+    if (!d || !d->snap || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    const uint32_t *new_buf = NULL;
+    size_t          new_count = 0;
+    docsnap_sem_tokens(d->snap, &new_buf, &new_count);
+
+    char result_id[32];
+    sem_tokens_result_id(d->snap, result_id, sizeof(result_id));
+
+    /* Identify the snapshot the client is holding by its resultId (== that
+     * snapshot's parse version): either the current parse (no change since)
+     * or the immediately previous one retained on the query_context.  Diff
+     * against that base; otherwise fall back to a full response. */
+    doc_snapshot *base = NULL;
+    if (previous_result_id) {
+        uint64_t prev_version = strtoull(previous_result_id, NULL, 10);
+        if (prev_version == d->snap->doc_version)
+            base = d->snap;
+        else if (qc->prev_snap && prev_version == qc->prev_snap->doc_version)
+            base = qc->prev_snap;
+    }
+
+    yyjson_mut_val *result;
+    if (base) {
+        const uint32_t *old_buf = NULL;
+        size_t          old_count = 0;
+        docsnap_sem_tokens(base, &old_buf, &old_count);
+        result = build_semantic_tokens_delta_json(doc, old_buf, old_count,
+                                                   new_buf, new_count, result_id);
+    } else {
+        result = build_semantic_tokens_json_from_buf(doc, new_buf, new_count, result_id);
+    }
+    return make_response(doc, id, result);
 }

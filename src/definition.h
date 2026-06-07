@@ -21,6 +21,7 @@
 #pragma once
 
 #include "project_tree.h"
+#include "query_context.h"   /* query_context, query_doc */
 #include <yyjson.h>
 
 /**
@@ -40,3 +41,18 @@
 yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
                                        ProjectNode *owner, int dep_index,
                                        ProjectNode *project_root);
+
+/**
+ * Handle "textDocument/definition": resolve the dependency reference under
+ * the cursor to the target task's declaration location.
+ *
+ * @param doc     Mutable document for building the response.
+ * @param id      Request id from the incoming JSON-RPC message.
+ * @param params  Request params containing a "position" object.
+ * @param qc      Query context with the assembled project tree.
+ * @param d       Primary query document; may be NULL.
+ * @return JSON-RPC response with a Location or null result.
+ */
+yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
+                                  yyjson_val *params, const query_context *qc,
+                                  const query_doc *d);

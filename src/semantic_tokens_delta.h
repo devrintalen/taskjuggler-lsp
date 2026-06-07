@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include "query_context.h"   /* query_context, query_doc */
 #include <stddef.h>
 #include <stdint.h>
 #include <yyjson.h>
@@ -58,3 +59,22 @@ yyjson_mut_val *build_semantic_tokens_delta_json(yyjson_mut_doc *doc,
                                                   const uint32_t *prev_buf, size_t prev_count,
                                                   const uint32_t *new_buf,  size_t new_count,
                                                   const char *result_id);
+
+/**
+ * Handle "textDocument/semanticTokens/full/delta": diff the current token
+ * buffer against the snapshot the client last received (identified by
+ * @c previousResultId), falling back to a full response when no matching
+ * base snapshot is available.
+ *
+ * @param doc     Mutable document for building the response.
+ * @param id      Request id from the incoming JSON-RPC message.
+ * @param params  Request params with an optional "previousResultId" string.
+ * @param qc      Query context; consulted for the previous snapshot.
+ * @param d       Primary query document; may be NULL.
+ * @return JSON-RPC response with a SemanticTokensDelta or full
+ *         SemanticTokens object.
+ */
+yyjson_mut_val *handle_semantic_tokens_full_delta(yyjson_mut_doc *doc, yyjson_val *id,
+                                                  yyjson_val *params,
+                                                  const query_context *qc,
+                                                  const query_doc *d);

@@ -21,6 +21,7 @@
 #pragma once
 
 #include "parser.h"
+#include "query_context.h"   /* doc_snapshot, query_doc */
 #include <stddef.h>
 #include <stdint.h>
 #include <yyjson.h>
@@ -137,3 +138,28 @@ yyjson_mut_val *build_semantic_tokens_json_from_buf(yyjson_mut_doc *doc,
  */
 yyjson_mut_val *build_uint32_array_json(yyjson_mut_doc *doc,
                                          const uint32_t *buf, size_t count);
+
+/**
+ * Format the semanticTokens resultId for snapshot @p s into @p buf.  The
+ * resultId is the document's parse version (a decimal uint64), which is
+ * stable per snapshot so delta diffs can match by version without write-back.
+ * Shared by the full and delta query handlers.
+ *
+ * @param s       Doc snapshot whose version to encode.
+ * @param buf     Output buffer to receive the null-terminated decimal string.
+ * @param buflen  Capacity of @p buf in bytes.
+ */
+void sem_tokens_result_id(doc_snapshot *s, char *buf, size_t buflen);
+
+/**
+ * Handle "textDocument/semanticTokens/full": return the complete encoded
+ * semantic-token buffer for the primary document.
+ *
+ * @param doc     Mutable document for building the response.
+ * @param id      Request id from the incoming JSON-RPC message.
+ * @param params  Request params (unused; present for dispatch symmetry).
+ * @param d       Primary query document; may be NULL.
+ * @return JSON-RPC response with a SemanticTokens object.
+ */
+yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
+                                            yyjson_val *params, const query_doc *d);

@@ -20,6 +20,7 @@
 
 #include "document_symbol.h"
 #include "grammar.tab.h"
+#include "rpc.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -269,4 +270,24 @@ char *build_document_symbols_json(tj_node *const *syms, int n, size_t *out_len) 
     *out_len = b.len;
     buf_push(&b, "\0", 1);
     return b.data;
+}
+
+yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
+                                       yyjson_val *params, const query_doc *d) {
+    (void)params;
+    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    /* root->children are already every top-level declaration in source
+     * order (project block included).  TODO(document-symbol): once the
+     * project block reliably contains its children in the hierarchical
+     * sense, nest the in-project entries under it. */
+    tj_node *const *top = (tj_node *const *)d->root->children;
+    int             w   = d->root->num_children;
+
+    size_t  json_len = 0;
+    char   *json     = build_document_symbols_json(top, w, &json_len);
+    if (!json) return make_response(doc, id, yyjson_mut_null(doc));
+    yyjson_mut_val *raw = yyjson_mut_rawncpy(doc, json, json_len);
+    free(json);
+    return make_response(doc, id, raw);
 }

@@ -21,6 +21,7 @@
 #pragma once
 
 #include "parser.h"
+#include "query_context.h"   /* query_context */
 #include <yyjson.h>
 
 /**
@@ -38,3 +39,17 @@
 void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
                                 tj_node *const *syms, int n,
                                 const char *uri, yyjson_mut_val *arr);
+
+/**
+ * Handle "workspace/symbol": collect all named symbols across every document
+ * in the query context that match the query string.
+ *
+ * @param doc     Mutable document for building the response.
+ * @param id      Request id from the incoming JSON-RPC message.
+ * @param params  Request params with a "query" string (empty matches all).
+ * @param qc      Query context containing all workspace documents.
+ * @return JSON-RPC response containing the SymbolInformation array.
+ */
+yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
+                                        yyjson_val *params,
+                                        const query_context *qc);

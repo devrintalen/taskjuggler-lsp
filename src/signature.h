@@ -22,6 +22,7 @@
 
 #include "parser.h"
 #include "grammar.tab.h"
+#include "query_context.h"   /* query_doc */
 #include <yyjson.h>
 
 /** Result of scanning context up to a cursor position. */
@@ -57,3 +58,16 @@ ActiveContext active_context(const TokenSpan *tokens, int num_tokens, LspPos cur
 yyjson_mut_val *build_signature_help_json(yyjson_mut_doc *doc,
                                            const char *kw,
                                            uint32_t active_param);
+
+/**
+ * Handle "textDocument/signatureHelp": return parameter signature
+ * information for the keyword active at the cursor position.
+ *
+ * @param doc     Mutable document for building the response.
+ * @param id      Request id from the incoming JSON-RPC message.
+ * @param params  Request params containing a "position" object.
+ * @param d       Primary query document; may be NULL.
+ * @return JSON-RPC response with a SignatureHelp object, or null.
+ */
+yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id,
+                                      yyjson_val *params, const query_doc *d);

@@ -19,8 +19,8 @@
 /** @file */
 
 #include "code_lens.h"
-#include "document_symbol.h"
 #include "grammar.tab.h"
+#include "rpc.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -32,9 +32,9 @@
 /* Working-time defaults matching TaskJuggler: 8 hours per working day,
  * Mon-Fri, no holidays.  The project-level `dailyworkinghours`,
  * `weekdays`, and holiday declarations are not yet captured by the
- * parser, so this lens treats them as fixed. */
-/** Working minutes per day used to convert `length` / `effort` values. */
-#define WORKING_MINUTES_PER_DAY (8 * 60)
+ * parser, so this lens treats them as fixed.  `length` is converted in
+ * whole working days (sub-day units collapse to one day), so no
+ * minutes-per-day constant is needed. */
 /** Working days per week assumed by the lens. */
 #define WORKING_DAYS_PER_WEEK   5
 /** Working days per month assumed by the lens (≈ 260 / 12). */
@@ -369,4 +369,18 @@ yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
     }
 
     return arr;
+}
+
+yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
+                                 yyjson_val *params, const query_doc *d) {
+    (void)params;
+    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    tj_node *const *top; int n;
+    doc_symbol_pool(d, &top, &n);
+    yyjson_mut_val *arr = build_code_lens_json(doc,
+                                               d->tok_spans,
+                                               d->num_tok_spans,
+                                               top, n);
+    return make_response(doc, id, arr);
 }
