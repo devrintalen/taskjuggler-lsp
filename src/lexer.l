@@ -176,6 +176,7 @@ static int emit_kw_mfrag_text(int code, const char *text) {
 %option noyywrap
 %option yylineno
 %option 8bit
+%option full
 
 /* Start conditions for tokens whose bodies span multiple lexer fragments. */
 %x BLOCK_COMMENT
