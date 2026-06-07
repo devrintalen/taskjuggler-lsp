@@ -21,6 +21,8 @@
 #include "server.h"
 #include "threadpool.h"
 #include "diag_worker.h"
+#include "debug.h"
+#include "version.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,15 +78,18 @@ static char *read_message(void) {
  * @return 0 when stdin closes (normal client shutdown).
  */
 int main(void) {
+    DLOG(DEBUG_LIFECYCLE, LOG_INFO, "server starting (version %s)", VERSION_STRING);
     server_init();
     threadpool_start();
     for (;;) {
         char *body = read_message();
         if (!body) break;
 
+        DLOG(DEBUG_RPC, LOG_TRACE, "<- %zu byte message", strlen(body));
         server_process(body);
         free(body);
     }
+    DLOG(DEBUG_LIFECYCLE, LOG_INFO, "stdin closed; shutting down");
     threadpool_stop();
     diag_registry_shutdown();
     return 0;

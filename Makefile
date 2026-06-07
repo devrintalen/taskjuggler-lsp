@@ -1,7 +1,10 @@
 VERSION = 0.5.3
 
 CC      = gcc
-CFLAGS  = -Wall -Wextra -std=c11 -O2 -D_DEFAULT_SOURCE -MMD -MP
+# CFLAGS_EXTRA is for one-off overrides, e.g. enabling per-category debug
+# logging without editing src/debug.h:
+#   make CFLAGS_EXTRA="-DDEBUG_TJ3=3 -DDEBUG_REVALIDATE=2"
+CFLAGS  = -Wall -Wextra -std=c11 -O2 -D_DEFAULT_SOURCE -MMD -MP $(CFLAGS_EXTRA)
 LDFLAGS = -lyyjson -lpthread
 
 # Generated files from flex and bison
@@ -9,7 +12,7 @@ GEN_LEX  = src/lexer.yy.c
 GEN_GRAM = src/grammar.tab.c
 GEN_HDR  = src/grammar.tab.h
 
-SRC = src/main.c src/server.c src/parser.c src/diagnostics.c \
+SRC = src/main.c src/server.c src/parser.c src/diagnostics.c src/debug.c \
       src/job_queue.c src/threadpool.c src/compile_commands.c \
       $(GEN_LEX) $(GEN_GRAM) \
       src/document_symbol.c src/folding_range.c src/hover.c src/signature.c src/completion.c src/semantic_tokens.c src/semantic_tokens_delta.c src/dependency.c src/definition.c src/references.c src/document_highlight.c src/workspace_symbol.c src/code_lens.c src/project_tree.c src/query_context.c src/tj3.c src/diag_worker.c
@@ -24,7 +27,7 @@ $(BIN): $(OBJ)
 
 # Debug build with symbols for use with perf/valgrind.
 # Output binary: taskjuggler-lsp-debug
-DEBUG_CFLAGS = -Wall -Wextra -std=c11 -O2 -g -no-pie -D_DEFAULT_SOURCE -MMD -MP
+DEBUG_CFLAGS = -Wall -Wextra -std=c11 -O2 -g -no-pie -D_DEFAULT_SOURCE -MMD -MP $(CFLAGS_EXTRA)
 DEBUG_OBJ    = $(SRC:.c=.debug.o)
 DEBUG_BIN    = taskjuggler-lsp-debug
 

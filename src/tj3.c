@@ -20,6 +20,7 @@
 
 #include "tj3.h"
 #include "pathutil.h"
+#include "debug.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -30,6 +31,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 /**
@@ -206,6 +208,13 @@ static char *run_tj3(const char *tmpdir, char *const argv[]) {
     int errpipe[2];
     if (pipe(errpipe) != 0) return NULL;
 
+#if DEBUG_TJ3
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    DLOG(DEBUG_TJ3, LOG_VERBOSE, "exec tj3 %s%s (cwd=%s)",
+         argv[1] ? argv[1] : "", argv[1] && argv[2] ? " ..." : "", tmpdir);
+#endif
+
     pid_t pid = fork();
     if (pid < 0) {
         close(errpipe[0]);
@@ -251,6 +260,16 @@ static char *run_tj3(const char *tmpdir, char *const argv[]) {
 
     int status;
     waitpid(pid, &status, 0);
+
+#if DEBUG_TJ3
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = (t1.tv_sec - t0.tv_sec) * 1000.0
+              + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+    DLOG(DEBUG_TJ3, LOG_INFO, "tj3 exited %d in %.1f ms, %zu bytes stderr",
+         WIFEXITED(status) ? WEXITSTATUS(status) : -1, ms, len);
+#endif
+
     return buf;
 }
 
@@ -291,6 +310,8 @@ static const char *map_reported_path(const char *path,
     for (int i = 0; i < nmembers; i++)
         if (strcmp(members[i].relpath, p) == 0)
             return members[i].uri;
+    DLOG(DEBUG_TJ3, LOG_VERBOSE,
+         "tj3 reported path '%s' did not map to any project member", path);
     return NULL;
 }
 
@@ -454,6 +475,10 @@ void tj3_collect_project(const workspace_snapshot *ws, const ws_project *proj,
     if (mode == TJ3_SYNTAX_ONLY) argv[ai++] = "--check-syntax";
     argv[ai++] = root_rel;
     argv[ai]   = NULL;
+
+    DLOG(DEBUG_TJ3, LOG_INFO, "collect project '%s': %d members, mode=%s, root=%s",
+         proj->id ? proj->id : "(no-id)", nmembers,
+         mode == TJ3_SYNTAX_ONLY ? "syntax-only" : "full", root_rel);
 
     char *errbuf = run_tj3(tmpdir, argv);
     parse_diagnostics(errbuf, tmpdir, real_tmp, members, nmembers, out);

@@ -54,6 +54,7 @@
 #include "compile_commands.h"
 #include "pathutil.h"
 #include "diag_worker.h"
+#include "debug.h"
 #include "version.h"
 
 #include <yyjson.h>
@@ -66,6 +67,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Document store
@@ -300,6 +302,7 @@ static void doc_free(Document *d) {
 static pthread_mutex_t stdout_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void lsp_send_message(const char *msg) {
+    DLOG(DEBUG_RPC, LOG_TRACE, "-> %zu byte message", strlen(msg));
     pthread_mutex_lock(&stdout_mutex);
     printf("Content-Length: %zu\r\n\r\n%s", strlen(msg), msg);
     fflush(stdout);
@@ -490,11 +493,18 @@ static void load_file_from_disk(const char *path) {
     if (doc_find(uri)) { free(uri); return; }
 
     char *text = read_file(path);
-    if (!text) { free(uri); return; }
+    if (!text) {
+        DLOG(DEBUG_DOCSTORE, LOG_INFO, "load from disk failed (unreadable): %s", path);
+        free(uri);
+        return;
+    }
 
     Document *document = doc_alloc(uri);
     free(uri);
     if (!document) { free(text); return; }
+
+    DLOG(DEBUG_DOCSTORE, LOG_VERBOSE, "loaded from disk: %s (%zu bytes)",
+         path, strlen(text));
 
     document->text      = text;
     document->disk_only = 1;
@@ -567,6 +577,7 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
             memcpy(full_path, filename, fname_len + 1);
         }
 
+        DLOG(DEBUG_INCLUDES, LOG_VERBOSE, "include '%s' -> %s", filename, full_path);
         load_file_from_disk(full_path);
 
         /* Locate the included Document and propagate this include's
@@ -574,6 +585,9 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
          * inserts under a file:// URI, so look it up the same way. */
         char *target_uri = path_to_uri(full_path);
         Document *target = target_uri ? doc_find(target_uri) : NULL;
+        if (!target)
+            DLOG(DEBUG_INCLUDES, LOG_INFO, "include unresolved: %s (from %s)",
+                 full_path, file_path);
         if (target) {
             replace_string(&target->task_prefix,     inc->task_prefix);
             replace_string(&target->resource_prefix, inc->resource_prefix);
@@ -1012,6 +1026,8 @@ static void republish_all_diagnostics(void) {
  *  the stat-poll does not re-trigger until the file changes again. */
 static void reload_compile_commands(void) {
     g_cc_attempted = 1;
+    DLOG(DEBUG_COMPILE_COMMANDS, LOG_INFO, "reload: cc_path=%s",
+         g_cc_path ? g_cc_path : "(none)");
 
     if (!g_cc_path) {
         /* No workspace root (rootUri null / no folder open), so we cannot
@@ -1046,6 +1062,8 @@ static void reload_compile_commands(void) {
     case CC_OK:
         for (int i = 0; i < n; i++) {
             if (!entries[i].file_abs) continue;
+            DLOG(DEBUG_COMPILE_COMMANDS, LOG_VERBOSE, "  entry[%d] %s",
+                 i, entries[i].file_abs);
             load_file_from_disk(entries[i].file_abs);
             /* Tag the doc that holds this compile_commands entry as a
              * project root.  build_workspace_snapshot() seeds one project
@@ -1085,6 +1103,8 @@ static void reload_compile_commands(void) {
         break;
     }
 
+    DLOG(DEBUG_COMPILE_COMMANDS, LOG_INFO, "reload result: status=%d, %d entries",
+         g_cc_status, res == CC_OK ? n : 0);
     compile_commands_free(entries, n);
 }
 
@@ -1111,9 +1131,17 @@ static void maybe_reload_compile_commands(void) {
         st.st_mtim.tv_nsec != g_cc_mtime_nsec ||
         st.st_size         != g_cc_size      ||
         !g_cc_attempted) {
+        DLOG(DEBUG_COMPILE_COMMANDS, LOG_VERBOSE,
+             "compile_commands.json changed on disk; reloading");
         reload_compile_commands();
     }
 }
+
+/* The docs[] table dump and its private helpers are compiled only when the
+ * revalidation category is at LOG_VERBOSE or above.  This keeps its per-slot
+ * tree walks out of the default build entirely (rather than merely silencing
+ * the output), and avoids unused-function warnings when the category is off. */
+#if DEBUG_REVALIDATE >= LOG_VERBOSE
 
 /** Recursively sum the @c num_dependencies across @p n and its subtree.
  *  @param n  Root node to sum; NULL is treated as zero.
@@ -1189,6 +1217,8 @@ static void dump_docs_to_stderr(const char *trigger, const workspace_snapshot *w
     fflush(stderr);
 }
 
+#endif /* DEBUG_REVALIDATE >= LOG_VERBOSE */
+
 /** Build a fresh workspace snapshot from the current docs[] and swap it in
  *  as the published @c g_ws, releasing the previous one (which an in-flight
  *  query may still be reading — it survives until that query releases its
@@ -1206,6 +1236,10 @@ static void publish_workspace_snapshot(void) {
  *  per-project diagnostics worker registry.  Called after every
  *  document-mutating notification. */
 static void revalidate_all_docs(void) {
+#if DEBUG_REVALIDATE
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+#endif
     maybe_reload_compile_commands();
     publish_workspace_snapshot();
     republish_all_diagnostics();
@@ -1214,7 +1248,17 @@ static void revalidate_all_docs(void) {
      * snapshot-updating notification funnels through here, so this single
      * call covers didOpen/didChange/didClose/watched-files/rename/cc-reload. */
     diag_registry_update(g_ws);
+#if DEBUG_REVALIDATE
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = (t1.tv_sec - t0.tv_sec) * 1000.0
+              + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+    DLOG(DEBUG_REVALIDATE, LOG_INFO, "revalidate complete: %d projects in %.2f ms",
+         g_ws ? g_ws->num_projects : 0, ms);
+#endif
+#if DEBUG_REVALIDATE >= LOG_VERBOSE
     dump_docs_to_stderr("revalidate_all_docs", g_ws);
+#endif
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1250,6 +1294,16 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
             memcpy(g_cc_path + off, fname, fname_len + 1);
         }
     }
+
+    DLOG(DEBUG_LIFECYCLE, LOG_INFO, "initialize: workspace_root=%s cc_path=%s",
+         g_workspace_root ? g_workspace_root : "(none)",
+         g_cc_path ? g_cc_path : "(none)");
+#if DEBUG_LIFECYCLE
+    yyjson_val *trace_val = params ? yyjson_obj_get(params, "trace") : NULL;
+    if (trace_val && yyjson_is_str(trace_val))
+        DLOG(DEBUG_LIFECYCLE, LOG_VERBOSE, "initialize: client trace=%s",
+             yyjson_get_str(trace_val));
+#endif
 
     yyjson_mut_val *server_info = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_str(doc, server_info, "name",    "taskjuggler-lsp");
@@ -1335,6 +1389,7 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
  *  @param id   Request id from the incoming JSON-RPC message.
  *  @return     JSON-RPC response object with a null result. */
 static yyjson_mut_val *handle_shutdown(yyjson_mut_doc *doc, yyjson_val *id) {
+    DLOG(DEBUG_LIFECYCLE, LOG_INFO, "shutdown requested");
     return make_response(doc, id, yyjson_mut_null(doc));
 }
 
@@ -1342,6 +1397,8 @@ static yyjson_mut_val *handle_shutdown(yyjson_mut_doc *doc, yyjson_val *id) {
  *  for *.tjp and *.tji files via client/registerCapability, then load
  *  compile_commands.json and trigger the initial revalidation. */
 static void handle_initialized(void) {
+    DLOG(DEBUG_LIFECYCLE, LOG_INFO,
+         "initialized: registering file watchers, loading compile_commands");
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
 
     yyjson_mut_val *watcher_tjp = yyjson_mut_obj(doc);
@@ -1405,6 +1462,9 @@ static void handle_did_change_watched_files(yyjson_val *params) {
         if (!uri || !type_item || !yyjson_is_num(type_item)) continue;
         int type = (int)yyjson_get_num(type_item);
 
+        DLOG(DEBUG_DOCSTORE, LOG_VERBOSE,
+             "watched file event: type=%d %s", type, uri);
+
         if (type == 3) {
             Document *document = doc_find(uri);
             if (document && document->disk_only) {
@@ -1455,6 +1515,8 @@ static void handle_did_rename_files(yyjson_val *params) {
         const char *new_uri = json_str(file_item, "newUri");
         if (!old_uri || !new_uri) continue;
 
+        DLOG(DEBUG_DOCSTORE, LOG_INFO, "rename: %s -> %s", old_uri, new_uri);
+
         Document *old_doc = doc_find(old_uri);
         if (old_doc) {
             if (!old_doc->disk_only)
@@ -1499,6 +1561,8 @@ static void handle_didopen(yyjson_val *params) {
     const char *text = json_str(tdi, "text");
     if (!uri || !text) return;
 
+    DLOG(DEBUG_DOCSTORE, LOG_INFO, "didOpen: %s (%zu bytes)", uri, strlen(text));
+
     Document *d = doc_find(uri);
     if (d) {
         if (!d->disk_only) return; /* duplicate open: client error */
@@ -1542,6 +1606,9 @@ static void handle_didchange(yyjson_val *params) {
     if (!uri) return;
 
     if (yyjson_arr_size(changes) == 0) return;
+
+    DLOG(DEBUG_DOCSTORE, LOG_INFO, "didChange: %s (%zu change(s))",
+         uri, yyjson_arr_size(changes));
 
     Document *d = doc_find(uri);
     if (!d) return;
@@ -1596,6 +1663,8 @@ static void handle_didclose(yyjson_val *params) {
 
     const char *uri = json_str(tdi, "uri");
     if (!uri) return;
+
+    DLOG(DEBUG_DOCSTORE, LOG_INFO, "didClose: %s", uri);
 
     Document *d = doc_find(uri);
     if (!d) return;
@@ -2397,6 +2466,8 @@ void server_process(const char *json_text) {
     yyjson_val *root   = yyjson_doc_get_root(in_doc);
     yyjson_val *method = yyjson_obj_get(root, "method");
     const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
+
+    DLOG(DEBUG_RPC, LOG_VERBOSE, "recv method=%s", m[0] ? m : "(response)");
 
     if (strcmp(m, "exit") == 0) {
         yyjson_doc_free(in_doc);
