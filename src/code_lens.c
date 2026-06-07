@@ -19,7 +19,6 @@
 /** @file */
 
 #include "code_lens.h"
-#include "document_symbol.h"
 #include "grammar.tab.h"
 #include "rpc.h"
 
