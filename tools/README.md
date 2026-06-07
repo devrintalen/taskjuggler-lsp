@@ -5,6 +5,7 @@ pipeline, and profiling workflow.
 
 | File                    | Purpose                                                                                  |
 |-------------------------|------------------------------------------------------------------------------------------|
+| `bench_didchange.py`    | Isolate didChange (re-parse + revalidate) latency on a fixture via post-edit query probes |
 | `callgrind.py`          | Profile a scenario under Valgrind Callgrind, or analyse an existing `callgrind.out`      |
 | `generate_large_tjp.py` | Generate large valid `.tjp` files for stress testing                                     |
 | `lexer_test.c`          | Standalone Flex lexer driver (built by `make lexer-test`)                                |

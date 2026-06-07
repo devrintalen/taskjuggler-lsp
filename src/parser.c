@@ -76,6 +76,9 @@ TokenSpan   *g_tok_spans      = NULL;
 int          g_num_tok_spans  = 0;
 /** Allocated capacity of `g_tok_spans`. */
 int          g_tok_span_cap   = 0;
+/** Arena backing every `g_tok_spans[i].text` for the parse in progress;
+ *  transferred to the resulting ParseOutput when the parse finishes. */
+str_arena   *g_tok_arena      = NULL;
 /** Running upper bound on emitted semantic-token entries (one per source line covered). */
 int          g_num_sem_entries = 0;
 
@@ -100,7 +103,8 @@ static int is_sem_highlighted(int kind) {
  * @param sc    Start column.
  * @param el    End line.
  * @param ec    End column.
- * @param text  Borrowed lexeme; strdup'd into the new TokenSpan, or NULL.
+ * @param text  Borrowed lexeme; copied into the parse's token arena and
+ *              pointed at by the new TokenSpan, or NULL.
  */
 void g_push_tok_span(int kind,
                      uint32_t sl, uint32_t sc,
@@ -117,7 +121,7 @@ void g_push_tok_span(int kind,
         .token_kind = kind,
         .start      = { sl, sc },
         .end        = { el, ec },
-        .text       = text ? strdup(text) : NULL,
+        .text       = text ? arena_strndup(g_tok_arena, text, strlen(text)) : NULL,
         .owner      = NULL,
     };
     if (is_sem_highlighted(kind))
@@ -202,9 +206,9 @@ void parse_output_free(ParseOutput *po) {
     if (!po) return;
     tj_node_free(po->root);
 
-    for (int i = 0; i < po->num_tok_spans; i++)
-        free(po->tok_spans[i].text);
+    /* Token lexemes live in tok_arena, not in individual allocations. */
     free(po->tok_spans);
+    arena_free(po->tok_arena);
 
     for (int i = 0; i < po->num_includes; i++) {
         free(po->includes[i].filename);
@@ -442,6 +446,7 @@ ParseOutput *parse(const char *src) {
     g_tok_spans       = NULL;
     g_num_tok_spans   = 0;
     g_tok_span_cap    = 0;
+    g_tok_arena       = arena_new();
     g_num_sem_entries = 0;
     yycolumn          = 0;
     yylineno          = 1;
@@ -454,12 +459,14 @@ ParseOutput *parse(const char *src) {
 
     po->tok_spans       = g_tok_spans;
     po->num_tok_spans   = g_num_tok_spans;
+    po->tok_arena       = g_tok_arena;
     po->num_sem_entries = g_num_sem_entries;
 
     g_output          = NULL;
     g_tok_spans       = NULL;
     g_num_tok_spans   = 0;
     g_tok_span_cap    = 0;
+    g_tok_arena       = NULL;
     g_num_sem_entries = 0;
 
     /* The grammar appends top-level declarations to root as they reduce,

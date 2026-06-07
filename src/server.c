@@ -256,14 +256,15 @@ static void doc_install_parse(Document *d, ParseOutput *po) {
         uint64_t version = atomic_fetch_add(&d->doc_version, 1);
         fresh = docsnap_new(d->uri, d->text,
                             po->root, po->tok_spans,
-                            po->num_tok_spans, po->num_sem_entries,
-                            version);
-        /* Ownership of the tree and token spans moved into the snapshot;
-         * null them out so parse_output_free only releases what po still
-         * owns (the includes array and the struct shell). */
+                            po->num_tok_spans, po->tok_arena,
+                            po->num_sem_entries, version);
+        /* Ownership of the tree, token spans, and their backing arena moved
+         * into the snapshot; null them out so parse_output_free only releases
+         * what po still owns (the includes array and the struct shell). */
         po->root            = NULL;
         po->tok_spans       = NULL;
         po->num_tok_spans   = 0;
+        po->tok_arena       = NULL;
         po->num_sem_entries = 0;
         parse_output_free(po);
     }

@@ -24,6 +24,8 @@
 #include <stddef.h>
 #include <time.h>
 
+#include "arena.h"
+
 /*
  * Positions / Ranges
  *
@@ -224,9 +226,10 @@ typedef struct Diagnostic Diagnostic;
  *   - TK_LINE_COMMENT, TK_BLOCK_COMMENT
  *
  * `token_kind` holds the raw TK_* / KW_* constant from grammar.tab.h.
- * `text` is heap-allocated (strdup of yytext); NULL only for tokens where
- * the text is never needed.  Caller must not modify it; the owning
- * ParseOutput frees it via parse_output_free().
+ * `text` points into the owning ParseOutput / doc_snapshot's token arena
+ * (a NUL-terminated copy of yytext); NULL only for tokens where the text is
+ * never needed.  Caller must not modify or free it; it is released in bulk
+ * when the arena is freed.
  *
  * `owner` points to the innermost enclosing tj_node in this same
  * document's per-kind tree (whichever tree the enclosing declaration
@@ -281,6 +284,7 @@ typedef struct {
     TokenSpan *tok_spans;       /**< owned flat array of every captured token */
     int        num_tok_spans;   /**< number of valid entries in `tok_spans` */
     int        num_sem_entries; /**< upper bound on semantic-token entries (one per source line covered) */
+    str_arena *tok_arena;       /**< owned backing store for every `tok_spans[i].text` */
 
     IncludeRef *includes;       /**< owned array; one entry per `include` directive */
     int         num_includes;   /**< number of valid entries in `includes` */

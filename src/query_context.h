@@ -95,6 +95,7 @@ typedef struct doc_snapshot {
     TokenSpan   *tok_spans;       /**< owned; .owner points within `root` */
     int          num_tok_spans;   /**< number of valid entries in `tok_spans` */
     int          num_sem_entries; /**< upper bound on semantic-token entries (one per source line covered) */
+    str_arena   *tok_arena;       /**< owned backing store for every `tok_spans[i].text` */
 
     _Atomic(sem_token_data *) sem_memo;  /**< NULL until first request; CAS-published */
 } doc_snapshot;
@@ -109,14 +110,16 @@ typedef struct doc_snapshot {
  * @param root             Owned synthetic root (transfer of ownership).
  * @param tok_spans        Owned token span array (transfer of ownership).
  * @param num_tok_spans    Number of entries in @p tok_spans.
+ * @param tok_arena        Owned arena backing the token texts (transfer of
+ *                         ownership); may be NULL when there are no tokens.
  * @param num_sem_entries  Upper bound on emitted semantic-token entries.
  * @param doc_version      Monotonic parse stamp for this snapshot.
  * @return Newly allocated snapshot with refcount 1.
  */
 doc_snapshot *docsnap_new(const char *uri, const char *text,
                          tj_node *root, TokenSpan *tok_spans,
-                         int num_tok_spans, int num_sem_entries,
-                         uint64_t doc_version);
+                         int num_tok_spans, str_arena *tok_arena,
+                         int num_sem_entries, uint64_t doc_version);
 
 /**
  * Bump @p s's refcount.
