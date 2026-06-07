@@ -323,7 +323,7 @@ static const KwEntry TOPLEVEL_KWS[] = {
     {NULL, NULL}
 };
 
-/** Keywords offered inside a `task { ... }` block. */
+/** Keywords offered inside a task block. */
 static const KwEntry TASK_KWS[] = {
     {"task",          "Sub-task"},
     {"effort",        "Work required, e.g. `effort 5d`"},
@@ -356,7 +356,7 @@ static const KwEntry TASK_KWS[] = {
     {NULL, NULL}
 };
 
-/** Keywords offered inside a `resource { ... }` block. */
+/** Keywords offered inside a resource block. */
 static const KwEntry RESOURCE_KWS[] = {
     {"resource",      "Sub-resource"},
     {"rate",          "Daily cost rate"},
@@ -374,7 +374,7 @@ static const KwEntry RESOURCE_KWS[] = {
     {NULL, NULL}
 };
 
-/** Keywords offered inside a `project { ... }` block. */
+/** Keywords offered inside a project block. */
 static const KwEntry PROJECT_KWS[] = {
     {"scenario",          "Define a scheduling scenario"},
     {"extend",            "Add custom attributes to a built-in type"},
@@ -391,7 +391,7 @@ static const KwEntry PROJECT_KWS[] = {
     {NULL, NULL}
 };
 
-/** Keywords offered inside an `account { ... }` block. */
+/** Keywords offered inside an account block. */
 static const KwEntry ACCOUNT_KWS[] = {
     {"account", "Sub-account"},
     {"credit",  "Credit transaction"},
