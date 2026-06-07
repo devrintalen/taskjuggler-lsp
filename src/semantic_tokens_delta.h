@@ -25,9 +25,12 @@
 #include <yyjson.h>
 
 /**
- * Build an LSP SemanticTokensDelta object
- * `{ "resultId": "...", "edits": [ { start, deleteCount, data: [...] }, ... ] }`
- * describing the minimal patch that transforms @p prev_buf into @p new_buf.
+ * Build an LSP SemanticTokensDelta object describing the minimal patch
+ * that transforms @p prev_buf into @p new_buf.
+ *
+ * @code{.json}
+ * { "resultId": "...", "edits": [ { "start": 0, "deleteCount": 5, "data": [...] } ] }
+ * @endcode
  *
  * Both buffers are flat uint32 arrays in the LSP five-integer-per-token
  * delta encoding (multiple of 5).  The diff treats each five-tuple as a
