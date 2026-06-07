@@ -21,6 +21,7 @@
 #include "code_lens.h"
 #include "document_symbol.h"
 #include "grammar.tab.h"
+#include "rpc.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -369,4 +370,18 @@ yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
     }
 
     return arr;
+}
+
+yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
+                                 yyjson_val *params, const query_doc *d) {
+    (void)params;
+    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    tj_node *const *top; int n;
+    doc_symbol_pool(d, &top, &n);
+    yyjson_mut_val *arr = build_code_lens_json(doc,
+                                               d->tok_spans,
+                                               d->num_tok_spans,
+                                               top, n);
+    return make_response(doc, id, arr);
 }

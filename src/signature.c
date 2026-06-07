@@ -20,6 +20,7 @@
 
 #include "signature.h"
 #include "hover.h"
+#include "rpc.h"
 
 #include <stdlib.h>
 
@@ -348,4 +349,26 @@ yyjson_mut_val *build_signature_help_json(yyjson_mut_doc *doc, const char *kw,
 #undef SIG
 
     return NULL;
+}
+
+yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id,
+                                      yyjson_val *params, const query_doc *d) {
+    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
+
+    yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
+    if (!tdp) tdp = params;
+
+    yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
+    if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
+    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    LspPos pos = json_to_pos(pos_obj);
+    ActiveContext ac = active_context(d->tok_spans,
+                                      d->num_tok_spans, pos);
+    if (!ac.keyword) return make_response(doc, id, yyjson_mut_null(doc));
+
+    yyjson_mut_val *sig = build_signature_help_json(doc, ac.keyword, ac.arg_count);
+    free(ac.keyword);
+    if (!sig) return make_response(doc, id, yyjson_mut_null(doc));
+    return make_response(doc, id, sig);
 }

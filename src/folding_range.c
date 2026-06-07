@@ -21,6 +21,7 @@
 #include "folding_range.h"
 #include "document_symbol.h"
 #include "grammar.tab.h"
+#include "rpc.h"
 
 /** Maximum nesting depth for bracket matching. */
 #define MAX_BRACKET_DEPTH 256
@@ -120,4 +121,18 @@ yyjson_mut_val *build_folding_ranges_json(yyjson_mut_doc *doc,
     emit_symbol_ranges(doc, arr, symbols, num_symbols);
     emit_token_ranges(doc, arr, spans, num_spans);
     return arr;
+}
+
+yyjson_mut_val *handle_folding_range(yyjson_mut_doc *doc, yyjson_val *id,
+                                     yyjson_val *params, const query_doc *d) {
+    (void)params;
+    if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    tj_node *const *top; int n;
+    doc_symbol_pool(d, &top, &n);
+    yyjson_mut_val *arr = build_folding_ranges_json(doc,
+                                                    d->tok_spans,
+                                                    d->num_tok_spans,
+                                                    top, n);
+    return make_response(doc, id, arr);
 }

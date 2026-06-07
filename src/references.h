@@ -21,6 +21,7 @@
 #pragma once
 
 #include "project_tree.h"
+#include "query_context.h"   /* query_context, query_doc */
 #include <yyjson.h>
 
 /**
@@ -40,3 +41,18 @@
 yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
                                        ProjectNode *project_root,
                                        const ProjectNode *wanted);
+
+/**
+ * Handle "textDocument/references": find all depends/precedes references to
+ * the task declaration under the cursor across the project tree.
+ *
+ * @param doc     Mutable document for building the response.
+ * @param id      Request id from the incoming JSON-RPC message.
+ * @param params  Request params containing a "position" object.
+ * @param qc      Query context with the assembled project tree.
+ * @param d       Primary query document; may be NULL.
+ * @return JSON-RPC response containing the locations array.
+ */
+yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
+                                  yyjson_val *params, const query_context *qc,
+                                  const query_doc *d);

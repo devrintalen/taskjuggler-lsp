@@ -19,7 +19,9 @@
 /** @file */
 
 #include "hover.h"
-#include "document_symbol.h"
+#include "document_symbol.h"   /* range_json */
+#include "dependency.h"
+#include "rpc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -517,4 +519,69 @@ const char *keyword_docs(const char *kw) {
         "**Syntax:** `scenario <id> \"<name>\" { \xe2\x80\xa6 }`";
 
     return NULL;
+}
+
+yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
+                             yyjson_val *params, const query_context *qc,
+                             const query_doc *d) {
+    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
+
+    yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");
+    if (!tdp) tdp = params;
+
+    yyjson_val *pos_obj = yyjson_obj_get(tdp, "position");
+    if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
+    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    LspPos pos = json_to_pos(pos_obj);
+
+    /* A cursor on a dependency reference resolves to its target task; show
+     * the target's qualified id and name.  Falls through to keyword docs
+     * when the cursor is not on a dependency or the reference is unresolved. */
+    tj_node          *owner = NULL;
+    const Dependency *dep   = NULL;
+    if (qc->project_root &&
+        dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
+                             &owner, &dep)) {
+        ProjectNode *merged_owner =
+            project_node_for_doc_task(qc->project_root, d->task_prefix, owner);
+        ProjectNode *target = NULL;
+        if (merged_owner) {
+            int ordinal = (int)(dep - owner->dependencies);
+            if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
+                target = project_dep_resolve(merged_owner, ordinal,
+                                             qc->project_root);
+        }
+        if (target) {
+            char *value = project_node_hover_markdown(target);
+            yyjson_mut_val *contents = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_str(doc, contents, "kind", "markdown");
+            yyjson_mut_obj_add_strcpy(doc, contents, "value", value);
+            free(value);
+
+            yyjson_mut_val *hover = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_val(doc, hover, "contents", contents);
+            yyjson_mut_obj_add_val(doc, hover, "range",
+                                   range_json(doc, dep->source_range));
+            return make_response(doc, id, hover);
+        }
+    }
+
+    ActiveKeyword ak = active_keyword_at(d->tok_spans,
+                                         d->num_tok_spans, pos);
+    if (!ak.keyword) return make_response(doc, id, yyjson_mut_null(doc));
+
+    const char *doc_text = keyword_docs(ak.keyword);
+    free(ak.keyword);
+    if (!doc_text) return make_response(doc, id, yyjson_mut_null(doc));
+
+    yyjson_mut_val *contents = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, contents, "kind",  "markdown");
+    yyjson_mut_obj_add_str(doc, contents, "value", doc_text);
+
+    yyjson_mut_val *hover = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, hover, "contents", contents);
+    yyjson_mut_obj_add_val(doc, hover, "range",    range_json(doc, ak.range));
+
+    return make_response(doc, id, hover);
 }

@@ -20,6 +20,8 @@
 
 #include "references.h"
 #include "document_symbol.h"  /* range_json */
+#include "dependency.h"       /* task_decl_at_cursor */
+#include "rpc.h"
 
 /**
  * Recursively collect incoming references to @p wanted within a Project
@@ -70,4 +72,24 @@ yyjson_mut_val *build_references_json(yyjson_mut_doc *doc,
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     collect_refs_in_subtree(doc, arr, project_root, wanted, project_root);
     return arr;
+}
+
+yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
+                                  yyjson_val *params, const query_context *qc,
+                                  const query_doc *d) {
+    if (!params) return make_response(doc, id, yyjson_mut_null(doc));
+    yyjson_val *pos_obj = yyjson_obj_get(params, "position");
+    if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    LspPos pos = json_to_pos(pos_obj);
+    if (!qc->project_root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    tj_node *task = task_decl_at_cursor(d->tok_spans, d->num_tok_spans, pos);
+    ProjectNode *wanted =
+        project_node_for_doc_task(qc->project_root, d->task_prefix, task);
+    yyjson_mut_val *result = build_references_json(doc,
+                                                   qc->project_root,
+                                                   wanted);
+    if (!result) return make_response(doc, id, yyjson_mut_null(doc));
+    return make_response(doc, id, result);
 }

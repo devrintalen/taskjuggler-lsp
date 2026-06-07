@@ -27,6 +27,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/** Maximum number of simultaneously tracked documents (editor-managed and
+ *  disk-only combined).  Bounds both the live document store in server.c and
+ *  the per-snapshot ws_doc / query_doc arrays built from it.  Sized to
+ *  comfortably exceed real-world TaskJuggler workspaces. */
+#define MAX_DOCS 64
+
 /*
  * Immutable, refcounted workspace snapshots.
  *
@@ -271,3 +277,14 @@ const query_doc *query_context_primary(const query_context *qc);
  * @param qc  Context to free.
  */
 void query_context_free(query_context *qc);
+
+/**
+ * Retrieve a document's top-level symbol pool: the children of its synthetic
+ * root node in source order, or an empty pool when @p d has no parse.  The
+ * pointers are borrowed from @p d — never freed by the caller.
+ *
+ * @param d        Query document to inspect; may be NULL.
+ * @param out_top  Set to the array of top-level tj_node pointers, or NULL.
+ * @param out_n    Set to the number of entries in @p *out_top.
+ */
+void doc_symbol_pool(const query_doc *d, tj_node *const **out_top, int *out_n);

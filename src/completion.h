@@ -22,6 +22,7 @@
 
 #include "parser.h"
 #include "grammar.tab.h"
+#include "query_context.h"   /* query_context, query_doc */
 #include <yyjson.h>
 
 /**
@@ -52,3 +53,19 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
                                         const int *extra_counts,
                                         int num_extra,
                                         const char *text);
+
+/**
+ * Handle "textDocument/completion": compute keyword and task-id completion
+ * items for the cursor position, drawing on the primary document's token
+ * spans and all same-project sibling documents.
+ *
+ * @param doc     Mutable document for building the response.
+ * @param id      Request id from the incoming JSON-RPC message.
+ * @param params  Request params containing a "position" object.
+ * @param qc      Query context; sibling documents supply cross-file ids.
+ * @param d       Primary query document; may be NULL.
+ * @return JSON-RPC response containing the CompletionList.
+ */
+yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
+                                  yyjson_val *params, const query_context *qc,
+                                  const query_doc *d);

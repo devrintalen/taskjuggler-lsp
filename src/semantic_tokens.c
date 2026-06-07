@@ -20,8 +20,11 @@
 
 #include "semantic_tokens.h"
 #include "grammar.tab.h"
+#include "rpc.h"
 
+#include <inttypes.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -324,4 +327,24 @@ yyjson_mut_val *build_semantic_tokens_json_from_buf(yyjson_mut_doc *doc,
         yyjson_mut_obj_add_strcpy(doc, result, "resultId", result_id);
     yyjson_mut_obj_add_val(doc, result, "data", raw_data);
     return result;
+}
+
+void sem_tokens_result_id(doc_snapshot *s, char *buf, size_t buflen) {
+    snprintf(buf, buflen, "%" PRIu64, s->doc_version);
+}
+
+yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
+                                            yyjson_val *params, const query_doc *d) {
+    (void)params;
+    if (!d || !d->snap || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
+
+    const uint32_t *buf = NULL;
+    size_t          count = 0;
+    docsnap_sem_tokens(d->snap, &buf, &count);
+
+    char result_id[32];
+    sem_tokens_result_id(d->snap, result_id, sizeof(result_id));
+    yyjson_mut_val *result =
+        build_semantic_tokens_json_from_buf(doc, buf, count, result_id);
+    return make_response(doc, id, result);
 }

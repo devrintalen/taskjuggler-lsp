@@ -21,6 +21,7 @@
 #pragma once
 
 #include "parser.h"
+#include "query_context.h"   /* query_doc */
 #include <yyjson.h>
 
 /**
@@ -56,3 +57,16 @@ yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
                                      int num_spans,
                                      tj_node *const *symbols,
                                      int num_symbols);
+
+/**
+ * Handle "textDocument/codeLens": build code-lens annotations (e.g.
+ * dependency counts) for the primary document.
+ *
+ * @param doc     Mutable document for building the response.
+ * @param id      Request id from the incoming JSON-RPC message.
+ * @param params  Request params (unused).
+ * @param d       Primary query document; may be NULL.
+ * @return JSON-RPC response containing the code-lens array.
+ */
+yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
+                                 yyjson_val *params, const query_doc *d);

@@ -188,3 +188,13 @@ void query_context_free(query_context *qc) {
     ws_release(qc->ws);
     free(qc);
 }
+
+void doc_symbol_pool(const query_doc *d, tj_node *const **out_top, int *out_n) {
+    if (d && d->root) {
+        *out_top = (tj_node *const *)d->root->children;
+        *out_n   = d->root->num_children;
+    } else {
+        *out_top = NULL;
+        *out_n   = 0;
+    }
+}

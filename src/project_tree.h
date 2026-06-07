@@ -174,3 +174,63 @@ void project_node_free_children(ProjectNode *root);
  */
 ProjectNode *project_dep_resolve(ProjectNode *owner_task, int dep_index,
                                  ProjectNode *project_root);
+
+/* ── Tree navigation / id-namespace classification ───────────────────────── */
+
+/**
+ * Coarse kind bucket for a node, collapsing the keyword set into the four
+ * id namespaces TaskJuggler keeps separate.  KW_PROJECT maps to
+ * NODE_KIND_OTHER but is never inserted into a project tree (it stays
+ * document-local).
+ */
+typedef enum {
+    NODE_KIND_TASK,     /**< KW_TASK */
+    NODE_KIND_ACCOUNT,  /**< KW_ACCOUNT */
+    NODE_KIND_RESOURCE, /**< KW_RESOURCE / KW_SHIFT */
+    NODE_KIND_REPORT,   /**< report-family keywords (KW_REPORT, KW_NAVIGATOR, …) */
+    NODE_KIND_OTHER     /**< anything else; never inserted into a project tree */
+} NodeKind;
+
+/**
+ * Map a Bison keyword constant to the coarse NodeKind bucket that governs
+ * its id namespace in the project tree.
+ *
+ * @param keyword  A KW_* keyword constant from grammar.tab.h.
+ * @return The NodeKind bucket for @p keyword.
+ */
+NodeKind node_kind_of(int keyword);
+
+/**
+ * Walk @p start's children along the dot-separated @p path and return the
+ * matched node, considering only children whose kind matches @p kind.
+ * Returns @p start when @p path is NULL or empty.  The kind filter keeps
+ * same-named declarations in different namespaces from colliding now that
+ * all kinds share one root.
+ *
+ * @param start  Root node to begin the walk from; NULL returns NULL.
+ * @param path   Dot-separated segment string (e.g. "proj.sub"); may be NULL.
+ * @param kind   NodeKind filter applied to each child during the walk.
+ * @return The deepest matching node, or NULL when the path fails to resolve.
+ */
+ProjectNode *find_node_by_dotted_path(ProjectNode *start, const char *path,
+                                      NodeKind kind);
+
+/**
+ * Map a per-document task tj_node to its clone in an assembled Project tree.
+ * Cursor lookups (dependency_at_cursor / task_decl_at_cursor) return
+ * per-document nodes, but cross-file resolution lives in the ProjectNode
+ * tree, so callers bridge through here first.
+ *
+ * The per-document task's unprefixed dotted id (its in-file ancestry) is
+ * appended to @p task_prefix's target inside the Project tree.
+ *
+ * @param project_root  The assembled project's synthetic root; NULL returns NULL.
+ * @param task_prefix   The document's task-namespace prefix; may be NULL.
+ * @param per_doc_task  Per-document tj_node representing the task declaration.
+ * @return Matching ProjectNode in the merged tree, or NULL when the project
+ *         tree is absent, the prefix target is missing, or the path does not
+ *         resolve.
+ */
+ProjectNode *project_node_for_doc_task(ProjectNode *project_root,
+                                       const char *task_prefix,
+                                       const tj_node *per_doc_task);

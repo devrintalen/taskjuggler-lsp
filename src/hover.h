@@ -23,6 +23,8 @@
 #include "parser.h"
 #include "project_tree.h"
 #include "grammar.tab.h"
+#include "query_context.h"   /* query_context, query_doc */
+#include <yyjson.h>
 
 /**
  * Return a copy of the TokenSpan that spans @p pos, or a token with kind
@@ -128,3 +130,19 @@ typedef struct {
  * @return The active keyword, or `{NULL, {0}}` when none exists.
  */
 ActiveKeyword active_keyword_at(const TokenSpan *tokens, int num_tokens, LspPos cursor);
+
+/**
+ * Handle "textDocument/hover": if the cursor is on a dependency reference,
+ * resolve its target and return its qualified id; otherwise return keyword
+ * documentation for the active keyword under the cursor.
+ *
+ * @param doc     Mutable document for building the response.
+ * @param id      Request id from the incoming JSON-RPC message.
+ * @param params  Request params containing a "position" object.
+ * @param qc      Query context with the assembled project tree.
+ * @param d       Primary query document; may be NULL.
+ * @return JSON-RPC response with a hover object, or a null result.
+ */
+yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
+                             yyjson_val *params, const query_context *qc,
+                             const query_doc *d);
