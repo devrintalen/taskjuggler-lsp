@@ -61,6 +61,13 @@ extern int             yylineno;
  */
 extern void reset_pending_include_state(void);
 
+/**
+ * Reset the yylex statement-terminator (TK_EOL) wrapper state.  Defined in
+ * lexer.l; called at the start of every parse() so a previous run's lookahead
+ * buffer or "previous token" flag cannot bleed into the next parse.
+ */
+extern void reset_eol_state(void);
+
 /** Currently-being-built ParseOutput; lexer/grammar populate this directly. */
 ParseOutput *g_output         = NULL;
 /** Backing storage for the token-span array under construction. */
@@ -439,6 +446,7 @@ ParseOutput *parse(const char *src) {
     yycolumn          = 0;
     yylineno          = 1;
     reset_pending_include_state();
+    reset_eol_state();
 
     YY_BUFFER_STATE buf = yy_scan_string(src);
     yyparse();

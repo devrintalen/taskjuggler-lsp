@@ -23,6 +23,30 @@
 #include <string.h>
 #include <stdio.h>
 
+/* ── Soft statement terminator (TK_EOL) ──────────────────────────────────── *
+ *
+ * TaskJuggler statements have no explicit terminator, which forced the
+ * grammar's open-ended `gen_expr` rule to guess where a statement ends and
+ * produced thousands of shift/reduce conflicts.  We give the grammar a soft
+ * terminator by post-processing the raw token stream: the flex scanner is
+ * generated as raw_yylex() (via YY_DECL) and the real yylex() (defined at the
+ * bottom of this file) wraps it, inserting a synthetic TK_EOL between a token
+ * that can END a statement and a newline-separated token that can BEGIN one
+ * (and before `}` / EOF).  A line break in the middle of an expression — where
+ * the next token is an operator that cannot begin a statement, e.g. a continued
+ * `!= ...` comparison — inserts nothing, so multi-line expressions and
+ * comma-continued lists are preserved.
+ *
+ * The same wrapper also synthesises the closing `}` of any body left open at
+ * EOF, so a file being edited (with unclosed braces) still reduces and shows
+ * its partial declarations in the outline.                                    */
+#define YY_DECL int raw_yylex(void)
+int  yylex(void);
+void reset_eol_state(void);
+
+/* Set by the INITIAL newline rule; sampled and cleared by the yylex wrapper. */
+int g_pending_newline = 0;
+
 /* ── Column tracking ─────────────────────────────────────────────────────── *
  *
  * yylineno (managed by %option yylineno) counts newlines and starts at 1.
@@ -162,7 +186,7 @@ static int emit_kw_mfrag_text(int code, const char *text) {
 %%
 
 [ \t\r\f\v]+    { /* skip whitespace */ }
-\n              { yycolumn = 0; }
+\n              { yycolumn = 0; g_pending_newline = 1; }
 
 #[^\n]*         { store_semantic_token(TK_LINE_COMMENT); /* not returned to parser */ }
 \/\/[^\n]*      { store_semantic_token(TK_LINE_COMMENT); /* not returned to parser */ }
@@ -454,3 +478,132 @@ static int emit_kw_mfrag_text(int code, const char *text) {
 .       { return emit_plain(TK_ERROR); }
 
 %%
+
+/* ── yylex wrapper: synthesise TK_EOL statement terminators ──────────────── *
+ *
+ * See the note at the top of this file.  raw_yylex() is the flex scanner; this
+ * wrapper inserts a TK_EOL ahead of a token when the previous token could end
+ * a statement and the current one opens a new one (newline-separated), or when
+ * the current token closes a body (`}`) or the input ends.  A single-slot
+ * lookahead holds the real token back while the parser consumes the TK_EOL.   */
+
+/* A token that can be the LAST token of a statement.  Everything is allowed
+ * except punctuation that clearly continues onto more input. */
+static int tok_can_end_stmt(int k) {
+    switch (k) {
+    case TK_COMMA: case TK_DOT:   case TK_COLON:
+    case TK_PLUS:  case TK_MINUS: case TK_BANG:
+    case TK_LBRACE: case TK_LBRACKET: case TK_DOLLAR:
+    case TK_EOL:   case 0:
+        return 0;
+    default:
+        return 1;
+    }
+}
+
+/* A token that can be the FIRST token of a statement: a keyword, an
+ * identifier, or a macro call (`${`).  Literals, operators and closing
+ * punctuation never start one, so a line break before them is a
+ * continuation, not a boundary. */
+static int tok_can_begin_stmt(int k) {
+    switch (k) {
+    case TK_COMMA: case TK_DOT:   case TK_COLON:
+    case TK_PLUS:  case TK_MINUS: case TK_BANG:
+    case TK_LBRACE: case TK_RBRACE:
+    case TK_LBRACKET: case TK_RBRACKET:
+    case TK_PERCENT:
+    case TK_INTEGER: case TK_FLOAT: case TK_DATE: case TK_DURATION:
+    case TK_STR:   case TK_MULTI_LINE_STR:
+    case TK_ERROR: case TK_EOL: case 0:
+        return 0;
+    default:
+        return 1;   /* all KW_* keywords, plus TK_IDENT and TK_DOLLAR */
+    }
+}
+
+static int   g_prev_can_end  = 0;   /* previous real token could end a stmt */
+static int   g_prev_kind      = 0;   /* previous real token kind (for `${`)  */
+static int   g_have_buffered  = 0;   /* a real token is held behind a TK_EOL */
+static int   g_buffered_kind  = 0;
+static Token g_buffered_val;
+
+/* Brace-nesting stack: each open `{` records whether it begins a `${…}` macro
+ * invocation (true) or a normal statement body (false).  A `}` is a statement
+ * terminator only when it closes a body — never when it closes a macro call,
+ * whose `}` is part of the invocation syntax rather than a statement end. */
+#define EOL_BRACE_MAX 256
+static int   g_brace_is_macro[EOL_BRACE_MAX];
+static int   g_brace_depth     = 0;
+
+void reset_eol_state(void) {
+    g_pending_newline = 0;
+    g_prev_can_end    = 0;
+    g_prev_kind       = 0;
+    g_have_buffered   = 0;
+    g_buffered_kind   = 0;
+    g_buffered_val    = (Token){0};
+    g_brace_depth     = 0;
+}
+
+int yylex(void) {
+    int kind;
+    int newline_before;
+
+    if (g_have_buffered) {
+        kind            = g_buffered_kind;
+        yylval.tok      = g_buffered_val;
+        g_have_buffered = 0;
+        newline_before  = 0;   /* the break was already consumed by the TK_EOL */
+    } else {
+        g_pending_newline = 0;
+        kind              = raw_yylex();
+        newline_before    = g_pending_newline;
+
+        /* Mid-edit input often has unclosed bodies (`task t {` with no `}`
+         * yet).  Rather than rely on a grammar error production — which would
+         * collide with `item: error` and produce reduce/reduce conflicts — we
+         * synthesise the missing `}` for each still-open body at EOF so the
+         * partial declarations still reduce and appear in the outline.  flex
+         * keeps returning 0 at EOF, so each call closes one more level until
+         * the brace stack is empty, then the real EOF is delivered. */
+        if (kind == 0 && g_brace_depth > 0) {
+            uint32_t el = (uint32_t)(yylineno - 1);
+            uint32_t ec = (uint32_t)yycolumn;
+            kind       = TK_RBRACE;
+            yylval.tok = (Token){ TK_RBRACE, {el, ec}, {el, ec}, strdup("}") };
+        }
+    }
+
+    /* A `}` terminates a statement only when it closes a body, not a `${…}`.
+     * Nesting beyond the stack is assumed to be a body (the common case). */
+    int macro_close = (kind == TK_RBRACE) &&
+                      g_brace_depth > 0 && g_brace_depth <= EOL_BRACE_MAX &&
+                      g_brace_is_macro[g_brace_depth - 1];
+    int body_close  = (kind == TK_RBRACE) && !macro_close;
+
+    /* Emit a TK_EOL terminator ahead of this token? */
+    if (g_prev_can_end &&
+        ((newline_before && tok_can_begin_stmt(kind)) ||  /* statement boundary */
+         body_close ||                                    /* end of a body      */
+         kind == 0)) {                                    /* end of input       */
+        g_buffered_kind = kind;
+        g_buffered_val  = yylval.tok;
+        g_have_buffered = 1;
+        g_prev_can_end  = 0;            /* the TK_EOL is now the previous token */
+        yylval.tok = (Token){ TK_EOL, {0,0}, {0,0}, NULL };
+        return TK_EOL;
+    }
+
+    /* Track brace nesting as tokens are actually handed to the parser. */
+    if (kind == TK_LBRACE) {
+        if (g_brace_depth < EOL_BRACE_MAX)
+            g_brace_is_macro[g_brace_depth] = (g_prev_kind == TK_DOLLAR);
+        g_brace_depth++;
+    } else if (kind == TK_RBRACE && g_brace_depth > 0) {
+        g_brace_depth--;
+    }
+
+    g_prev_kind    = kind;
+    g_prev_can_end = tok_can_end_stmt(kind);
+    return kind;
+}
