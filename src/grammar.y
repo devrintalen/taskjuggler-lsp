@@ -258,6 +258,59 @@ static void discard_body(BodyResult *b) {
 %destructor { if ($$.has_sym) tj_node_free($$.sym); }   <item>
 %destructor { free($$); }                               <text>
 
+/* ── Remaining conflicts ─────────────────────────────────────────────────── *
+ *
+ * Conflict history (all resolved by grammar structure, not %expect/precedence):
+ *   ~5200  open-ended `gen_expr` guessing where an expression statement ended
+ *          → removed by the synthetic TK_EOL terminator (see lexer.l).
+ *      7   nullable `opt_id opt_name` declaration headers
+ *          → removed by requiring the name (matching TaskJuggler, whose headers
+ *            are all `_keyword !optionalID $STRING`).
+ *      1   `shift` declaration vs `shift` attribute
+ *          → removed by lifting KW_SHIFT out of sym_kw (see symbol_decl).
+ *    204   reduce/reduce in `opt_body` error recovery
+ *          → removed by synthesising missing `}` at EOF (see lexer.l).
+ *
+ * TWO shift/reduce conflicts remain (no reduce/reduce), both in the unknown-
+ * identifier fallback `item: TK_IDENT opt_args opt_body`: at `TK_IDENT opt_args •`
+ * the parser may either extend opt_args with another argument token or reduce
+ * the statement.  bison shifts (greedy), which is the intended behaviour — the
+ * fallback absorbs its trailing arguments.  These are deliberately left as
+ * plain warnings: terminating the rule with TK_EOL would resolve them but
+ * reject same-line attributes such as `Phone "x100" rate 350`, which is valid
+ * under TaskJuggler's terminator-free grammar.
+ *
+ * TODO(grammar): context-sensitive refactor (deferred — large, only do this if
+ * we want "attribute not valid in this scope" diagnostics as a feature).
+ *
+ *   Why: TaskJuggler's parser is context-sensitive — each property body has its
+ *   own attribute set (taskAttributes, resourceAttributes, projectBodyAttributes
+ *   …), and keywords are matched per scope.  Ours is intentionally context-free:
+ *   one universal `item` rule is allowed in every body, with semantic scope
+ *   checked downstream (see the `item` rule header).  That single decision is
+ *   the root of the last two conflicts AND of the keyword-as-id workarounds
+ *   (e.g. `opt_id: … | KW_START`, because the flex lexer emits KW_START where
+ *   TaskJuggler's scanner would emit a plain ID matched contextually).
+ *
+ *   What it entails:
+ *     - Replace the single `opt_body` / `body_items` with per-scope body rules
+ *       (project_body, task_body, resource_body, account_body, shift_body,
+ *       report_body, column_body, …), each enumerating exactly the attributes
+ *       and nested declarations valid there, mirroring TaskJuggler's *Attributes
+ *       rules in lib/taskjuggler/TjpSyntaxRules.rb.
+ *     - Split the universal `item` into scope-specific item sets; the unknown-
+ *       identifier fallback becomes a per-scope extension point (or is dropped
+ *       where an exhaustive attribute set exists), eliminating the 2 conflicts.
+ *     - Optionally make the scanner context-aware (keywords as IDs) to retire
+ *       the KW_* opt_id / dep_path_seg workarounds.
+ *
+ *   Benefits: resolves the last 2 conflicts; enables precise "X is not a valid
+ *     attribute of a Y" diagnostics; closer fidelity to TaskJuggler.
+ *   Costs: large (dozens of body/attribute rules + actions), reverses the
+ *     current leniency (would reject attributes used in the "wrong" body, which
+ *     today the LSP tolerates and still extracts symbols from), and churns most
+ *     golden snapshots.  Treat as a feature project, not conflict cleanup. */
+
 /* ── Token declarations ──────────────────────────────────────────────────── */
 
 /*
@@ -377,6 +430,16 @@ static void discard_body(BodyResult *b) {
 %token <tok> TK_ERROR
 %token       TK_LINE_COMMENT TK_BLOCK_COMMENT  /* stored in token array only; never returned to parser */
 
+/*
+ * TK_EOL — synthetic statement terminator inserted by the yylex wrapper in
+ * lexer.l (never produced by a flex rule directly).  It appears only at a
+ * genuine statement boundary: it terminates the open-ended `gen_expr` rules
+ * (removing the shift/reduce ambiguity over where an expression statement
+ * ends) and is otherwise absorbed between statements by `items` / `body_items`
+ * and inside macro bodies.  It carries no semantic value.
+ */
+%token       TK_EOL
+
 /* ── Non-terminal types ──────────────────────────────────────────────────── */
 
 %type <sym>  symbol_decl report_decl navigator_decl scenario_decl
@@ -407,6 +470,7 @@ items
             if ($2.has_sym)
                 route_top_level($2.sym);
         }
+    | items TK_EOL   /* absorb the terminator that follows a non-gen_expr item */
     ;
 
 /* ── Universal item rule ─────────────────────────────────────────────────── *
@@ -910,18 +974,18 @@ item
     /* ── Leave management ── */
     /* Syntax: leaveallowances annual <date> [-] <value> (min | h | d | w | m | y)
      *         [, annual <date> [-] <value> ...]                             */
-    | KW_LEAVEALLOWANCES gen_expr
+    | KW_LEAVEALLOWANCES gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: leaves (project | annual | special | sick | unpaid | holiday |
      *          unemployed) [<name>] <interval3> [, ...]                     */
-    | KW_LEAVES gen_expr
+    | KW_LEAVES gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: vacation [<name>] <interval3> [, <interval3>...]              */
-    | KW_VACATION gen_expr
+    | KW_VACATION gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: workinghours <weekday> [-<end weekday>] [, ...] (off | TIME-TIME ...)
      * TODO: write precise rule; using gen_expr as approximation             */
-    | KW_WORKINGHOURS gen_expr
+    | KW_WORKINGHOURS gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
 
     /* ── Report layout ── */
@@ -938,76 +1002,76 @@ item
      * (e.g. plan.effort, delayed.end, ~isleaf()).
      * See NOTE in item rule about greedy consumption.                       */
     /* Syntax: hidetask (<operand> [...] | @ (all | none))                   */
-    | KW_HIDETASK gen_expr
+    | KW_HIDETASK gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: hideresource (<operand> [...] | @ (all | none))               */
-    | KW_HIDERESOURCE gen_expr
+    | KW_HIDERESOURCE gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: hideaccount (<operand> [...] | @ (all | none))                */
-    | KW_HIDEACCOUNT gen_expr
+    | KW_HIDEACCOUNT gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: hidereport (<operand> [...] | @ (all | none))                 */
-    | KW_HIDEREPORT gen_expr
+    | KW_HIDEREPORT gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: hidejournalentry <logicalflagexpression>                      */
-    | KW_HIDEJOURNALENTRY gen_expr
+    | KW_HIDEJOURNALENTRY gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: rolluptask (<operand> [...] | @ (all | none))                 */
-    | KW_ROLLUPTASK gen_expr
+    | KW_ROLLUPTASK gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: rollupresource (<operand> [...] | @ (all | none))             */
-    | KW_ROLLUPRESOURCE gen_expr
+    | KW_ROLLUPRESOURCE gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: rollupaccount (<operand> [...] | @ (all | none))              */
-    | KW_ROLLUPACCOUNT gen_expr
+    | KW_ROLLUPACCOUNT gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: warn (<operand> [...])                                         */
-    | KW_WARN gen_expr
+    | KW_WARN gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: fail (<operand> [...])                                         */
-    | KW_FAIL gen_expr
+    | KW_FAIL gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: cellcolor (<operand> [...])  (column attribute)               */
-    | KW_CELLCOLOR gen_expr
+    | KW_CELLCOLOR gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: celltext (<operand> [...])   (column attribute)               */
-    | KW_CELLTEXT gen_expr
+    | KW_CELLTEXT gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: tooltip (<operand> [...])    (column attribute)               */
-    | KW_TOOLTIP gen_expr
+    | KW_TOOLTIP gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: fontcolor (<operand> [...])  (column attribute)               */
-    | KW_FONTCOLOR gen_expr
+    | KW_FONTCOLOR gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: halign (<operand> [...])     (column attribute)               */
-    | KW_HALIGN gen_expr
+    | KW_HALIGN gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: sorttasks (<tree> | <criteria>) [, <criteria>...]             */
-    | KW_SORTTASKS gen_expr
+    | KW_SORTTASKS gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: sortresources (<tree> | <criteria>) [, <criteria>...]         */
-    | KW_SORTRESOURCES gen_expr
+    | KW_SORTRESOURCES gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: sortaccounts (<tree> | <criteria>) [, <criteria>...]          */
-    | KW_SORTACCOUNTS gen_expr
+    | KW_SORTACCOUNTS gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: sortjournalentries <ABSOLUTE_ID> [, <ABSOLUTE_ID>...]         */
-    | KW_SORTJOURNALENTRIES gen_expr
+    | KW_SORTJOURNALENTRIES gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: journalattributes (* | - | (alert | author | date | ...) [...]) */
-    | KW_JOURNALATTRIBUTES gen_expr
+    | KW_JOURNALATTRIBUTES gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: taskattributes (* | - | (booking | complete | ...) [...])     */
-    | KW_TASKATTRIBUTES gen_expr
+    | KW_TASKATTRIBUTES gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: resourceattributes (* | - | (booking | leaves | ...) [...])   */
-    | KW_RESOURCEATTRIBUTES gen_expr
+    | KW_RESOURCEATTRIBUTES gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: definitions (* | - | (flags | project | ...) [...])           */
-    | KW_DEFINITIONS gen_expr
+    | KW_DEFINITIONS gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: opennodes ((<ID> | <ABSOLUTE_ID>) [: ...] [, ...])            */
-    | KW_OPENNODES gen_expr
+    | KW_OPENNODES gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
 
     /* ── Status / timesheet body attributes ── */
@@ -1039,7 +1103,7 @@ item
           $$.has_sym = 0; }
     /* Syntax: alertlevels <ID> <color name> <color> [, <ID> <color name> <color>...]
      * TODO: write precise rule; using gen_expr as approximation             */
-    | KW_ALERTLEVELS gen_expr
+    | KW_ALERTLEVELS gen_expr TK_EOL
         { token_free(&$1); $$.has_sym = 0; }
 
     /* ── Extend sub-attributes ── */
@@ -1075,26 +1139,26 @@ item
      * operands (never as standalone statements).  They are included here as
      * item alternatives purely as error-recovery stubs; in normal parsing
      * they will be consumed by gen_expr in their enclosing statement.       */
-    | KW_ISACTIVE opt_args    { $$.has_sym = 0; }
-    | KW_ISCHILDOF opt_args   { $$.has_sym = 0; }
-    | KW_ISDEPENDENCYOF opt_args { $$.has_sym = 0; }
-    | KW_ISDUTYOF opt_args    { $$.has_sym = 0; }
-    | KW_ISFEATUREOF opt_args { $$.has_sym = 0; }
-    | KW_ISLEAF opt_args      { $$.has_sym = 0; }
-    | KW_ISMILESTONE opt_args { $$.has_sym = 0; }
-    | KW_ISONGOING opt_args   { $$.has_sym = 0; }
-    | KW_ISRESOURCE opt_args  { $$.has_sym = 0; }
-    | KW_ISRESPONSIBILITYOF opt_args { $$.has_sym = 0; }
-    | KW_ISTASK opt_args      { $$.has_sym = 0; }
-    | KW_ISVALID opt_args     { $$.has_sym = 0; }
-    | KW_HASALERT opt_args    { $$.has_sym = 0; }
-    | KW_TREELEVEL opt_args   { $$.has_sym = 0; }
+    | KW_ISACTIVE opt_args TK_EOL    { $$.has_sym = 0; }
+    | KW_ISCHILDOF opt_args TK_EOL   { $$.has_sym = 0; }
+    | KW_ISDEPENDENCYOF opt_args TK_EOL { $$.has_sym = 0; }
+    | KW_ISDUTYOF opt_args TK_EOL    { $$.has_sym = 0; }
+    | KW_ISFEATUREOF opt_args TK_EOL { $$.has_sym = 0; }
+    | KW_ISLEAF opt_args TK_EOL      { $$.has_sym = 0; }
+    | KW_ISMILESTONE opt_args TK_EOL { $$.has_sym = 0; }
+    | KW_ISONGOING opt_args TK_EOL   { $$.has_sym = 0; }
+    | KW_ISRESOURCE opt_args TK_EOL  { $$.has_sym = 0; }
+    | KW_ISRESPONSIBILITYOF opt_args TK_EOL { $$.has_sym = 0; }
+    | KW_ISTASK opt_args TK_EOL      { $$.has_sym = 0; }
+    | KW_ISVALID opt_args TK_EOL     { $$.has_sym = 0; }
+    | KW_HASALERT opt_args TK_EOL    { $$.has_sym = 0; }
+    | KW_TREELEVEL opt_args TK_EOL   { $$.has_sym = 0; }
 
     /* ── Tokens with unknown/unverified standalone syntax ────────────────── *
      * TODO: verify exact syntax for these keywords with tj3man and write
      *       precise rules.  Using opt_args as a safe fallback for now.      */
-    | KW_INHERIT opt_args     { $$.has_sym = 0; }
-    | KW_SCENARIOSPECIFIC opt_args { $$.has_sym = 0; }
+    | KW_INHERIT opt_args TK_EOL     { $$.has_sym = 0; }
+    | KW_SCENARIOSPECIFIC opt_args TK_EOL { $$.has_sym = 0; }
 
     /* ── Macro invocation: ${macroname [args...]} ───────────────────────── *
      * Macro invocations use ${...} which tokenises as TK_DOLLAR TK_LBRACE
@@ -1130,10 +1194,13 @@ item
  * task    Syntax: task [<id>] <name> [{ <attributes> }]
  * resource/account/shift share the same shape as task.
  *
- * All id and name fields are optional for leniency (the LSP should still
- * extract the symbol even if the file is syntactically incomplete).        */
+ * The id is optional, but the name is required — matching TaskJuggler, whose
+ * declaration headers are all `_keyword !optionalID $STRING`.  (Making the name
+ * mandatory is also what lets `opt_id` reduce unambiguously: a leading TK_IDENT
+ * is the id, a leading string is the name, so there is no nullable-nullable
+ * guess.)                                                                   */
 symbol_decl
-    : KW_PROJECT opt_id opt_name opt_version interval2 opt_body
+    : KW_PROJECT opt_id string_val opt_version interval2 opt_body
         {
             /* The node is allocated here, in the final action, rather than
              * in a mid-rule action: nothing between the header and the body
@@ -1168,7 +1235,7 @@ symbol_decl
             if ($4.text) token_free(&$4); /* discard version string */
             /* TODO: store interval $5 as the project time range */
         }
-    | sym_kw opt_id opt_name
+    | sym_kw opt_id string_val
       { $<sym>$ = alloc_tj_node($1, $2, $3);
         if ($1.kind == KW_TASK) sym_stack_push($<sym>$); }
       opt_body
@@ -1178,13 +1245,29 @@ symbol_decl
             finish_tj_node($$, $1, $5);
             token_free(&$1);
         }
+    /* ── shift declaration: `shift [id] <name> [{ … }]` ──
+     *
+     * KW_SHIFT is deliberately kept OUT of sym_kw and given its own
+     * alternative.  Were it in sym_kw it would reduce to sym_kw the moment the
+     * keyword is seen, which collides with the `shift` *attribute*
+     * (`item: KW_SHIFT shift_attr_list`, e.g. `shift early [interval], …`) and
+     * produces a shift/reduce conflict.  As a distinct alternative the decision
+     * defers one token: after `shift <id>` a following name string selects this
+     * declaration, while an interval / comma / `}` / end-of-line selects the
+     * attribute.  TaskJuggler distinguishes the two by scope; we stay
+     * context-free and let the trailing token decide.                        */
+    | KW_SHIFT opt_id string_val opt_body
+        {
+            $$ = alloc_tj_node($1, $2, $3);
+            finish_tj_node($$, $1, $4);
+            token_free(&$1);
+        }
     ;
 
 sym_kw
     : KW_TASK     { $$ = $1; }
     | KW_RESOURCE { $$ = $1; }
     | KW_ACCOUNT  { $$ = $1; }
-    | KW_SHIFT    { $$ = $1; }
     ;
 
 /* ── report_decl: all report types ─────────────────────────────────────── *
@@ -1206,7 +1289,7 @@ sym_kw
  * TODO: Update symbol_kind_for() in parser.c to return appropriate kinds
  *       for report keywords (currently only handles task/resource/etc.).   */
 report_decl
-    : report_kw opt_id opt_name opt_body
+    : report_kw opt_id string_val opt_body
         {
             $$ = alloc_tj_node($1, $2, $3);
             finish_tj_node($$, $1, $4);
@@ -1298,7 +1381,7 @@ statussheet_decl
  * Syntax: tagfile [<id>] <file name> [{ <attributes> }]
  * TODO: verify tj3man syntax for tagfile                                   */
 tagfile_decl
-    : KW_TAGFILE opt_id opt_name opt_body
+    : KW_TAGFILE opt_id string_val opt_body
         {
             $$ = alloc_tj_node($1, $2, $3);
             finish_tj_node($$, $1, $4);
@@ -2009,6 +2092,7 @@ macro_body_tok
     | TK_DOLLAR         { token_free(&$1); }
     | TK_MULTI_LINE_STR { token_free(&$1); }
     | TK_ERROR          { token_free(&$1); }
+    | TK_EOL            { /* synthetic terminator inside the macro body */ }
     /* All KW_* tokens (a macro body can contain any keywords):             */
     | KW_PROJECT        { token_free(&$1); }
     | KW_TASK           { token_free(&$1); }
@@ -2095,8 +2179,11 @@ arg_token
  * Returns a BodyResult with the collected child symbols and the end
  * position of the closing `}`.
  *
- * The second alternative uses bison's built-in `error` token for error
- * recovery when the closing brace is missing.                              */
+ * There is no error-recovery alternative for a missing `}`: the yylex wrapper
+ * in lexer.l synthesises the closing braces for any still-open bodies at EOF,
+ * so a mid-edit file with unclosed bodies reduces normally instead of needing
+ * a `'{' body_items error` production (which would reduce/reduce-conflict with
+ * `item: error`).                                                            */
 opt_body
     : /* empty */
         { $$.syms = (SymArr){0}; $$.end = (LspPos){0}; }
@@ -2106,14 +2193,6 @@ opt_body
             $$.end  = $3.end;
             token_free(&$1);
             token_free(&$3);
-        }
-    | TK_LBRACE body_items error
-        {
-            /* Diagnostic recording is dropped for now; the structural
-             * recovery (carrying the partial body up) still happens. */
-            $$.syms = $2.syms;
-            $$.end  = (LspPos){0};
-            token_free(&$1);
         }
     ;
 
@@ -2130,6 +2209,8 @@ body_items
             if ($2.has_sym)
                 symarr_push(&$$.syms, $2.sym);
         }
+    | body_items TK_EOL   /* absorb the terminator that follows a non-gen_expr item */
+        { $$ = $1; }
     ;
 
 %%
