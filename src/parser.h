@@ -107,21 +107,19 @@ typedef enum {
 /**
  * One captured `depends`/`precedes` reference on a task tj_node.
  *
- * Populated by the grammar action for `dep_ref` at parse time.  The
- * resolver (to be reinstated in a follow-up commit) walks each
- * Project's task tree once per rebuild and fills `resolved_target`
- * with the matching tj_node; until then it stays NULL.
+ * Populated by the grammar action for `dep_ref` at parse time.  These
+ * per-document references are left unresolved here; cross-file
+ * resolution runs against the assembled per-Project ProjectNode tree
+ * and is memoized there (ProjectDep.resolved, see project_tree.h).
  *
  * Memory ownership: the enclosing tj_node owns `path` (heap-allocated)
- * and the `dependencies` array.  `resolved_target` is a borrowed
- * pointer into the project's tj_node tree, never owned here.
+ * and the `dependencies` array.
  */
 typedef struct Dependency {
     DepKind   kind;             /**< whether this dep is `depends` or `precedes` */
     int       bang_count;       /**< number of leading `!` characters */
     char     *path;             /**< dotted identifier path, e.g. "foo.bar" */
     LspRange  source_range;     /**< spans the bang(s) + dotted path in source */
-    tj_node  *resolved_target;  /**< NULL until the resolver runs */
 } Dependency;
 
 /**
@@ -135,9 +133,8 @@ typedef struct Dependency {
  *
  * Memory: all heap fields (`id`, `name`, `dependencies`, `children`)
  * and every transitively reachable child node are owned by the
- * tj_node and freed by tj_node_free().  Cross-tree pointers
- * (`parent_node`, `parent_doc`, `Dependency.resolved_target`) are
- * borrowed and never freed here.
+ * tj_node and freed by tj_node_free().  The cross-tree `parent_node`
+ * pointer is borrowed and never freed here.
  */
 struct tj_node {
     /* ── Identity ── */
@@ -175,20 +172,10 @@ struct tj_node {
      *                  parents stay within the same Document.
      *                  NULL on the document's synthetic root.
      *
-     * parent_doc     — when this node is a top-level entry in its
-     *                  Document (i.e. declared at file scope, not
-     *                  nested inside another declaration), points to
-     *                  the Document's synthetic root (which is what
-     *                  Document.root stores).  NULL otherwise.  Walk
-     *                  parent_node upward until you hit a node with
-     *                  non-NULL parent_doc to find the owning
-     *                  Document.
-     *
      * children       — locally declared children in source order.
      *                  Owned by this node; freed by tj_node_free().
      */
     tj_node   *parent_node;  /**< borrowed; see comment above */
-    tj_node   *parent_doc;   /**< borrowed; see comment above */
     tj_node  **children;     /**< owned array; @see num_children */
     int        num_children; /**< number of valid entries in `children` */
     int        children_cap; /**< allocated capacity of `children` */
@@ -293,7 +280,6 @@ typedef struct {
 
     TokenSpan *tok_spans;       /**< owned flat array of every captured token */
     int        num_tok_spans;   /**< number of valid entries in `tok_spans` */
-    int        tok_span_cap;    /**< allocated capacity of `tok_spans` */
     int        num_sem_entries; /**< upper bound on semantic-token entries (one per source line covered) */
 
     IncludeRef *includes;       /**< owned array; one entry per `include` directive */

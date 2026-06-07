@@ -264,7 +264,6 @@ static void doc_install_parse(Document *d, ParseOutput *po) {
         po->root            = NULL;
         po->tok_spans       = NULL;
         po->num_tok_spans   = 0;
-        po->tok_span_cap    = 0;
         po->num_sem_entries = 0;
         parse_output_free(po);
     }

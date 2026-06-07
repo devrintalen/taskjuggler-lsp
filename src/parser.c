@@ -174,7 +174,6 @@ void tj_node_push_dependency(tj_node *task, Dependency dep) {
         task->dependencies     = tmp;
         task->dependencies_cap = nc;
     }
-    dep.resolved_target = NULL;
     task->dependencies[task->num_dependencies++] = dep;
 }
 
@@ -248,34 +247,22 @@ void push_include(ParseOutput *po, const char *quoted_text,
 /* ── tj_node tree linkage ────────────────────────────────────────────────── *
  *
  * After the grammar finishes building the trees, we walk each per-kind
- * root to set parent_node / parent_doc pointers consistently, and to
- * assign owners to every TokenSpan.
+ * root to set parent_node pointers consistently, and to assign owners to
+ * every TokenSpan.
  */
 
 /**
- * Recursively set parent_node and parent_doc fields across one subtree.
- *
- * @p doc_root is non-NULL only for the immediate children of a per-kind
- * synthetic root; deeper descendants receive NULL so they are not treated
- * as top-level document entries.
+ * Recursively set the parent_node field across one subtree.
  *
  * @param parent    Node to set as parent_node for each element of @p children.
  * @param children  Array of child pointers to process.
  * @param n         Number of entries in @p children.
- * @param doc_root  Value to assign to parent_doc for each direct child; pass
- *                  NULL when recursing beyond the first level.
  */
-static void assign_parent_links(tj_node *parent, tj_node **children, int n,
-                                tj_node *doc_root) {
-    /* doc_root is non-NULL only for the top-level frame (children directly
-     * under a per-kind synthetic root).  Once we recurse into a real child,
-     * deeper descendants live INSIDE that child, so their parent_doc must
-     * be NULL — they are no longer top-level entries. */
+static void assign_parent_links(tj_node *parent, tj_node **children, int n) {
     for (int i = 0; i < n; i++) {
         children[i]->parent_node = parent;
-        children[i]->parent_doc  = doc_root;
         assign_parent_links(children[i], children[i]->children,
-                            children[i]->num_children, NULL);
+                            children[i]->num_children);
     }
 }
 
@@ -459,7 +446,6 @@ ParseOutput *parse(const char *src) {
 
     po->tok_spans       = g_tok_spans;
     po->num_tok_spans   = g_num_tok_spans;
-    po->tok_span_cap    = g_tok_span_cap;
     po->num_sem_entries = g_num_sem_entries;
 
     g_output          = NULL;
@@ -476,7 +462,7 @@ ParseOutput *parse(const char *src) {
         qsort(po->root->children, (size_t)po->root->num_children,
               sizeof(tj_node *), compare_node_starts);
     assign_parent_links(po->root, po->root->children,
-                        po->root->num_children, po->root);
+                        po->root->num_children);
     assign_token_owners(po);
 
     DLOG(DEBUG_PARSER, LOG_VERBOSE,
