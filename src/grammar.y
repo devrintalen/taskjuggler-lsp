@@ -52,6 +52,9 @@ typedef struct {
 
 /* Globals defined in parser.c, shared with lexer.l */
 extern ParseOutput *g_output;
+/* The in-progress parse's token arena; dep-path strings are built here so they
+ * share the tj_node tree's lifetime and need no per-path malloc/free. */
+extern str_arena *g_tok_arena;
 
 int  yylex(void);
 void yyerror(const char *msg);
@@ -1662,18 +1665,20 @@ dep_path_seg
  * Distinct from dotted_id so taskprefix/taskroot are unaffected.           */
 dep_path
     : dep_path_seg
-        { $$.bang_count = 0; $$.path = strdup($1.text);
+        /* A single segment's lexeme already lives in the token arena, so the
+         * path just borrows it — no copy.  Multi-segment paths (below) are
+         * built into the same arena.  Either way tj_node_free never frees a
+         * dep path; the arena reclaims it with the rest of the tree. */
+        { $$.bang_count = 0; $$.path = $1.text;
           $$.start = $1.start; $$.end = $1.end;
           token_free(&$1); }
     | dep_path TK_DOT dep_path_seg
         { size_t plen = strlen($1.path);
           size_t slen = strlen($3.text);
-          char *buf = malloc(plen + 1 + slen + 1);
-          if (!buf) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+          char *buf = arena_alloc(g_tok_arena, plen + 1 + slen + 1);
           memcpy(buf, $1.path, plen);
           buf[plen] = '.';
           memcpy(buf + plen + 1, $3.text, slen + 1);
-          free($1.path);
           $$.bang_count = 0;
           $$.path  = buf;
           $$.start = $1.start;
@@ -1708,8 +1713,8 @@ dep_ref
                 tj_node_push_dependency(task, dep);
             } else {
                 /* `depends`/`precedes` outside a task body — syntactically
-                 * possible during error recovery; nothing to attach to. */
-                free($1.path);
+                 * possible during error recovery; nothing to attach to.  The
+                 * path is arena-owned, so there is nothing to free here. */
             }
         }
     ;

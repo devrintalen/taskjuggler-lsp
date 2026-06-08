@@ -47,6 +47,14 @@ typedef struct str_arena str_arena;
  *  @return A new arena; release it with arena_free(). */
 str_arena *arena_new(void);
 
+/** Carve @p n uninitialized bytes off the arena's bump pointer.  The returned
+ *  region is valid until arena_free() and is byte-aligned (callers store
+ *  strings, which need no stricter alignment).  Aborts on allocation failure.
+ *  @param a  Arena to allocate from (must be non-NULL).
+ *  @param n  Number of bytes to reserve.
+ *  @return Pointer to @p n uninitialized arena-owned bytes. */
+void *arena_alloc(str_arena *a, size_t n);
+
 /** Copy @p len bytes of @p s into the arena and append a terminating NUL,
  *  returning a pointer to the arena-owned copy.  The returned string is
  *  valid until arena_free().  Aborts on allocation failure.

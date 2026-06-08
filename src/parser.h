@@ -117,13 +117,14 @@ typedef enum {
  * resolution runs against the assembled per-Project ProjectNode tree
  * and is memoized there (ProjectDep.resolved, see project_tree.h).
  *
- * Memory ownership: the enclosing tj_node owns `path` (heap-allocated)
- * and the `dependencies` array.
+ * Memory ownership: the enclosing tj_node owns the `dependencies` array;
+ * `path` borrows the parse's token arena (built by the dep_path rule) and
+ * is reclaimed in bulk with it, never freed per dependency.
  */
 typedef struct Dependency {
     DepKind   kind;             /**< whether this dep is `depends` or `precedes` */
     int       bang_count;       /**< number of leading `!` characters */
-    char     *path;             /**< dotted identifier path, e.g. "foo.bar" */
+    char     *path;             /**< dotted identifier path; borrowed from the token arena */
     LspRange  source_range;     /**< spans the bang(s) + dotted path in source */
 } Dependency;
 

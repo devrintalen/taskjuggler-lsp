@@ -166,11 +166,10 @@ int parse_tjp_date(const char *text, time_t *out) {
 
 void tj_node_free(tj_node *n) {
     if (!n) return;
-    /* id / name are borrowed pointers into the parse's token arena (set by
-     * alloc_tj_node), reclaimed in bulk when that arena is freed — never here.
-     * Dependency paths are still individually heap-owned. */
-    for (int i = 0; i < n->num_dependencies; i++)
-        free(n->dependencies[i].path);
+    /* id / name and every dependency path are borrowed pointers into the
+     * parse's token arena (set by alloc_tj_node / the dep_path rule), reclaimed
+     * in bulk when that arena is freed — never here.  Only the arrays and the
+     * node struct are individually owned. */
     free(n->dependencies);
     for (int i = 0; i < n->num_children; i++)
         tj_node_free(n->children[i]);

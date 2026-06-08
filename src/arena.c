@@ -62,16 +62,20 @@ static arena_block *arena_grow(str_arena *a, size_t need) {
     return b;
 }
 
-char *arena_strndup(str_arena *a, const char *s, size_t len) {
-    size_t need = len + 1;  /* room for the terminating NUL */
+void *arena_alloc(str_arena *a, size_t n) {
     arena_block *b = a->head;
-    if (!b || b->cap - b->used < need)
-        b = arena_grow(a, need);
+    if (!b || b->cap - b->used < n)
+        b = arena_grow(a, n);
 
     char *dst = b->data + b->used;
+    b->used += n;
+    return dst;
+}
+
+char *arena_strndup(str_arena *a, const char *s, size_t len) {
+    char *dst = arena_alloc(a, len + 1);  /* +1 for the terminating NUL */
     memcpy(dst, s, len);
     dst[len] = '\0';
-    b->used += need;
     return dst;
 }
 
