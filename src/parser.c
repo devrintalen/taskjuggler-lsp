@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ── flex scanner interface ──────────────────────────────────────────────── *
  *
@@ -105,11 +106,17 @@ static int is_sem_highlighted(int kind) {
  * @param ec    End column.
  * @param text  Borrowed lexeme; copied into the parse's token arena and
  *              pointed at by the new TokenSpan, or NULL.
+ * @param len   Length of @p text in bytes (the lexer already knows it as
+ *              yyleng / str_len, so we avoid a redundant strlen here).
+ * @return      The interned, NUL-terminated arena copy of @p text (stable for
+ *              the arena's lifetime), or NULL when @p text was NULL.  The
+ *              lexer reuses this pointer as the value-stack Token.text instead
+ *              of taking a second strdup, so a lexeme is copied at most once.
  */
-void g_push_tok_span(int kind,
-                     uint32_t sl, uint32_t sc,
-                     uint32_t el, uint32_t ec,
-                     const char *text) {
+char *g_push_tok_span(int kind,
+                      uint32_t sl, uint32_t sc,
+                      uint32_t el, uint32_t ec,
+                      const char *text, size_t len) {
     if (g_num_tok_spans >= g_tok_span_cap) {
         g_tok_span_cap = g_tok_span_cap ? g_tok_span_cap * 2 : 64;
         TokenSpan *tmp = realloc(g_tok_spans,
@@ -117,21 +124,27 @@ void g_push_tok_span(int kind,
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         g_tok_spans = tmp;
     }
+    char *interned = text ? arena_strndup(g_tok_arena, text, len) : NULL;
     g_tok_spans[g_num_tok_spans++] = (TokenSpan){
         .token_kind = kind,
         .start      = { sl, sc },
         .end        = { el, ec },
-        .text       = text ? arena_strndup(g_tok_arena, text, strlen(text)) : NULL,
+        .text       = interned,
         .owner      = NULL,
     };
     if (is_sem_highlighted(kind))
         g_num_sem_entries += (int)(el - sl + 1);
+    return interned;
 }
 
 /* ── Token helpers ───────────────────────────────────────────────────────── */
 
 void token_free(Token *t) {
-    free(t->text);
+    /* A Token's text points into the parse's token arena (interned once by
+     * g_push_tok_span); it is reclaimed in bulk when the arena is freed, never
+     * individually.  Grammar rules that need to retain a lexeme past the parse
+     * (a tj_node id/name, a prefix_path_id segment) strdup it at that point, so
+     * discarding a token here is just dropping the borrowed arena pointer. */
     t->text = NULL;
 }
 
@@ -453,9 +466,16 @@ ParseOutput *parse(const char *src) {
     reset_pending_include_state();
     reset_eol_state();
 
+#if DEBUG_PARSER >= LOG_VERBOSE
+    struct timespec parse_t0, parse_t1, parse_t2;
+    clock_gettime(CLOCK_MONOTONIC, &parse_t0);
+#endif
     YY_BUFFER_STATE buf = yy_scan_string(src);
     yyparse();
     yy_delete_buffer(buf);
+#if DEBUG_PARSER >= LOG_VERBOSE
+    clock_gettime(CLOCK_MONOTONIC, &parse_t1);
+#endif
 
     po->tok_spans       = g_tok_spans;
     po->num_tok_spans   = g_num_tok_spans;
@@ -479,6 +499,16 @@ ParseOutput *parse(const char *src) {
     assign_parent_links(po->root, po->root->children,
                         po->root->num_children);
     assign_token_owners(po);
+#if DEBUG_PARSER >= LOG_VERBOSE
+    clock_gettime(CLOCK_MONOTONIC, &parse_t2);
+    DLOG(DEBUG_PARSER, LOG_VERBOSE,
+         "parse phases: lex+yyparse=%.1f postprocess=%.1f ms (tokens=%d)",
+         (parse_t1.tv_sec - parse_t0.tv_sec) * 1000.0
+             + (parse_t1.tv_nsec - parse_t0.tv_nsec) / 1e6,
+         (parse_t2.tv_sec - parse_t1.tv_sec) * 1000.0
+             + (parse_t2.tv_nsec - parse_t1.tv_nsec) / 1e6,
+         po->num_tok_spans);
+#endif
 
     DLOG(DEBUG_PARSER, LOG_VERBOSE,
          "parsed %zu bytes -> %d tokens, %d top-level nodes, %d includes",

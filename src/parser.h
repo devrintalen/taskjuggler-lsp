@@ -73,14 +73,17 @@ typedef struct {
     int    kind;         /**< one of the TK_* / KW_* values from grammar.tab.h */
     LspPos start;        /**< source position of the first character */
     LspPos end;          /**< source position one past the last character */
-    char  *text;         /**< heap-allocated; caller must free */
+    char  *text;         /**< borrowed pointer into the parse's token arena
+                          *   (interned by g_push_tok_span), or NULL.  Never
+                          *   freed via the token; strdup it to keep it. */
 } Token;
 
 /**
- * Free the heap-allocated text inside a Token (does not free the Token
- * itself).
+ * Drop a Token's borrowed lexeme pointer (sets `text` to NULL).  The text is
+ * arena-owned (see Token.text), so nothing is freed here; this only exists so
+ * grammar discard paths and the bison destructor have a uniform call.
  *
- * @param t  Token whose `text` field should be released and nulled out.
+ * @param t  Token whose `text` field should be nulled out.
  */
 void token_free(Token *t);
 

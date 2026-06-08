@@ -79,10 +79,27 @@ LEXTEST_SRC = tools/lexer_test.c
 $(LEXTEST_BIN): $(GEN_HDR) $(GEN_LEX) $(LEXTEST_SRC)
 	$(CC) $(CFLAGS) -Wno-unused-function -o $@ $(LEXTEST_SRC) $(GEN_LEX)
 
+# ── Standalone parse() microbenchmark ────────────────────────────────────── #
+# Times parse() in isolation (no server, threads, or tj3 worker), so the
+# numbers are not perturbed by the background diagnostics worker the way the
+# round-trip tools/bench_didchange.py timings are.  Usage:
+#   make parse-bench && ./parse-bench test/perf_highdeps.tjp 25
+
+PARSEBENCH_BIN = parse-bench
+PARSEBENCH_SRC = tools/parse_bench.c
+# parse() and the symbols it transitively needs; diagnostics.o references
+# lsp_send_message, which the harness stubs out (the parse path never calls it).
+PARSEBENCH_OBJ = src/parser.o src/lexer.yy.o src/grammar.tab.o src/arena.o \
+                 src/debug.o src/diagnostics.o src/pathutil.o
+
+$(PARSEBENCH_BIN): $(GEN_HDR) $(PARSEBENCH_SRC) $(PARSEBENCH_OBJ)
+	$(CC) $(CFLAGS) -o $@ $(PARSEBENCH_SRC) $(PARSEBENCH_OBJ) -lyyjson
+
 clean:
 	rm -f $(OBJ) $(BIN) $(GEN_LEX) $(GEN_GRAM) $(GEN_HDR)
 	rm -f $(DEBUG_OBJ) $(DEBUG_BIN)
 	rm -f $(LEXTEST_BIN) tools/lexer_test.o
+	rm -f $(PARSEBENCH_BIN)
 	rm -f $(OBJ:.o=.d) $(DEBUG_OBJ:.o=.d)
 
 # Auto-generated header dependencies from -MMD.
@@ -97,4 +114,4 @@ docs:
 docs-clean:
 	rm -rf doc/_doxygen/
 
-.PHONY: all debug clean lexer-test docs docs-clean
+.PHONY: all debug clean lexer-test parse-bench docs docs-clean

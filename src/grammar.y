@@ -188,14 +188,14 @@ static tj_node *alloc_tj_node(Token kw, Token id, Token name) {
     s->keyword = kw.kind;
 
     if (id.text) {
-        s->id              = id.text;   /* take ownership */
+        s->id              = strdup(id.text);   /* tok text is arena-borrowed */
         s->selection_range = (LspRange){ id.start, id.end };
     } else {
         s->id              = strdup(kw.text);
         s->selection_range = (LspRange){ kw.start, kw.end };
     }
 
-    s->name = name.text ? name.text : strdup(s->id); /* take ownership */
+    s->name = name.text ? strdup(name.text) : strdup(s->id);
 
     /* Range start is always the keyword; end is filled after body parse. */
     s->range.start = kw.start;
@@ -257,17 +257,14 @@ static void discard_body(BodyResult *b) {
 %destructor { tj_node_free($$); }                       <sym>
 %destructor { if ($$.has_sym) tj_node_free($$.sym); }   <item>
 %destructor { free($$); }                               <text>
-/* A token carries a heap-allocated lexeme (emit_kw / emit_plain TK_IDENT /
- * the string helpers all strdup into .text).  Successful reductions free it
- * explicitly with token_free(); this destructor covers the other path —
- * tokens bison pops during error recovery or leaves on the stack at parse
- * end.  Because yyerror() is a silent no-op and `item: error` recovers
- * without a diagnostic, even an apparently clean parse can discard tokens
- * here (e.g. a `${macro}` call, whose braces gen_expr cannot consume), so
- * without this their lexemes leak.  token_free() tolerates a NULL .text, so
- * the punctuation/number tokens that no longer strdup are a no-op.  bison
- * never runs a destructor on a value a reduction already consumed, so this
- * cannot double-free a lexeme an action already released. */
+/* A token's lexeme (.text) points into the parse's token arena, interned once
+ * by g_push_tok_span and reclaimed in bulk with the arena — never owned by the
+ * token itself.  token_free() therefore just drops the borrowed pointer; this
+ * destructor runs it on tokens bison pops during error recovery or leaves on
+ * the stack at parse end (e.g. a `${macro}` call whose braces gen_expr cannot
+ * consume), purely for symmetry.  Rules that must keep a lexeme past the parse
+ * (a tj_node id/name, a prefix_path_id segment) strdup it; everything else
+ * borrows.  Since token_free() frees nothing, double-discard is harmless. */
 %destructor { token_free(&$$); }                        <tok>
 
 /* ── Remaining conflicts ─────────────────────────────────────────────────── *
@@ -1606,7 +1603,7 @@ dotted_id
  * an IncludeRef. */
 prefix_path_id
     : TK_IDENT
-        { $$ = $1.text; $1.text = NULL; /* transfer ownership */ }
+        { $$ = strdup($1.text); /* tok text is arena-borrowed; copy out */ }
     | prefix_path_id TK_DOT TK_IDENT
         {
             size_t plen = strlen($1);

@@ -1364,43 +1364,73 @@ static void handle_didchange(yyjson_val *params) {
     Document *d = doc_find(uri);
     if (!d) return;
 
-    char *current = d->text ? strdup(d->text) : strdup("");
-    if (!current) return;
+    /* `current` is NULL until the first change produces a fresh buffer; the
+     * first change reads straight from d->text (or "") so we avoid an upfront
+     * full-source strdup of a possibly multi-MB document on every keystroke. */
+    char *current = NULL;
 
     size_t idx, max;
     yyjson_val *change;
     yyjson_arr_foreach(changes, idx, max, change) {
+        const char *base = current ? current : (d->text ? d->text : "");
         yyjson_val *range_obj = yyjson_obj_get(change, "range");
         const char *new_text  = yyjson_get_str(yyjson_obj_get(change, "text"));
         if (!new_text) { free(current); return; }
 
+        char *next;
         if (range_obj) {
             LspRange range;
             range.start = json_to_pos(yyjson_obj_get(range_obj, "start"));
             range.end   = json_to_pos(yyjson_obj_get(range_obj, "end"));
-            char *next = apply_incremental_change(current, range, new_text);
-            free(current);
-            if (!next) return;
-            current = next;
+            next = apply_incremental_change(base, range, new_text);
         } else {
-            free(current);
-            current = strdup(new_text);
-            if (!current) return;
+            next = strdup(new_text);
         }
+        free(current);              /* NULL on the first iteration: a no-op */
+        if (!next) return;          /* d->text untouched; nothing leaked */
+        current = next;
     }
+    if (!current) return;           /* no usable change applied */
 
     free(d->text);
     d->text = current;
+
+    /* didChange runs serially on the coordinator, so its cost lands as latency
+     * on the next request.  Time each phase (parse dominates) under
+     * DEBUG_DOCSTORE >= LOG_VERBOSE; compiled out of the default build. */
+#if DEBUG_DOCSTORE >= LOG_VERBOSE
+    struct timespec dc_t[5];
+    clock_gettime(CLOCK_MONOTONIC, &dc_t[0]);
+#endif
     ParseOutput *po = parse(d->text);
+#if DEBUG_DOCSTORE >= LOG_VERBOSE
+    clock_gettime(CLOCK_MONOTONIC, &dc_t[1]);
+#endif
 
     char *path = uri_to_path(uri);
     if (path) {
         follow_includes(path, po);
         free(path);
     }
+#if DEBUG_DOCSTORE >= LOG_VERBOSE
+    clock_gettime(CLOCK_MONOTONIC, &dc_t[2]);
+#endif
     doc_install_parse(d, po);
+#if DEBUG_DOCSTORE >= LOG_VERBOSE
+    clock_gettime(CLOCK_MONOTONIC, &dc_t[3]);
+#endif
 
     revalidate_all_docs();
+#if DEBUG_DOCSTORE >= LOG_VERBOSE
+    clock_gettime(CLOCK_MONOTONIC, &dc_t[4]);
+    #define DC_MS(i, j) (((dc_t[j].tv_sec  - dc_t[i].tv_sec)  * 1000.0) \
+                       +  ((dc_t[j].tv_nsec - dc_t[i].tv_nsec) / 1e6))
+    DLOG(DEBUG_DOCSTORE, LOG_VERBOSE,
+         "didChange phases: parse=%.1f follow_includes=%.1f install=%.1f "
+         "revalidate=%.1f total=%.1f ms",
+         DC_MS(0, 1), DC_MS(1, 2), DC_MS(2, 3), DC_MS(3, 4), DC_MS(0, 4));
+    #undef DC_MS
+#endif
 }
 
 /** Handle the "textDocument/didClose" notification: revert the document to

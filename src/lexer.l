@@ -109,25 +109,27 @@ static int   str_len = 0;
  * are NOT returned to the parser (comments).
  */
 
-extern void g_push_tok_span(int kind,
+extern char *g_push_tok_span(int kind,
                              uint32_t sl, uint32_t sc,
                              uint32_t el, uint32_t ec,
-                             const char *text);
+                             const char *text, size_t len);
 
 /* store_semantic_token: used for comments (not returned to parser). */
 static void store_semantic_token(int token) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    g_push_tok_span(token, tok_sl, tok_sc, el, ec, yytext);
+    g_push_tok_span(token, tok_sl, tok_sc, el, ec, yytext, (size_t)yyleng);
 }
 
 
-/* emit_kw: keyword / date / duration — recorded in sem-tokens AND returned. */
+/* emit_kw: keyword / date / duration — recorded in sem-tokens AND returned.
+ * The value-stack Token.text reuses the arena copy g_push_tok_span interns
+ * (no separate strdup); token_free() treats it as a borrowed pointer. */
 static int emit_kw(int code) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    g_push_tok_span(code, tok_sl, tok_sc, el, ec, yytext);
-    yylval.tok = (Token){ code, {tok_sl, tok_sc}, {el, ec}, strdup(yytext) };
+    char *text = g_push_tok_span(code, tok_sl, tok_sc, el, ec, yytext, (size_t)yyleng);
+    yylval.tok = (Token){ code, {tok_sl, tok_sc}, {el, ec}, text };
     return code;
 }
 
@@ -138,25 +140,27 @@ static int emit_kw(int code) {
 static int emit_plain(int code) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
+    char *text = NULL;
     switch (code) {
     case TK_IDENT:
     case TK_LBRACE:    case TK_RBRACE:
     case TK_LBRACKET:  case TK_RBRACKET:
     case TK_BANG:      case TK_DOT:   case TK_COMMA:
-        g_push_tok_span(code, tok_sl, tok_sc, el, ec, yytext);
+        text = g_push_tok_span(code, tok_sl, tok_sc, el, ec, yytext, (size_t)yyleng);
         break;
     default:
         break;
     }
     /* Of the tokens routed through emit_plain, only TK_IDENT has its lexeme
      * read by the grammar (task/resource ids and dotted dependency / prefix
-     * paths, plus the keyword-id fallback in alloc_tj_node).  Numbers,
-     * punctuation, and the error token are only ever token_free()'d, so skip
-     * the per-token strdup for them — token_free() tolerates a NULL text.
+     * paths, plus the keyword-id fallback in alloc_tj_node).  The punctuation
+     * kinds are recorded as spans but their value-stack Token needs no text;
+     * numbers, operators and the error token are not recorded at all.  Reuse
+     * the arena copy interned above for TK_IDENT and leave the rest NULL.
      * (Cursor-position queries read the arena-backed TokenSpan, not this
      * value-stack Token, so they are unaffected.) */
-    char *text = (code == TK_IDENT) ? strdup(yytext) : NULL;
-    yylval.tok = (Token){ code, {tok_sl, tok_sc}, {el, ec}, text };
+    yylval.tok = (Token){ code, {tok_sl, tok_sc}, {el, ec},
+                          (code == TK_IDENT) ? text : NULL };
     return code;
 }
 
@@ -164,18 +168,19 @@ static int emit_plain(int code) {
 static int emit_kw_mfrag(int code) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    g_push_tok_span(code, mfrag_sl, mfrag_sc, el, ec, yytext);
-    yylval.tok = (Token){ code, {mfrag_sl, mfrag_sc}, {el, ec}, strdup(yytext) };
+    char *text = g_push_tok_span(code, mfrag_sl, mfrag_sc, el, ec, yytext, (size_t)yyleng);
+    yylval.tok = (Token){ code, {mfrag_sl, mfrag_sc}, {el, ec}, text };
     return code;
 }
 
 /* emit_kw_mfrag_text: like emit_kw_mfrag but uses an explicit text string
- * (needed for tokens whose body is accumulated across multiple lex rules). */
-static int emit_kw_mfrag_text(int code, const char *text) {
+ * (needed for tokens whose body is accumulated across multiple lex rules).
+ * @p len is the accumulated length (str_len) so no strlen is needed. */
+static int emit_kw_mfrag_text(int code, const char *text, size_t len) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
-    g_push_tok_span(code, mfrag_sl, mfrag_sc, el, ec, text);
-    yylval.tok = (Token){ code, {mfrag_sl, mfrag_sc}, {el, ec}, strdup(text) };
+    char *interned = g_push_tok_span(code, mfrag_sl, mfrag_sc, el, ec, text, len);
+    yylval.tok = (Token){ code, {mfrag_sl, mfrag_sc}, {el, ec}, interned };
     return code;
 }
 
@@ -206,7 +211,7 @@ static int emit_kw_mfrag_text(int code, const char *text) {
     "*/"        { STR_APPEND("*/", 2); STR_FINISH();
                   uint32_t el = (uint32_t)(yylineno - 1);
                   uint32_t ec = (uint32_t)yycolumn;
-                  g_push_tok_span(TK_BLOCK_COMMENT, mfrag_sl, mfrag_sc, el, ec, str_buf);
+                  g_push_tok_span(TK_BLOCK_COMMENT, mfrag_sl, mfrag_sc, el, ec, str_buf, (size_t)str_len);
                   BEGIN(INITIAL); /* not returned to parser */ }
     \n          { STR_APPEND(yytext, yyleng); yycolumn = 0; }
     [^*\n]+     { STR_APPEND(yytext, yyleng); }
@@ -219,7 +224,7 @@ static int emit_kw_mfrag_text(int code, const char *text) {
                   STR_RESET(); STR_APPEND("-8<-", 4); BEGIN(SCISSORS); }
 <SCISSORS>{
     "->8-"      { STR_APPEND("->8-", 4); STR_FINISH();
-                  BEGIN(INITIAL); return emit_kw_mfrag_text(TK_MULTI_LINE_STR, str_buf); }
+                  BEGIN(INITIAL); return emit_kw_mfrag_text(TK_MULTI_LINE_STR, str_buf, (size_t)str_len); }
     \n          { STR_APPEND(yytext, yyleng); yycolumn = 0; }
     [^-\n]+     { STR_APPEND(yytext, yyleng); }
     "-"         { STR_APPEND(yytext, yyleng); }
@@ -230,7 +235,7 @@ static int emit_kw_mfrag_text(int code, const char *text) {
                   STR_RESET(); STR_APPEND("\"", 1); BEGIN(DQUOTE); }
 <DQUOTE>{
     \"          { STR_APPEND("\"", 1); STR_FINISH();
-                  BEGIN(INITIAL); return emit_kw_mfrag_text(TK_STR, str_buf); }
+                  BEGIN(INITIAL); return emit_kw_mfrag_text(TK_STR, str_buf, (size_t)str_len); }
     \n          { yycolumn = 0;
                   BEGIN(INITIAL); return emit_plain(TK_ERROR); }
     \\[^\n]     { STR_APPEND(yytext, yyleng); }
@@ -243,7 +248,7 @@ static int emit_kw_mfrag_text(int code, const char *text) {
                   STR_RESET(); STR_APPEND("'", 1); BEGIN(SQUOTE); }
 <SQUOTE>{
     \'          { STR_APPEND("'", 1); STR_FINISH();
-                  BEGIN(INITIAL); return emit_kw_mfrag_text(TK_STR, str_buf); }
+                  BEGIN(INITIAL); return emit_kw_mfrag_text(TK_STR, str_buf, (size_t)str_len); }
     \n          { yycolumn = 0;
                   BEGIN(INITIAL); return emit_plain(TK_ERROR); }
     \\[^\n]     { STR_APPEND(yytext, yyleng); }
