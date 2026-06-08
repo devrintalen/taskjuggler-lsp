@@ -96,12 +96,12 @@ struct ProjectNode {
     char         *source_uri;       /**< arena-owned (snapshot node_strings), shared per document; see above */
 
     /* ── Dependencies (task nodes only) ── */
-    ProjectDep   *dependencies;     /**< owned array; @see num_dependencies */
+    ProjectDep   *dependencies;     /**< arena-owned array (snapshot node arena); @see num_dependencies */
     int           num_dependencies; /**< number of valid entries in `dependencies` */
 
     /* ── Tree links ── */
     ProjectNode  *parent_node;      /**< parent in this tree; NULL on the synthetic root */
-    ProjectNode **children;         /**< owned array; @see num_children */
+    ProjectNode **children;         /**< owned heap array (grown dynamically); @see num_children */
     int           num_children;     /**< number of valid entries in `children` */
     int           num_children_cap; /**< allocated capacity of `children` */
 };

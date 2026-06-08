@@ -64,16 +64,31 @@ static arena_block *arena_grow(str_arena *a, size_t need) {
 
 void *arena_alloc(str_arena *a, size_t n) {
     arena_block *b = a->head;
-    if (!b || b->cap - b->used < n)
+    /* Round the bump pointer up to 8 bytes so structs and arrays (e.g. a
+     * ProjectNode or a ProjectDep[] with an _Atomic field) come back suitably
+     * aligned even when packed strings from arena_strndup() left it odd.  A
+     * fresh block's data is already 8-aligned (the header is a multiple of 8). */
+    size_t off = b ? (b->used + 7u) & ~(size_t)7u : 0;
+    if (!b || off + n > b->cap) {
         b = arena_grow(a, n);
-
-    char *dst = b->data + b->used;
-    b->used += n;
+        off = 0;
+    }
+    char *dst = b->data + off;
+    b->used = off + n;
     return dst;
 }
 
 char *arena_strndup(str_arena *a, const char *s, size_t len) {
-    char *dst = arena_alloc(a, len + 1);  /* +1 for the terminating NUL */
+    /* Strings need no alignment, so bump them in tight rather than through
+     * arena_alloc()'s 8-byte rounding (a parse interns hundreds of thousands
+     * of short lexemes — padding each would waste megabytes). */
+    size_t need = len + 1;  /* room for the terminating NUL */
+    arena_block *b = a->head;
+    if (!b || b->cap - b->used < need)
+        b = arena_grow(a, need);
+
+    char *dst = b->data + b->used;
+    b->used += need;
     memcpy(dst, s, len);
     dst[len] = '\0';
     return dst;

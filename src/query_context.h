@@ -183,10 +183,12 @@ typedef struct workspace_snapshot {
     int          num_projects;     /**< number of valid entries in `projects` */
     int          projects_cap;     /**< allocated capacity of `projects` */
     int          cc_status;        /**< degradation status of the driving compile_commands.json (CC_STATUS_*) */
-    /** Backing store for every ProjectNode string (id / name / source_uri /
-     *  dependency path) across all projects in this snapshot.  Bump-allocated
-     *  during build_workspace_snapshot() and freed as a few blocks in
-     *  ws_release(), instead of a strdup + free per node-string. */
+    /** Backing store for every ProjectNode in this snapshot: the node structs,
+     *  their dependency arrays, and all their strings (id / name / source_uri /
+     *  dependency path), across all projects.  Bump-allocated during
+     *  build_workspace_snapshot() and freed as a few blocks in ws_release(),
+     *  instead of a malloc + free per node, per dep array, and per string.
+     *  (Only each node's dynamic children array stays individually heap-owned.) */
     str_arena   *node_strings;
 } workspace_snapshot;
 
