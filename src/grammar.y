@@ -187,15 +187,20 @@ static tj_node *alloc_tj_node(Token kw, Token id, Token name) {
     if (!s) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     s->keyword = kw.kind;
 
+    /* id / name borrow the token lexeme straight from the parse's token arena
+     * (emit_* interned it there).  The arena travels with this tj_node tree
+     * into the doc_snapshot and is freed in bulk only after the tree, so these
+     * pointers stay valid for the node's whole life and are never freed
+     * individually (see tj_node_free).  The default name reuses the id pointer. */
     if (id.text) {
-        s->id              = strdup(id.text);   /* tok text is arena-borrowed */
+        s->id              = id.text;
         s->selection_range = (LspRange){ id.start, id.end };
     } else {
-        s->id              = strdup(kw.text);
+        s->id              = kw.text;
         s->selection_range = (LspRange){ kw.start, kw.end };
     }
 
-    s->name = name.text ? strdup(name.text) : strdup(s->id);
+    s->name = name.text ? name.text : s->id;
 
     /* Range start is always the keyword; end is filled after body parse. */
     s->range.start = kw.start;

@@ -136,16 +136,17 @@ typedef struct Dependency {
  * folding, and dependency resolution — handlers branch on `keyword`
  * when they need to distinguish kinds.
  *
- * Memory: all heap fields (`id`, `name`, `dependencies`, `children`)
- * and every transitively reachable child node are owned by the
- * tj_node and freed by tj_node_free().  The cross-tree `parent_node`
- * pointer is borrowed and never freed here.
+ * Memory: `dependencies`, `children`, and every transitively reachable
+ * child node are owned by the tj_node and freed by tj_node_free().
+ * `id` and `name` instead borrow the parse's token arena (which outlives
+ * the tree within the same doc_snapshot), so they are not freed per node.
+ * The cross-tree `parent_node` pointer is borrowed and never freed here.
  */
 struct tj_node {
     /* ── Identity ── */
     int        keyword;        /**< KW_ / TK_ constant from grammar.tab.h; 0 for synthetic per-doc roots */
-    char      *id;              /**< TJP identifier, heap-allocated; NULL on synthetic roots */
-    char      *name;            /**< display name (quoted-string), heap-allocated; NULL on synthetic roots */
+    char      *id;              /**< TJP identifier; borrowed from the token arena, NULL on synthetic roots */
+    char      *name;            /**< display name; borrowed from the token arena, NULL on synthetic roots */
 
     /* ── Source location ── */
     LspRange   range;           /**< full declaration including body */
