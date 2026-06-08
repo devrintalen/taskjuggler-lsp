@@ -282,7 +282,9 @@ char *g_push_tok_span(int kind,
                       uint32_t el, uint32_t ec,
                       const char *text, size_t len) {
     (void)len;
-    /* Collapse newlines in text so each token fits on one line. */
+    /* Collapse newlines in text so each token fits on one line.  text is NULL
+     * for punctuation whose lexeme the parser never records. */
+    if (!text) text = "";
     char display[48];
     int j = 0;
     for (int i = 0; text[i] && j < (int)sizeof(display) - 4; i++) {

@@ -142,23 +142,27 @@ static int emit_plain(int code) {
     uint32_t ec = (uint32_t)yycolumn;
     char *text = NULL;
     switch (code) {
+    /* These need a lexeme: TK_IDENT (read by the grammar and completion) and
+     * the brackets (emitted as semantic tokens — see is_sem_highlighted). */
     case TK_IDENT:
-    case TK_LBRACE:    case TK_RBRACE:
     case TK_LBRACKET:  case TK_RBRACKET:
-    case TK_BANG:      case TK_DOT:   case TK_COMMA:
         text = g_push_tok_span(code, tok_sl, tok_sc, el, ec, yytext, (size_t)yyleng);
+        break;
+    /* Recorded as spans so cursor-position queries can land on them, but no
+     * consumer ever reads their `.text` (they are not semantic tokens, and
+     * hover / completion / code-lens only read keyword / ident / number text),
+     * so skip interning the lexeme — saves an arena copy on the abundant
+     * dependency punctuation (`!`, `.`, `,`) and every brace. */
+    case TK_LBRACE:    case TK_RBRACE:
+    case TK_BANG:      case TK_DOT:   case TK_COMMA:
+        g_push_tok_span(code, tok_sl, tok_sc, el, ec, NULL, 0);
         break;
     default:
         break;
     }
-    /* Of the tokens routed through emit_plain, only TK_IDENT has its lexeme
-     * read by the grammar (task/resource ids and dotted dependency / prefix
-     * paths, plus the keyword-id fallback in alloc_tj_node).  The punctuation
-     * kinds are recorded as spans but their value-stack Token needs no text;
-     * numbers, operators and the error token are not recorded at all.  Reuse
-     * the arena copy interned above for TK_IDENT and leave the rest NULL.
-     * (Cursor-position queries read the arena-backed TokenSpan, not this
-     * value-stack Token, so they are unaffected.) */
+    /* Only TK_IDENT's lexeme is read off the value stack by the grammar;
+     * the rest leave Token.text NULL (cursor queries read the arena-backed
+     * TokenSpan, not this value-stack Token). */
     yylval.tok = (Token){ code, {tok_sl, tok_sc}, {el, ec},
                           (code == TK_IDENT) ? text : NULL };
     return code;
