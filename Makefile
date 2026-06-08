@@ -4,7 +4,14 @@ CC      = gcc
 # CFLAGS_EXTRA is for one-off overrides, e.g. enabling per-category debug
 # logging without editing src/debug.h:
 #   make CFLAGS_EXTRA="-DDEBUG_TJ3=3 -DDEBUG_REVALIDATE=2"
-CFLAGS  = -Wall -Wextra -std=c11 -O2 -D_DEFAULT_SOURCE -MMD -MP $(CFLAGS_EXTRA)
+#
+# -flto: the per-token hot path crosses translation units — the flex scanner
+# (lexer.yy.c) calls g_push_tok_span / arena_strndup / emit_* in parser.c on
+# every one of the hundreds of thousands of tokens a large parse produces.
+# Link-time optimization inlines those across TUs, which measured ~3-5% off the
+# parse on every fixture.  The debug build deliberately omits it so perf /
+# valgrind still see real function boundaries.
+CFLAGS  = -Wall -Wextra -std=c11 -O2 -flto=auto -D_DEFAULT_SOURCE -MMD -MP $(CFLAGS_EXTRA)
 LDFLAGS = -lyyjson -lpthread
 
 # Generated files from flex and bison
@@ -98,8 +105,8 @@ $(PARSEBENCH_BIN): $(GEN_HDR) $(PARSEBENCH_SRC) $(PARSEBENCH_OBJ)
 clean:
 	rm -f $(OBJ) $(BIN) $(GEN_LEX) $(GEN_GRAM) $(GEN_HDR)
 	rm -f $(DEBUG_OBJ) $(DEBUG_BIN)
-	rm -f $(LEXTEST_BIN) tools/lexer_test.o
-	rm -f $(PARSEBENCH_BIN)
+	rm -f $(LEXTEST_BIN) tools/lexer_test.o $(LEXTEST_BIN).d
+	rm -f $(PARSEBENCH_BIN) $(PARSEBENCH_BIN).d
 	rm -f $(OBJ:.o=.d) $(DEBUG_OBJ:.o=.d)
 
 # Auto-generated header dependencies from -MMD.
