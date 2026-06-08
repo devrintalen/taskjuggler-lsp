@@ -13,6 +13,7 @@ GEN_GRAM = src/grammar.tab.c
 GEN_HDR  = src/grammar.tab.h
 
 SRC = src/main.c src/server.c src/parser.c src/diagnostics.c src/debug.c \
+      src/arena.c \
       src/job_queue.c src/threadpool.c src/compile_commands.c \
       src/rpc.c src/pathutil.c \
       $(GEN_LEX) $(GEN_GRAM) \

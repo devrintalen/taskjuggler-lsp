@@ -148,7 +148,15 @@ static int emit_plain(int code) {
     default:
         break;
     }
-    yylval.tok = (Token){ code, {tok_sl, tok_sc}, {el, ec}, strdup(yytext) };
+    /* Of the tokens routed through emit_plain, only TK_IDENT has its lexeme
+     * read by the grammar (task/resource ids and dotted dependency / prefix
+     * paths, plus the keyword-id fallback in alloc_tj_node).  Numbers,
+     * punctuation, and the error token are only ever token_free()'d, so skip
+     * the per-token strdup for them — token_free() tolerates a NULL text.
+     * (Cursor-position queries read the arena-backed TokenSpan, not this
+     * value-stack Token, so they are unaffected.) */
+    char *text = (code == TK_IDENT) ? strdup(yytext) : NULL;
+    yylval.tok = (Token){ code, {tok_sl, tok_sc}, {el, ec}, text };
     return code;
 }
 
@@ -176,6 +184,7 @@ static int emit_kw_mfrag_text(int code, const char *text) {
 %option noyywrap
 %option yylineno
 %option 8bit
+%option full
 
 /* Start conditions for tokens whose bodies span multiple lexer fragments. */
 %x BLOCK_COMMENT

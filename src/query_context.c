@@ -39,8 +39,8 @@ static char *dup_or_null(const char *s) {
 
 doc_snapshot *docsnap_new(const char *uri, const char *text,
                          tj_node *root, TokenSpan *tok_spans,
-                         int num_tok_spans, int num_sem_entries,
-                         uint64_t doc_version) {
+                         int num_tok_spans, str_arena *tok_arena,
+                         int num_sem_entries, uint64_t doc_version) {
     doc_snapshot *s = calloc(1, sizeof(doc_snapshot));
     if (!s) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     atomic_init(&s->refcount, 1);
@@ -50,6 +50,7 @@ doc_snapshot *docsnap_new(const char *uri, const char *text,
     s->root            = root;        /* ownership moved in */
     s->tok_spans       = tok_spans;   /* ownership moved in */
     s->num_tok_spans   = num_tok_spans;
+    s->tok_arena       = tok_arena;   /* ownership moved in */
     s->num_sem_entries = num_sem_entries;
     atomic_init(&s->sem_memo, NULL);
     return s;
@@ -66,9 +67,10 @@ void docsnap_release(doc_snapshot *s) {
         return;
 
     tj_node_free(s->root);
-    for (int i = 0; i < s->num_tok_spans; i++)
-        free(s->tok_spans[i].text);
+    /* Token lexemes live in tok_arena, freed as a few blocks rather than one
+     * free() per captured token. */
     free(s->tok_spans);
+    arena_free(s->tok_arena);
     free(s->uri);
     free(s->text);
 
