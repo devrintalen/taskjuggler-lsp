@@ -119,6 +119,7 @@ workspace_snapshot *ws_alloc(int num_docs) {
     if (!ws) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     atomic_init(&ws->refcount, 1);
     ws->num_docs = num_docs;
+    ws->node_strings = arena_new();
     if (num_docs > 0) {
         ws->docs = calloc((size_t)num_docs, sizeof(ws_doc));
         if (!ws->docs) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
@@ -171,6 +172,10 @@ void ws_release(workspace_snapshot *ws) {
         free(p);
     }
     free(ws->projects);
+
+    /* Every ProjectNode string lived in here; the per-node frees above no
+     * longer touch them, so release the whole arena in one shot. */
+    arena_free(ws->node_strings);
 
     free(ws);
 }

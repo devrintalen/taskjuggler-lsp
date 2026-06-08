@@ -43,16 +43,25 @@ void project_node_append_child(ProjectNode *parent, ProjectNode *child) {
     child->parent_node = parent;
 }
 
+/** Copy a NUL-terminated string into @p arena, or return NULL when @p s is
+ *  NULL.  The result is owned by the arena, not the caller. */
+static char *arena_str(str_arena *arena, const char *s) {
+    return s ? arena_strndup(arena, s, strlen(s)) : NULL;
+}
+
 /**
  * Copy the dependency list from a parsed tj_node into a ProjectNode.
  *
- * Each Dependency entry is deep-copied: the path string is duplicated and the
- * resolved pointer is initialized to PROJECT_DEP_UNRESOLVED.
+ * The ProjectDep array itself is heap-allocated (freed by project_node_free);
+ * each path string is copied into @p arena and the resolved memo cell is
+ * initialized to PROJECT_DEP_UNRESOLVED.
  *
- * @param dst  ProjectNode to receive the copied dependency array.
- * @param src  Source tj_node whose dependencies are copied.
+ * @param dst    ProjectNode to receive the copied dependency array.
+ * @param src    Source tj_node whose dependencies are copied.
+ * @param arena  String arena backing the copied path strings.
  */
-static void copy_dependencies(ProjectNode *dst, const tj_node *src) {
+static void copy_dependencies(ProjectNode *dst, const tj_node *src,
+                              str_arena *arena) {
     if (src->num_dependencies <= 0) return;
     dst->dependencies = calloc((size_t)src->num_dependencies, sizeof(ProjectDep));
     if (!dst->dependencies) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
@@ -61,27 +70,28 @@ static void copy_dependencies(ProjectNode *dst, const tj_node *src) {
         ProjectDep       *d = &dst->dependencies[i];
         d->kind            = s->kind;
         d->bang_count      = s->bang_count;
-        d->path            = s->path ? strdup(s->path) : NULL;
+        d->path            = arena_str(arena, s->path);
         d->source_range    = s->source_range;
         atomic_init(&d->resolved, PROJECT_DEP_UNRESOLVED);
     }
     dst->num_dependencies = src->num_dependencies;
 }
 
-ProjectNode *project_node_from_tj(const tj_node *src, const char *source_uri) {
+ProjectNode *project_node_from_tj(const tj_node *src, char *source_uri,
+                                  str_arena *arena) {
     if (!src) return NULL;
     ProjectNode *dst = calloc(1, sizeof(ProjectNode));
     if (!dst) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     dst->keyword         = src->keyword;
-    dst->id              = src->id   ? strdup(src->id)   : NULL;
-    dst->name            = src->name ? strdup(src->name) : NULL;
+    dst->id              = arena_str(arena, src->id);
+    dst->name            = arena_str(arena, src->name);
     dst->range           = src->range;
     dst->selection_range = src->selection_range;
-    dst->source_uri      = source_uri ? strdup(source_uri) : NULL;
-    copy_dependencies(dst, src);
+    dst->source_uri      = source_uri;   /* borrowed; already interned in arena */
+    copy_dependencies(dst, src, arena);
     for (int i = 0; i < src->num_children; i++)
         project_node_append_child(dst, project_node_from_tj(src->children[i],
-                                                            source_uri));
+                                                            source_uri, arena));
     return dst;
 }
 
@@ -90,11 +100,9 @@ ProjectNode *project_node_from_tj(const tj_node *src, const char *source_uri) {
 void project_node_free(ProjectNode *node) {
     if (!node) return;
     project_node_free_children(node);
-    free(node->id);
-    free(node->name);
-    free(node->source_uri);
-    for (int i = 0; i < node->num_dependencies; i++)
-        free(node->dependencies[i].path);
+    /* id / name / source_uri and every dependency path live in the owning
+     * workspace_snapshot's node_strings arena (freed in bulk by ws_release),
+     * so only the heap-allocated arrays and the node itself are freed here. */
     free(node->dependencies);
     free(node);
 }

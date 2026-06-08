@@ -582,6 +582,11 @@ static void copy_document_into_project(workspace_snapshot *ws, int pidx, Documen
     if (!d->snap || !d->snap->root) return;
     ProjectNode *proot = &ws->projects[pidx]->root;
     tj_node *root = d->snap->root;
+    /* Intern this document's URI once: every node copied below shares it, so a
+     * 10k-node document interns one string instead of strdup'ing per node. */
+    char *source_uri = d->uri
+        ? arena_strndup(ws->node_strings, d->uri, strlen(d->uri))
+        : NULL;
     for (int i = 0; i < root->num_children; i++) {
         tj_node    *child = root->children[i];
         const char *prefix;
@@ -601,8 +606,8 @@ static void copy_document_into_project(workspace_snapshot *ws, int pidx, Documen
         }
         ProjectNode *target = find_node_by_dotted_path(proot, prefix, kind);
         if (!target) continue;
-        project_node_append_child(target,
-                                  project_node_from_tj(child, d->uri));
+        project_node_append_child(
+            target, project_node_from_tj(child, source_uri, ws->node_strings));
     }
 }
 
