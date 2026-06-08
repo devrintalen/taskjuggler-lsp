@@ -257,6 +257,18 @@ static void discard_body(BodyResult *b) {
 %destructor { tj_node_free($$); }                       <sym>
 %destructor { if ($$.has_sym) tj_node_free($$.sym); }   <item>
 %destructor { free($$); }                               <text>
+/* A token carries a heap-allocated lexeme (emit_kw / emit_plain TK_IDENT /
+ * the string helpers all strdup into .text).  Successful reductions free it
+ * explicitly with token_free(); this destructor covers the other path —
+ * tokens bison pops during error recovery or leaves on the stack at parse
+ * end.  Because yyerror() is a silent no-op and `item: error` recovers
+ * without a diagnostic, even an apparently clean parse can discard tokens
+ * here (e.g. a `${macro}` call, whose braces gen_expr cannot consume), so
+ * without this their lexemes leak.  token_free() tolerates a NULL .text, so
+ * the punctuation/number tokens that no longer strdup are a no-op.  bison
+ * never runs a destructor on a value a reduction already consumed, so this
+ * cannot double-free a lexeme an action already released. */
+%destructor { token_free(&$$); }                        <tok>
 
 /* ── Remaining conflicts ─────────────────────────────────────────────────── *
  *
@@ -1139,26 +1151,26 @@ item
      * operands (never as standalone statements).  They are included here as
      * item alternatives purely as error-recovery stubs; in normal parsing
      * they will be consumed by gen_expr in their enclosing statement.       */
-    | KW_ISACTIVE opt_args TK_EOL    { $$.has_sym = 0; }
-    | KW_ISCHILDOF opt_args TK_EOL   { $$.has_sym = 0; }
-    | KW_ISDEPENDENCYOF opt_args TK_EOL { $$.has_sym = 0; }
-    | KW_ISDUTYOF opt_args TK_EOL    { $$.has_sym = 0; }
-    | KW_ISFEATUREOF opt_args TK_EOL { $$.has_sym = 0; }
-    | KW_ISLEAF opt_args TK_EOL      { $$.has_sym = 0; }
-    | KW_ISMILESTONE opt_args TK_EOL { $$.has_sym = 0; }
-    | KW_ISONGOING opt_args TK_EOL   { $$.has_sym = 0; }
-    | KW_ISRESOURCE opt_args TK_EOL  { $$.has_sym = 0; }
-    | KW_ISRESPONSIBILITYOF opt_args TK_EOL { $$.has_sym = 0; }
-    | KW_ISTASK opt_args TK_EOL      { $$.has_sym = 0; }
-    | KW_ISVALID opt_args TK_EOL     { $$.has_sym = 0; }
-    | KW_HASALERT opt_args TK_EOL    { $$.has_sym = 0; }
-    | KW_TREELEVEL opt_args TK_EOL   { $$.has_sym = 0; }
+    | KW_ISACTIVE opt_args TK_EOL    { token_free(&$1); $$.has_sym = 0; }
+    | KW_ISCHILDOF opt_args TK_EOL   { token_free(&$1); $$.has_sym = 0; }
+    | KW_ISDEPENDENCYOF opt_args TK_EOL { token_free(&$1); $$.has_sym = 0; }
+    | KW_ISDUTYOF opt_args TK_EOL    { token_free(&$1); $$.has_sym = 0; }
+    | KW_ISFEATUREOF opt_args TK_EOL { token_free(&$1); $$.has_sym = 0; }
+    | KW_ISLEAF opt_args TK_EOL      { token_free(&$1); $$.has_sym = 0; }
+    | KW_ISMILESTONE opt_args TK_EOL { token_free(&$1); $$.has_sym = 0; }
+    | KW_ISONGOING opt_args TK_EOL   { token_free(&$1); $$.has_sym = 0; }
+    | KW_ISRESOURCE opt_args TK_EOL  { token_free(&$1); $$.has_sym = 0; }
+    | KW_ISRESPONSIBILITYOF opt_args TK_EOL { token_free(&$1); $$.has_sym = 0; }
+    | KW_ISTASK opt_args TK_EOL      { token_free(&$1); $$.has_sym = 0; }
+    | KW_ISVALID opt_args TK_EOL     { token_free(&$1); $$.has_sym = 0; }
+    | KW_HASALERT opt_args TK_EOL    { token_free(&$1); $$.has_sym = 0; }
+    | KW_TREELEVEL opt_args TK_EOL   { token_free(&$1); $$.has_sym = 0; }
 
     /* ── Tokens with unknown/unverified standalone syntax ────────────────── *
      * TODO: verify exact syntax for these keywords with tj3man and write
      *       precise rules.  Using opt_args as a safe fallback for now.      */
-    | KW_INHERIT opt_args TK_EOL     { $$.has_sym = 0; }
-    | KW_SCENARIOSPECIFIC opt_args TK_EOL { $$.has_sym = 0; }
+    | KW_INHERIT opt_args TK_EOL     { token_free(&$1); $$.has_sym = 0; }
+    | KW_SCENARIOSPECIFIC opt_args TK_EOL { token_free(&$1); $$.has_sym = 0; }
 
     /* ── Macro invocation: ${macroname [args...]} ───────────────────────── *
      * Macro invocations use ${...} which tokenises as TK_DOLLAR TK_LBRACE
