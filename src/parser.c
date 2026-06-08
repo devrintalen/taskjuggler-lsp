@@ -22,6 +22,8 @@
 #include "debug.h"
 #include "grammar.tab.h"  /* yyparse(), KW_* constants */
 
+#include <malloc.h>       /* malloc_usable_size() for tok_spans recycling */
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +84,56 @@ int          g_tok_span_cap   = 0;
 str_arena   *g_tok_arena      = NULL;
 /** Running upper bound on emitted semantic-token entries (one per source line covered). */
 int          g_num_sem_entries = 0;
+
+/* ── Token-span buffer recycling ─────────────────────────────────────────── *
+ *
+ * The token-span array is the largest single allocation a parse makes (≈40 B ×
+ * every token, tens of MB on a big file).  Because didChange re-parses the same
+ * document on every keystroke, freeing it with free() (a munmap for a multi-MB
+ * block) and mmap-ing a fresh one next parse means re-faulting every page —
+ * profiling showed this is the dominant kernel cost on the didChange path.
+ *
+ * Instead we keep one retired buffer in a lock-free single slot and hand it
+ * back to the next parse, so its pages stay mapped and resident.  parse() takes
+ * from the slot (coordinator-only); the buffer is released back when a snapshot
+ * is freed (docsnap_release, which can run on a query worker) or a transient
+ * ParseOutput is discarded — hence the atomics.  Only one buffer is ever
+ * cached; any extra retired buffer is freed normally. */
+static _Atomic(TokenSpan *) g_tok_spans_recycle = NULL;
+
+/** Only buffers at least this large are worth caching.  glibc keeps freed
+ *  blocks below its dynamic mmap threshold (which rises to ~32 MB as large
+ *  blocks are freed) on its own heap and hands them straight back to the next
+ *  same-size malloc — no munmap, no re-fault — so recycling them just adds
+ *  overhead.  Only blocks past that ceiling are munmap'd on free() and re-fault
+ *  on the next parse, which is exactly what this cache avoids. */
+#define TOK_SPANS_RECYCLE_MIN_BYTES (32u * 1024 * 1024)
+
+/** Take the recycled token-span buffer for a new parse, or NULL when the slot
+ *  is empty.  @p out_cap receives the buffer's capacity (derived from its
+ *  actual allocation size), 0 when none. */
+static TokenSpan *tok_spans_take(int *out_cap) {
+    TokenSpan *buf = atomic_exchange(&g_tok_spans_recycle, NULL);
+    *out_cap = buf ? (int)(malloc_usable_size(buf) / sizeof(TokenSpan)) : 0;
+    return buf;
+}
+
+void tok_spans_release(TokenSpan *buf) {
+    if (!buf) return;
+    /* Below the threshold glibc already recycles the block efficiently; only
+     * cache the big buffers whose free()/malloc() would otherwise munmap and
+     * re-fault. */
+    if (malloc_usable_size(buf) < TOK_SPANS_RECYCLE_MIN_BYTES) {
+        free(buf);
+        return;
+    }
+    /* Publish into the empty slot; if another buffer is already cached, this
+     * one is surplus and freed.  The exchange/CAS pair never loses or
+     * double-owns a buffer under concurrent release/take. */
+    TokenSpan *expected = NULL;
+    if (!atomic_compare_exchange_strong(&g_tok_spans_recycle, &expected, buf))
+        free(buf);
+}
 
 /**
  * Test whether a token of @p kind is emitted as a semantic token.
@@ -219,8 +271,9 @@ void parse_output_free(ParseOutput *po) {
     if (!po) return;
     tj_node_free(po->root);
 
-    /* Token lexemes live in tok_arena, not in individual allocations. */
-    free(po->tok_spans);
+    /* Token lexemes live in tok_arena, not in individual allocations.  The
+     * span buffer goes back to the recycle slot for the next parse to reuse. */
+    tok_spans_release(po->tok_spans);
     arena_free(po->tok_arena);
 
     for (int i = 0; i < po->num_includes; i++) {
@@ -454,11 +507,12 @@ ParseOutput *parse(const char *src) {
     if (!po) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     po->root = alloc_synthetic_root();
 
-    /* Set up global state for lexer.l and grammar.y */
+    /* Set up global state for lexer.l and grammar.y.  Reuse a retired
+     * token-span buffer when one is cached (its pages are already mapped),
+     * falling back to a fresh allocation on first parse. */
     g_output          = po;
-    g_tok_spans       = NULL;
+    g_tok_spans       = tok_spans_take(&g_tok_span_cap);
     g_num_tok_spans   = 0;
-    g_tok_span_cap    = 0;
     g_tok_arena       = arena_new();
     g_num_sem_entries = 0;
     yycolumn          = 0;

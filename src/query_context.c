@@ -68,8 +68,9 @@ void docsnap_release(doc_snapshot *s) {
 
     tj_node_free(s->root);
     /* Token lexemes live in tok_arena, freed as a few blocks rather than one
-     * free() per captured token. */
-    free(s->tok_spans);
+     * free() per captured token.  The span buffer is recycled (its pages stay
+     * mapped for the next parse) rather than free()'d. */
+    tok_spans_release(s->tok_spans);
     arena_free(s->tok_arena);
     free(s->uri);
     free(s->text);

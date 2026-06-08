@@ -249,6 +249,17 @@ typedef struct {
 } TokenSpan;
 
 /**
+ * Return a retired token-span buffer to the parser's single-entry recycle
+ * cache so the next parse can reuse its already-mapped pages instead of
+ * mmap-ing (and page-faulting) a fresh multi-MB block.  Called wherever a
+ * ParseOutput / doc_snapshot's `tok_spans` would otherwise be free()'d.
+ * Thread-safe; surplus buffers (slot already full) are freed.  NULL is a no-op.
+ *
+ * @param buf  The `tok_spans` buffer being retired (may be NULL).
+ */
+void tok_spans_release(TokenSpan *buf);
+
+/**
  * One entry per `include` directive seen in the source.  `filename` is the
  * unquoted target as it appeared in the include statement.  The four
  * `*_prefix` fields carry the matching attribute from the include body
