@@ -1243,6 +1243,46 @@ static void handle_initialized(void) {
  *  remove each changed disk-only document as indicated by its event type,
  *  then revalidate if anything changed.
  *  @param params  JSON params object with a "changes" array of file events. */
+/** Drop a background (disk_only) document in response to a watched-file
+ *  delete event. Editor-managed documents are left for didClose to handle.
+ *  @param uri  URI of the deleted file.
+ *  @return 1 if a document was removed from docs[], 0 otherwise. */
+static int forget_watched_file(const char *uri) {
+    Document *document = doc_find(uri);
+    if (document && document->disk_only) {
+        doc_free(document);
+        return 1;
+    }
+    return 0;
+}
+
+/** Load or reload a watched file into a background (disk_only) slot in
+ *  response to a create/change event. Files the editor already manages
+ *  (non-disk_only) are left untouched so editor content stays authoritative.
+ *  @param uri  URI of the created/changed file.
+ *  @return 1 if docs[] changed, 0 otherwise. */
+static int admit_watched_file(const char *uri) {
+    Document *document = doc_find(uri);
+    if (document && !document->disk_only) return 0;
+
+    char *path = uri_to_path(uri);
+    if (!path) return 0;
+    char *text = read_file(path);
+    if (!text) { free(path); return 0; }
+
+    if (!document) document = doc_alloc(uri);
+    if (!document) { free(text); free(path); return 0; }
+
+    free(document->text);
+    document->text      = text;
+    document->disk_only = 1;
+    ParseOutput *po = parse(text);
+    follow_includes(path, po);
+    doc_install_parse(document, po);
+    free(path);
+    return 1;
+}
+
 static void handle_did_change_watched_files(yyjson_val *params) {
     if (!params) return;
     yyjson_val *changes = yyjson_obj_get(params, "changes");
@@ -1261,33 +1301,11 @@ static void handle_did_change_watched_files(yyjson_val *params) {
         DLOG(DEBUG_DOCSTORE, LOG_VERBOSE,
              "watched file event: type=%d %s", type, uri);
 
-        if (type == 3) {
-            Document *document = doc_find(uri);
-            if (document && document->disk_only) {
-                doc_free(document);
-                changed = 1;
-            }
-        } else {
-            Document *document = doc_find(uri);
-            if (document && !document->disk_only) continue;
-
-            char *path = uri_to_path(uri);
-            if (!path) continue;
-            char *text = read_file(path);
-            if (!text) { free(path); continue; }
-
-            if (!document) document = doc_alloc(uri);
-            if (!document) { free(text); free(path); continue; }
-
-            free(document->text);
-            document->text      = text;
-            document->disk_only = 1;
-            ParseOutput *po = parse(text);
-            follow_includes(path, po);
-            doc_install_parse(document, po);
-            free(path);
-            changed = 1;
-        }
+        /* WatchKind 3 is Deleted; Created (1) and Changed (2) both reload. */
+        if (type == 3)
+            changed |= forget_watched_file(uri);
+        else
+            changed |= admit_watched_file(uri);
     }
 
     if (changed) revalidate_all_docs();
