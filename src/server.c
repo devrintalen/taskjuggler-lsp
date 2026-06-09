@@ -1616,6 +1616,31 @@ static const char *request_primary_uri(yyjson_val *params) {
  *                      may be NULL for workspace-global requests.
  *  @param want_all_docs  Non-zero to include all documents (workspace/symbol).
  *  @return             Heap-allocated query_context; caller takes ownership. */
+/** Build a query_doc view over @p w's current snapshot for a pinned query
+ *  context. All pointers are borrowed from the snapshot (the context holds a
+ *  ref on the workspace snapshot for the query's lifetime); @p is_primary
+ *  marks the single document the request targets.
+ *  @param w           Workspace doc whose snapshot is non-NULL.
+ *  @param is_primary  Non-zero when this is the request's primary document. */
+static query_doc make_query_doc(ws_doc *w, int is_primary) {
+    doc_snapshot *s = w->snap;
+    return (query_doc){
+        .uri             = s->uri,
+        .text            = s->text,
+        .task_prefix     = w->task_prefix,
+        .account_prefix  = w->account_prefix,
+        .report_prefix   = w->report_prefix,
+        .resource_prefix = w->resource_prefix,
+        .root            = s->root,
+        .tok_spans       = s->tok_spans,
+        .tok_owners      = s->tok_owners,
+        .num_tok_spans   = s->num_tok_spans,
+        .num_sem_entries = s->num_sem_entries,
+        .is_primary      = is_primary,
+        .snap            = s,
+    };
+}
+
 static query_context *build_query_context_locked(const char *primary_uri,
                                                  int want_all_docs) {
     query_context *qc = calloc(1, sizeof(query_context));
@@ -1661,21 +1686,7 @@ static query_context *build_query_context_locked(const char *primary_uri,
              * no siblings, so the primary stands alone. */
             if (primary_proj < 0 || w->project_index != primary_proj) continue;
         }
-        qc->docs[n] = (query_doc){
-            .uri             = s->uri,
-            .text            = s->text,
-            .task_prefix     = w->task_prefix,
-            .account_prefix  = w->account_prefix,
-            .report_prefix   = w->report_prefix,
-            .resource_prefix = w->resource_prefix,
-            .root            = s->root,
-            .tok_spans       = s->tok_spans,
-            .tok_owners      = s->tok_owners,
-            .num_tok_spans   = s->num_tok_spans,
-            .num_sem_entries = s->num_sem_entries,
-            .is_primary      = is_primary,
-            .snap            = s,
-        };
+        qc->docs[n] = make_query_doc(w, is_primary);
         if (is_primary) qc->primary_idx = n;
         n++;
     }
