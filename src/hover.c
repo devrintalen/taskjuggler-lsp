@@ -521,6 +521,54 @@ const char *keyword_docs(const char *kw) {
     return NULL;
 }
 
+/**
+ * Build a hover response for a dependency reference at @p pos.
+ *
+ * Resolves the reference under the cursor to its target task and renders the
+ * target's qualified id and name. Returns NULL when @p pos is not on a
+ * dependency, or the reference does not resolve to a target, so the caller
+ * falls back to keyword-documentation hover.
+ *
+ * @param doc  Mutable document for building the response.
+ * @param id   Request id from the incoming message.
+ * @param qc   Query context holding the assembled project tree.
+ * @param d    Primary query document the cursor is in.
+ * @param pos  Cursor position.
+ * @return Hover response object, or NULL to fall through to keyword docs.
+ */
+static yyjson_mut_val *try_dependency_hover(yyjson_mut_doc *doc, yyjson_val *id,
+                                            const query_context *qc,
+                                            const query_doc *d, LspPos pos) {
+    tj_node          *owner = NULL;
+    const Dependency *dep   = NULL;
+    if (!qc->project_root ||
+        !dependency_at_cursor(d->tok_spans, d->tok_owners, d->num_tok_spans, pos,
+                              &owner, &dep))
+        return NULL;
+
+    ProjectNode *merged_owner =
+        project_node_for_doc_task(qc->project_root, d->task_prefix, owner);
+    ProjectNode *target = NULL;
+    if (merged_owner) {
+        int ordinal = (int)(dep - owner->dependencies);
+        if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
+            target = project_dep_resolve(merged_owner, ordinal, qc->project_root);
+    }
+    if (!target) return NULL;
+
+    char *value = project_node_hover_markdown(target);
+    yyjson_mut_val *contents = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, contents, "kind", "markdown");
+    yyjson_mut_obj_add_strcpy(doc, contents, "value", value);
+    free(value);
+
+    yyjson_mut_val *hover = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, hover, "contents", contents);
+    yyjson_mut_obj_add_val(doc, hover, "range",
+                           range_json(doc, dep->source_range));
+    return make_response(doc, id, hover);
+}
+
 yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
                              yyjson_val *params, const query_context *qc,
                              const query_doc *d) {
@@ -538,34 +586,8 @@ yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
     /* A cursor on a dependency reference resolves to its target task; show
      * the target's qualified id and name.  Falls through to keyword docs
      * when the cursor is not on a dependency or the reference is unresolved. */
-    tj_node          *owner = NULL;
-    const Dependency *dep   = NULL;
-    if (qc->project_root &&
-        dependency_at_cursor(d->tok_spans, d->tok_owners, d->num_tok_spans, pos,
-                             &owner, &dep)) {
-        ProjectNode *merged_owner =
-            project_node_for_doc_task(qc->project_root, d->task_prefix, owner);
-        ProjectNode *target = NULL;
-        if (merged_owner) {
-            int ordinal = (int)(dep - owner->dependencies);
-            if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
-                target = project_dep_resolve(merged_owner, ordinal,
-                                             qc->project_root);
-        }
-        if (target) {
-            char *value = project_node_hover_markdown(target);
-            yyjson_mut_val *contents = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_str(doc, contents, "kind", "markdown");
-            yyjson_mut_obj_add_strcpy(doc, contents, "value", value);
-            free(value);
-
-            yyjson_mut_val *hover = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_val(doc, hover, "contents", contents);
-            yyjson_mut_obj_add_val(doc, hover, "range",
-                                   range_json(doc, dep->source_range));
-            return make_response(doc, id, hover);
-        }
-    }
+    yyjson_mut_val *dep_hover = try_dependency_hover(doc, id, qc, d, pos);
+    if (dep_hover) return dep_hover;
 
     ActiveKeyword ak = active_keyword_at(d->tok_spans,
                                          d->num_tok_spans, pos);
