@@ -470,6 +470,31 @@ static member *collect_project_members(const workspace_snapshot *ws, int pindex,
     return members;
 }
 
+/** Fill each member's relpath: the portion of its absolute path below the
+ *  members' common ancestor directory, so includes resolve identically once
+ *  the members are staged under a shared tmpdir. A member that *is* the common
+ *  ancestor (empty remainder) falls back to its basename.
+ *  @param members   Member array whose `path` fields are set; `relpath` filled.
+ *  @param nmembers  Number of entries in @p members.
+ *  @return 1 on success, 0 on allocation failure (relpaths left unset). */
+static int assign_member_relpaths(member *members, int nmembers) {
+    char **paths = malloc((size_t)nmembers * sizeof(char *));
+    if (!paths) return 0;
+    for (int i = 0; i < nmembers; i++) paths[i] = members[i].path;
+    size_t common_len = common_dir_len(paths, nmembers);
+    free(paths);
+
+    for (int i = 0; i < nmembers; i++) {
+        char *rel = members[i].path + common_len;
+        if (*rel == '\0') {
+            char *slash = strrchr(members[i].path, '/');
+            rel = slash ? slash + 1 : members[i].path;
+        }
+        members[i].relpath = rel;
+    }
+    return 1;
+}
+
 void tj3_collect_project(const workspace_snapshot *ws, const ws_project *proj,
                          tj3_mode mode, diag_set *out) {
     if (!ws || !proj || !out) return;
@@ -486,19 +511,7 @@ void tj3_collect_project(const workspace_snapshot *ws, const ws_project *proj,
     if (nmembers == 0) { free(members); return; }
 
     /* Paths relative to the members' common ancestor, so includes resolve. */
-    char **paths = malloc((size_t)nmembers * sizeof(char *));
-    if (!paths) { goto cleanup; }
-    for (int i = 0; i < nmembers; i++) paths[i] = members[i].path;
-    size_t cl = common_dir_len(paths, nmembers);
-    free(paths);
-    for (int i = 0; i < nmembers; i++) {
-        char *rel = members[i].path + cl;
-        if (*rel == '\0') {
-            char *slash = strrchr(members[i].path, '/');
-            rel = slash ? slash + 1 : members[i].path;
-        }
-        members[i].relpath = rel;
-    }
+    if (!assign_member_relpaths(members, nmembers)) goto cleanup;
 
     /* The project's root document = the member whose URI is the project id. */
     char *root_rel = NULL;
