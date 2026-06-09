@@ -204,6 +204,40 @@ static int tj3_available(void) {
  *         stderr output of tj3, owned by the caller; NULL on fork,
  *         pipe, or allocation failure.
  */
+/**
+ * Read @p fd to EOF into a freshly allocated NUL-terminated buffer.
+ *
+ * On allocation failure the partial buffer is freed and @p fd is still
+ * drained to EOF (so the writer at the other end can finish and exit),
+ * then NULL is returned.
+ *
+ * @param fd       Readable file descriptor; not closed by this function.
+ * @param out_len  Receives the number of bytes read, excluding the NUL.
+ * @return Heap-allocated buffer the caller must free, or NULL on OOM.
+ */
+static char *read_fd_to_string(int fd, size_t *out_len) {
+    char  *buf = NULL;
+    size_t len = 0, cap = 0;
+    char   chunk[4096];
+    ssize_t n;
+    while ((n = read(fd, chunk, sizeof(chunk))) > 0) {
+        if (len + (size_t)n + 1 > cap) {
+            size_t new_cap = (len + (size_t)n + 1) * 2;
+            char *grown = realloc(buf, new_cap);
+            if (!grown) { free(buf); buf = NULL; len = 0; cap = 0; break; }
+            buf = grown;
+            cap = new_cap;
+        }
+        memcpy(buf + len, chunk, (size_t)n);
+        len += (size_t)n;
+    }
+    /* Drain any remaining bytes if we bailed on OOM, so the child can exit. */
+    if (!buf) while (read(fd, chunk, sizeof(chunk)) > 0) { }
+    if (buf) buf[len] = '\0';
+    *out_len = len;
+    return buf;
+}
+
 static char *run_tj3(const char *tmpdir, char *const argv[]) {
     int errpipe[2];
     if (pipe(errpipe) != 0) return NULL;
@@ -238,24 +272,8 @@ static char *run_tj3(const char *tmpdir, char *const argv[]) {
 
     /* Parent: drain stderr to EOF, then reap. */
     close(errpipe[1]);
-    char  *buf = NULL;
-    size_t len = 0, cap = 0;
-    char   chunk[4096];
-    ssize_t n;
-    while ((n = read(errpipe[0], chunk, sizeof(chunk))) > 0) {
-        if (len + (size_t)n + 1 > cap) {
-            size_t nc = (len + (size_t)n + 1) * 2;
-            char *t = realloc(buf, nc);
-            if (!t) { free(buf); buf = NULL; len = 0; cap = 0; break; }
-            buf = t;
-            cap = nc;
-        }
-        memcpy(buf + len, chunk, (size_t)n);
-        len += (size_t)n;
-    }
-    /* Drain any remaining bytes if we bailed on OOM, so the child can exit. */
-    if (!buf) while (read(errpipe[0], chunk, sizeof(chunk)) > 0) { }
-    if (buf) buf[len] = '\0';
+    size_t len = 0;
+    char *buf = read_fd_to_string(errpipe[0], &len);
     close(errpipe[0]);
 
     int status;
