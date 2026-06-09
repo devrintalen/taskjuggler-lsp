@@ -313,3 +313,16 @@ ProjectNode *project_node_for_doc_task(ProjectNode *project_root,
     free(qualified_id);
     return cur;
 }
+
+ProjectNode *project_resolve_dep_ref(ProjectNode *project_root,
+                                     const char *task_prefix,
+                                     const tj_node *owner,
+                                     const Dependency *dep) {
+    ProjectNode *merged_owner =
+        project_node_for_doc_task(project_root, task_prefix, owner);
+    if (!merged_owner) return NULL;
+
+    int ordinal = (int)(dep - owner->dependencies);
+    if (ordinal < 0 || ordinal >= merged_owner->num_dependencies) return NULL;
+    return project_dep_resolve(merged_owner, ordinal, project_root);
+}

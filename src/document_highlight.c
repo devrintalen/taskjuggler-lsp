@@ -159,13 +159,7 @@ static ProjectNode *resolve_highlight_target(const query_context *qc,
                               &owner, &dep))
         return NULL;
 
-    ProjectNode *merged_owner =
-        project_node_for_doc_task(qc->project_root, d->task_prefix, owner);
-    if (!merged_owner) return NULL;
-
-    int ordinal = (int)(dep - owner->dependencies);
-    if (ordinal < 0 || ordinal >= merged_owner->num_dependencies) return NULL;
-    return project_dep_resolve(merged_owner, ordinal, qc->project_root);
+    return project_resolve_dep_ref(qc->project_root, d->task_prefix, owner, dep);
 }
 
 yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc, yyjson_val *id,

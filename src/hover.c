@@ -546,14 +546,8 @@ static yyjson_mut_val *try_dependency_hover(yyjson_mut_doc *doc, yyjson_val *id,
                               &owner, &dep))
         return NULL;
 
-    ProjectNode *merged_owner =
-        project_node_for_doc_task(qc->project_root, d->task_prefix, owner);
-    ProjectNode *target = NULL;
-    if (merged_owner) {
-        int ordinal = (int)(dep - owner->dependencies);
-        if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
-            target = project_dep_resolve(merged_owner, ordinal, qc->project_root);
-    }
+    ProjectNode *target =
+        project_resolve_dep_ref(qc->project_root, d->task_prefix, owner, dep);
     if (!target) return NULL;
 
     char *value = project_node_hover_markdown(target);
