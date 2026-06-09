@@ -1243,6 +1243,23 @@ static void handle_initialized(void) {
  *  remove each changed disk-only document as indicated by its event type,
  *  then revalidate if anything changed.
  *  @param params  JSON params object with a "changes" array of file events. */
+/** Replace @p document's text with @p text and reparse it as a background
+ *  (disk_only) entry: takes ownership of @p text, marks the slot disk_only,
+ *  then parses, follows includes (resolved against @p path), and installs the
+ *  new ParseOutput.
+ *  @param document  Document slot to update.
+ *  @param text      New file contents; ownership transfers to @p document.
+ *  @param path      Filesystem path of the file, for include resolution
+ *                   (borrowed; the caller still owns and frees it). */
+static void install_disk_text(Document *document, char *text, const char *path) {
+    free(document->text);
+    document->text      = text;
+    document->disk_only = 1;
+    ParseOutput *po = parse(text);
+    follow_includes(path, po);
+    doc_install_parse(document, po);
+}
+
 /** Drop a background (disk_only) document in response to a watched-file
  *  delete event. Editor-managed documents are left for didClose to handle.
  *  @param uri  URI of the deleted file.
@@ -1273,12 +1290,7 @@ static int admit_watched_file(const char *uri) {
     if (!document) document = doc_alloc(uri);
     if (!document) { free(text); free(path); return 0; }
 
-    free(document->text);
-    document->text      = text;
-    document->disk_only = 1;
-    ParseOutput *po = parse(text);
-    follow_includes(path, po);
-    doc_install_parse(document, po);
+    install_disk_text(document, text, path);
     free(path);
     return 1;
 }
@@ -1348,12 +1360,7 @@ static void handle_did_rename_files(yyjson_val *params) {
         if (!new_doc) new_doc = doc_alloc(new_uri);
         if (!new_doc) { free(text); free(path); continue; }
 
-        free(new_doc->text);
-        new_doc->text      = text;
-        new_doc->disk_only = 1;
-        ParseOutput *po = parse(text);
-        follow_includes(path, po);
-        doc_install_parse(new_doc, po);
+        install_disk_text(new_doc, text, path);
         free(path);
         changed = 1;
     }
