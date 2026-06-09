@@ -74,6 +74,28 @@ TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
  *  @param brace_depth  Current brace nesting depth.
  *  @param tok          Token being considered as an argument.
  *  @param cursor       Cursor position the count is relative to. */
+/** Push a keyword token onto the scope stack at @p brace_depth. First pops any
+ *  entries at or deeper than @p brace_depth, since a new keyword at this level
+ *  closes the previous sibling keyword's scope. A no-op (other than the pop)
+ *  when the stack is already at @p stack_cap.
+ *  @param stack       Keyword scope stack.
+ *  @param stack_n     In/out count of valid entries in @p stack.
+ *  @param stack_cap   Capacity of @p stack.
+ *  @param brace_depth Current brace nesting depth.
+ *  @param tok         Keyword token to push (its text is strdup'd). */
+static void push_keyword_entry(KwStackEntry *stack, int *stack_n, int stack_cap,
+                               uint32_t brace_depth, const TokenSpan *tok) {
+    while (*stack_n > 0 && stack[*stack_n - 1].depth >= brace_depth)
+        free(stack[--(*stack_n)].kw);
+    if (*stack_n < stack_cap)
+        stack[(*stack_n)++] = (KwStackEntry){
+            strdup(tok->text),
+            (LspRange){ tok->start, tok->end },
+            brace_depth,
+            0
+        };
+}
+
 static void bump_active_argc(KwStackEntry *stack, int stack_n,
                              uint32_t brace_depth, const TokenSpan *tok,
                              LspPos cursor) {
@@ -122,16 +144,7 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
 
         default:
             if (tok->token_kind < kind_max && tok->text) {
-                while (stack_n > 0 && stack[stack_n - 1].depth >= brace_depth)
-                    free(stack[--stack_n].kw);
-                if (stack_n < stack_cap) {
-                    stack[stack_n++] = (KwStackEntry){
-                        strdup(tok->text),
-                        (LspRange){ tok->start, tok->end },
-                        brace_depth,
-                        0
-                    };
-                }
+                push_keyword_entry(stack, &stack_n, stack_cap, brace_depth, tok);
                 break;
             }
             if (track_argc)
