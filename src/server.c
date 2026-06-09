@@ -1376,6 +1376,45 @@ static void handle_didopen(yyjson_val *params) {
  *  change (incremental or full-replace) to the document's text, re-parse
  *  the result, follow includes, and trigger revalidation.
  *  @param params  JSON params with "textDocument" and "contentChanges". */
+/** Fold an LSP "contentChanges" array onto @p base_text, applying each
+ *  incremental (or full-replace) change in arrival order.
+ *
+ *  @p base_text is read but never freed; the result is a freshly allocated
+ *  buffer the caller owns. @p base_text starts as NULL until the first change
+ *  produces a buffer, so the first change reads straight from the document's
+ *  current text — avoiding an upfront full-source strdup of a possibly
+ *  multi-MB document on every keystroke.
+ *
+ *  @return New buffer with all changes applied, or NULL when no usable change
+ *          was produced (a change object missing "text", an allocation
+ *          failure, or an empty change list). On NULL the caller must leave
+ *          the document text untouched. */
+static char *apply_content_changes(const char *base_text, yyjson_val *changes) {
+    char *current = NULL;
+    size_t idx, max;
+    yyjson_val *change;
+    yyjson_arr_foreach(changes, idx, max, change) {
+        const char *base = current ? current : (base_text ? base_text : "");
+        yyjson_val *range_obj = yyjson_obj_get(change, "range");
+        const char *new_text  = yyjson_get_str(yyjson_obj_get(change, "text"));
+        if (!new_text) { free(current); return NULL; }
+
+        char *next;
+        if (range_obj) {
+            LspRange range;
+            range.start = json_to_pos(yyjson_obj_get(range_obj, "start"));
+            range.end   = json_to_pos(yyjson_obj_get(range_obj, "end"));
+            next = apply_incremental_change(base, range, new_text);
+        } else {
+            next = strdup(new_text);
+        }
+        free(current);              /* NULL on the first iteration: a no-op */
+        if (!next) return NULL;     /* base_text untouched; nothing leaked */
+        current = next;
+    }
+    return current;
+}
+
 static void handle_didchange(yyjson_val *params) {
     if (!params) return;
     yyjson_val *tdi     = yyjson_obj_get(params, "textDocument");
@@ -1393,33 +1432,8 @@ static void handle_didchange(yyjson_val *params) {
     Document *d = doc_find(uri);
     if (!d) return;
 
-    /* `current` is NULL until the first change produces a fresh buffer; the
-     * first change reads straight from d->text (or "") so we avoid an upfront
-     * full-source strdup of a possibly multi-MB document on every keystroke. */
-    char *current = NULL;
-
-    size_t idx, max;
-    yyjson_val *change;
-    yyjson_arr_foreach(changes, idx, max, change) {
-        const char *base = current ? current : (d->text ? d->text : "");
-        yyjson_val *range_obj = yyjson_obj_get(change, "range");
-        const char *new_text  = yyjson_get_str(yyjson_obj_get(change, "text"));
-        if (!new_text) { free(current); return; }
-
-        char *next;
-        if (range_obj) {
-            LspRange range;
-            range.start = json_to_pos(yyjson_obj_get(range_obj, "start"));
-            range.end   = json_to_pos(yyjson_obj_get(range_obj, "end"));
-            next = apply_incremental_change(base, range, new_text);
-        } else {
-            next = strdup(new_text);
-        }
-        free(current);              /* NULL on the first iteration: a no-op */
-        if (!next) return;          /* d->text untouched; nothing leaked */
-        current = next;
-    }
-    if (!current) return;           /* no usable change applied */
+    char *current = apply_content_changes(d->text, changes);
+    if (!current) return;           /* no usable change applied; d->text kept */
 
     free(d->text);
     d->text = current;
