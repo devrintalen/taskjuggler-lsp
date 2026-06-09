@@ -175,14 +175,14 @@ char *sym_qualified_id(const tj_node *sym) {
     char *out = malloc(total + 1);
     if (!out) return strdup(sym->id);
 
-    char *p = out;
+    char *write_ptr = out;
     for (int i = depth - 1; i >= 0; i--) {
         size_t len = strlen(chain[i]->id);
-        memcpy(p, chain[i]->id, len);
-        p += len;
-        if (i > 0) *p++ = '.';
+        memcpy(write_ptr, chain[i]->id, len);
+        write_ptr += len;
+        if (i > 0) *write_ptr++ = '.';
     }
-    *p = '\0';
+    *write_ptr = '\0';
     return out;
 }
 
@@ -232,19 +232,19 @@ char *project_node_hover_markdown(const ProjectNode *node) {
     for (int i = 0; i < depth; i++) total += strlen(chain[i]->id);
     if (depth > 0) total += (size_t)(depth - 1);
 
-    char *qid = malloc(total + 1);
-    if (!qid) return task_markdown(node->id, node->name ? node->name : "");
-    char *p = qid;
+    char *qualified_id = malloc(total + 1);
+    if (!qualified_id) return task_markdown(node->id, node->name ? node->name : "");
+    char *write_ptr = qualified_id;
     for (int i = depth - 1; i >= 0; i--) {
         size_t len = strlen(chain[i]->id);
-        memcpy(p, chain[i]->id, len);
-        p += len;
-        if (i > 0) *p++ = '.';
+        memcpy(write_ptr, chain[i]->id, len);
+        write_ptr += len;
+        if (i > 0) *write_ptr++ = '.';
     }
-    *p = '\0';
+    *write_ptr = '\0';
 
-    char *out = task_markdown(qid, node->name ? node->name : "");
-    free(qid);
+    char *out = task_markdown(qualified_id, node->name ? node->name : "");
+    free(qualified_id);
     return out;
 }
 
