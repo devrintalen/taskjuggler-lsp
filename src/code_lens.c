@@ -315,6 +315,52 @@ static void push_lens(yyjson_mut_doc *doc, yyjson_mut_val *arr,
  * is read directly from each token's owner (the parallel `owners` array)
  * — but kept for symmetry with other build_*_json entry points.
  */
+/**
+ * Format the code-lens title for a task with a known start or end and a
+ * length/duration of @p value @p unit.
+ *
+ * Walks from the task's fixed endpoint by the requested span to infer the
+ * opposite endpoint, then renders it as e.g. "→ ends 2024-01-15" (start
+ * known) or "← starts 2024-01-15" (end known). @p token_kind selects the
+ * calendar (KW_DURATION) or working-day (KW_LENGTH) walk.
+ *
+ * @param owner       Task node; must have has_start or has_end set.
+ * @param token_kind  KW_DURATION or KW_LENGTH.
+ * @param value       Magnitude of the span.
+ * @param unit        Unit character for @p value.
+ * @param title       Destination buffer for the formatted title.
+ * @param title_size  Size of @p title in bytes.
+ */
+static void format_inferred_date_title(const tj_node *owner, int token_kind,
+                                       int value, char unit,
+                                       char *title, size_t title_size) {
+    int direction;
+    time_t base;
+    const char *arrow;
+    if (owner->has_start) {
+        base = owner->start_date;
+        direction = +1;
+        arrow = "\xE2\x86\x92 ends ";   /* "→ ends " */
+    } else {
+        base = owner->end_date;
+        direction = -1;
+        arrow = "\xE2\x86\x90 starts "; /* "← starts " */
+    }
+
+    time_t result;
+    if (token_kind == KW_DURATION) {
+        long days = duration_to_calendar_days(value, unit);
+        result = walk_calendar_days_inclusive(base, labs(days), direction);
+    } else {
+        long days = length_to_working_days(value, unit);
+        result = walk_working_days_inclusive(base, labs(days), direction);
+    }
+
+    char date_buf[48];
+    format_date(result, date_buf, sizeof(date_buf));
+    snprintf(title, title_size, "%s%s", arrow, date_buf);
+}
+
 yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
                                      const TokenSpan *spans,
                                      tj_node *const *owners, int num_spans,
@@ -338,32 +384,9 @@ yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
         if (!parse_dur_val_at(spans, num_spans, i + 1, &value, &unit)) continue;
         if (value == 0) continue;
 
-        int direction;
-        time_t base;
-        const char *arrow;
-        if (owner->has_start) {
-            base = owner->start_date;
-            direction = +1;
-            arrow = "\xE2\x86\x92 ends ";   /* "→ ends " */
-        } else {
-            base = owner->end_date;
-            direction = -1;
-            arrow = "\xE2\x86\x90 starts "; /* "← starts " */
-        }
-
-        time_t result;
-        if (t->token_kind == KW_DURATION) {
-            long days = duration_to_calendar_days(value, unit);
-            result = walk_calendar_days_inclusive(base, labs(days), direction);
-        } else {
-            long days = length_to_working_days(value, unit);
-            result = walk_working_days_inclusive(base, labs(days), direction);
-        }
-
-        char date_buf[48];
-        format_date(result, date_buf, sizeof(date_buf));
         char title[80];
-        snprintf(title, sizeof(title), "%s%s", arrow, date_buf);
+        format_inferred_date_title(owner, t->token_kind, value, unit,
+                                   title, sizeof(title));
 
         LspRange range = { t->start, t->end };
         push_lens(doc, arr, range, title);
