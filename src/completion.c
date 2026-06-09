@@ -981,6 +981,30 @@ done:
     return list;
 }
 
+/** Gather the cross-file completion sources for a query: every non-primary
+ *  sibling document's top-level symbol pool. Every non-primary doc in the
+ *  context is a sibling in the requester's project (the clone step already
+ *  restricted membership); an orphan has no siblings, so it yields no extras.
+ *  @param qc            Query context to scan.
+ *  @param extra_pools   Receives up to MAX_DOCS sibling symbol pools.
+ *  @param extra_counts  Receives each pool's length, parallel to @p extra_pools.
+ *  @param out_num_extra Receives the number of pools collected. */
+static void collect_sibling_pools(const query_context *qc,
+                                  tj_node *const **extra_pools,
+                                  int *extra_counts, int *out_num_extra) {
+    int num_extra = 0;
+    for (int i = 0; i < qc->num_docs && num_extra < MAX_DOCS; i++) {
+        if (qc->docs[i].is_primary) continue;
+        tj_node *const *top; int n;
+        doc_symbol_pool(&qc->docs[i], &top, &n);
+        if (!top) continue;
+        extra_pools[num_extra]  = top;
+        extra_counts[num_extra] = n;
+        num_extra++;
+    }
+    *out_num_extra = num_extra;
+}
+
 yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
                                   yyjson_val *params, const query_context *qc,
                                   const query_doc *d) {
@@ -992,22 +1016,10 @@ yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
     if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
-    /* Every non-primary doc in the context is a sibling in the requester's
-     * project (the clone step already restricted membership), so each one's
-     * top-level pool is an extra cross-file completion source.  Orphans
-     * have no siblings, so the loop naturally yields no extras for them. */
     tj_node *const *extra_pools[MAX_DOCS];
     int             extra_counts[MAX_DOCS];
     int             num_extra = 0;
-    for (int i = 0; i < qc->num_docs && num_extra < MAX_DOCS; i++) {
-        if (qc->docs[i].is_primary) continue;
-        tj_node *const *top; int n;
-        doc_symbol_pool(&qc->docs[i], &top, &n);
-        if (!top) continue;
-        extra_pools[num_extra]  = top;
-        extra_counts[num_extra] = n;
-        num_extra++;
-    }
+    collect_sibling_pools(qc, extra_pools, extra_counts, &num_extra);
 
     tj_node *const *self_top; int self_n;
     doc_symbol_pool(d, &self_top, &self_n);
