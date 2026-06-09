@@ -414,6 +414,46 @@ static void parse_diagnostics(char *stderr_buf,
 
 /* ── entry point ─────────────────────────────────────────────────────────── */
 
+/**
+ * Gather the member documents of project @p pindex from @p ws into a freshly
+ * allocated array.
+ *
+ * Each member's `path` is heap-allocated (the caller frees it); `relpath` is
+ * left NULL for assign_member_relpaths() to fill in later, while `uri` and
+ * `text` borrow the document snapshot. A member whose URI cannot be converted
+ * to a path is skipped.
+ *
+ * @param ws            Workspace snapshot to scan.
+ * @param pindex        Index of the project whose members are wanted.
+ * @param out_nmembers  Receives the number of members collected.
+ * @return Heap-allocated member array (NULL when the project has no usable
+ *         members), owned by the caller.
+ */
+static member *collect_project_members(const workspace_snapshot *ws, int pindex,
+                                       int *out_nmembers) {
+    member *members = NULL;
+    int     nmembers = 0, cap = 0;
+    for (int i = 0; i < ws->num_docs; i++) {
+        const ws_doc *wd = &ws->docs[i];
+        if (wd->project_index != pindex || !wd->snap) continue;
+        char *path = uri_to_path(wd->snap->uri);
+        if (!path) continue;
+        if (nmembers >= cap) {
+            cap = cap ? cap * 2 : 4;
+            member *grown = realloc(members, (size_t)cap * sizeof(member));
+            if (!grown) { free(path); break; }
+            members = grown;
+        }
+        members[nmembers].path    = path;
+        members[nmembers].relpath = NULL;
+        members[nmembers].uri     = wd->snap->uri;
+        members[nmembers].text    = wd->snap->text;
+        nmembers++;
+    }
+    *out_nmembers = nmembers;
+    return members;
+}
+
 void tj3_collect_project(const workspace_snapshot *ws, const ws_project *proj,
                          tj3_mode mode, diag_set *out) {
     if (!ws || !proj || !out) return;
@@ -425,25 +465,8 @@ void tj3_collect_project(const workspace_snapshot *ws, const ws_project *proj,
     if (pindex < 0) return;
 
     /* Collect the project's member documents. */
-    member *members = NULL;
-    int     nmembers = 0, cap = 0;
-    for (int i = 0; i < ws->num_docs; i++) {
-        const ws_doc *wd = &ws->docs[i];
-        if (wd->project_index != pindex || !wd->snap) continue;
-        char *path = uri_to_path(wd->snap->uri);
-        if (!path) continue;
-        if (nmembers >= cap) {
-            cap = cap ? cap * 2 : 4;
-            member *t = realloc(members, (size_t)cap * sizeof(member));
-            if (!t) { free(path); break; }
-            members = t;
-        }
-        members[nmembers].path    = path;
-        members[nmembers].relpath = NULL;
-        members[nmembers].uri     = wd->snap->uri;
-        members[nmembers].text    = wd->snap->text;
-        nmembers++;
-    }
+    int nmembers = 0;
+    member *members = collect_project_members(ws, pindex, &nmembers);
     if (nmembers == 0) { free(members); return; }
 
     /* Paths relative to the members' common ancestor, so includes resolve. */
