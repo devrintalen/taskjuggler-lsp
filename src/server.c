@@ -406,6 +406,53 @@ static void replace_string(char **slot, const char *value) {
  *  and record the resolved URI in the includer's @c included_uris[] array.
  *  @param file_path  Filesystem path of the file that was just parsed.
  *  @param po         Parse output from parsing @p file_path; may be NULL. */
+/** Resolve an include directive's filename to an absolute filesystem path.
+ *  Absolute filenames are copied as-is; relative ones are joined against the
+ *  directory containing @p includer_path (or copied as-is when the includer
+ *  has no directory component).
+ *  @return malloc'd path the caller must free, or NULL on allocation failure. */
+static char *resolve_include_path(const char *includer_path, const char *filename) {
+    size_t fname_len = strlen(filename);
+
+    size_t path_len = strlen(includer_path);
+    const char *last_slash = NULL;
+    for (size_t i = path_len; i-- > 0; ) {
+        if (includer_path[i] == '/') { last_slash = includer_path + i; break; }
+    }
+
+    if (filename[0] == '/' || !last_slash) {
+        char *full_path = malloc(fname_len + 1);
+        if (full_path) memcpy(full_path, filename, fname_len + 1);
+        return full_path;
+    }
+
+    size_t dir_len = (size_t)(last_slash - includer_path);
+    char *full_path = malloc(dir_len + 1 + fname_len + 1);
+    if (!full_path) return NULL;
+    memcpy(full_path, includer_path, dir_len);
+    full_path[dir_len] = '/';
+    memcpy(full_path + dir_len + 1, filename, fname_len + 1);
+    return full_path;
+}
+
+/** Append @p uri to @p includer's included_uris[], growing the array as
+ *  needed. On success the array takes ownership of @p uri and 1 is returned;
+ *  on allocation failure the list is left unchanged and 0 is returned (the
+ *  caller retains ownership of @p uri). */
+static int includer_append_included_uri(Document *includer, char *uri) {
+    if (includer->num_included_uris >= includer->included_uris_cap) {
+        int new_cap = includer->included_uris_cap
+                      ? includer->included_uris_cap * 2 : 4;
+        char **grown = realloc(includer->included_uris,
+                               (size_t)new_cap * sizeof(char *));
+        if (!grown) return 0;
+        includer->included_uris     = grown;
+        includer->included_uris_cap = new_cap;
+    }
+    includer->included_uris[includer->num_included_uris++] = uri;
+    return 1;
+}
+
 static void follow_includes(const char *file_path, const ParseOutput *po) {
     /* Look up the includer Document so we can repopulate its
      * included_uris[] as we resolve each include below.  follow_includes
@@ -423,35 +470,13 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
 
     if (!po || !po->num_includes) return;
 
-    size_t path_len = strlen(file_path);
-    const char *last_slash = NULL;
-    for (size_t i = path_len; i-- > 0; ) {
-        if (file_path[i] == '/') { last_slash = file_path + i; break; }
-    }
-    size_t dir_len = last_slash ? (size_t)(last_slash - file_path) : 0;
-
     for (int i = 0; i < po->num_includes; i++) {
         const IncludeRef *inc = &po->includes[i];
         const char *filename = inc->filename;
         if (!filename) continue;
-        size_t fname_len = strlen(filename);
 
-        char *full_path;
-        if (filename[0] == '/') {
-            full_path = malloc(fname_len + 1);
-            if (!full_path) continue;
-            memcpy(full_path, filename, fname_len + 1);
-        } else if (last_slash) {
-            full_path = malloc(dir_len + 1 + fname_len + 1);
-            if (!full_path) continue;
-            memcpy(full_path, file_path, dir_len);
-            full_path[dir_len] = '/';
-            memcpy(full_path + dir_len + 1, filename, fname_len + 1);
-        } else {
-            full_path = malloc(fname_len + 1);
-            if (!full_path) continue;
-            memcpy(full_path, filename, fname_len + 1);
-        }
+        char *full_path = resolve_include_path(file_path, filename);
+        if (!full_path) continue;
 
         DLOG(DEBUG_INCLUDES, LOG_VERBOSE, "include '%s' -> %s", filename, full_path);
         load_file_from_disk(full_path);
@@ -474,22 +499,8 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
         /* Record this resolved URI on the includer so
          * build_workspace_snapshot() can BFS the include graph.  Ownership
          * of target_uri transfers to includer->included_uris[]. */
-        if (includer && target_uri) {
-            if (includer->num_included_uris >= includer->included_uris_cap) {
-                int new_cap = includer->included_uris_cap
-                              ? includer->included_uris_cap * 2 : 4;
-                char **tmp = realloc(includer->included_uris,
-                                     (size_t)new_cap * sizeof(char *));
-                if (tmp) {
-                    includer->included_uris     = tmp;
-                    includer->included_uris_cap = new_cap;
-                }
-            }
-            if (includer->num_included_uris < includer->included_uris_cap) {
-                includer->included_uris[includer->num_included_uris++] = target_uri;
-                target_uri = NULL;
-            }
-        }
+        if (includer && target_uri && includer_append_included_uri(includer, target_uri))
+            target_uri = NULL;
         free(target_uri);
 
         free(full_path);
