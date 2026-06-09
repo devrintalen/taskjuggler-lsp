@@ -124,8 +124,12 @@ static void store_semantic_token(int token) {
 
 /* emit_kw: keyword / date / duration — recorded in sem-tokens AND returned.
  * The value-stack Token.text reuses the arena copy g_push_tok_span interns
- * (no separate strdup); token_free() treats it as a borrowed pointer. */
-static int emit_kw(int code) {
+ * (no separate strdup); token_free() treats it as a borrowed pointer.
+ *
+ * always_inline: every call site passes a compile-time-constant `code`, so
+ * inlining into raw_yylex lets the compiler fold this per token rather than
+ * dispatch through an out-of-line call. */
+static inline __attribute__((always_inline)) int emit_kw(int code) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
     char *text = g_push_tok_span(code, tok_sl, tok_sc, el, ec, yytext, (size_t)yyleng);
@@ -136,8 +140,12 @@ static int emit_kw(int code) {
 /* emit_plain: identifier / number / punctuation.
  * Tokens needed by hover/completion/signature/dep-validation are also
  * recorded in sem-tokens so that downstream passes can work without a
- * separate full token array. */
-static int emit_plain(int code) {
+ * separate full token array.
+ *
+ * always_inline: with the constant `code` from each call site, the switch
+ * below folds to the one matching arm (often a single g_push_tok_span call or
+ * none) right inside raw_yylex — no per-token dispatch or out-of-line call. */
+static inline __attribute__((always_inline)) int emit_plain(int code) {
     uint32_t el = (uint32_t)(yylineno - 1);
     uint32_t ec = (uint32_t)yycolumn;
     char *text = NULL;
