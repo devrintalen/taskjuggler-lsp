@@ -534,14 +534,10 @@ static void assign_token_owners(ParseOutput *po) {
 
 /* ── Public parse() entry point ──────────────────────────────────────────── */
 
-ParseOutput *parse(const char *src) {
-    ParseOutput *po = calloc(1, sizeof(ParseOutput));
-    if (!po) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    po->root = alloc_synthetic_root();
-
-    /* Set up global state for lexer.l and grammar.y.  Reuse a retired
-     * token-span buffer when one is cached (its pages are already mapped),
-     * falling back to a fresh allocation on first parse. */
+/** Install the shared lexer/parser global state for a fresh parse of @p po.
+ *  Reuses a retired token-span buffer when one is cached (its pages are
+ *  already mapped), falling back to a fresh allocation on first parse. */
+static void install_parse_globals(ParseOutput *po) {
     g_output          = po;
     g_tok_spans       = tok_spans_take(&g_tok_span_cap);
     g_num_tok_spans   = 0;
@@ -551,6 +547,30 @@ ParseOutput *parse(const char *src) {
     yylineno          = 1;
     reset_pending_include_state();
     reset_eol_state();
+}
+
+/** Move the token spans / arena / counts accumulated in the parser globals
+ *  into @p po, then clear the shared global state for the next parse. */
+static void harvest_parse_globals(ParseOutput *po) {
+    po->tok_spans       = g_tok_spans;
+    po->num_tok_spans   = g_num_tok_spans;
+    po->tok_arena       = g_tok_arena;
+    po->num_sem_entries = g_num_sem_entries;
+
+    g_output          = NULL;
+    g_tok_spans       = NULL;
+    g_num_tok_spans   = 0;
+    g_tok_span_cap    = 0;
+    g_tok_arena       = NULL;
+    g_num_sem_entries = 0;
+}
+
+ParseOutput *parse(const char *src) {
+    ParseOutput *po = calloc(1, sizeof(ParseOutput));
+    if (!po) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    po->root = alloc_synthetic_root();
+
+    install_parse_globals(po);
 
 #if DEBUG_PARSER >= LOG_VERBOSE
     struct timespec parse_t0, parse_t1, parse_t2;
@@ -563,17 +583,7 @@ ParseOutput *parse(const char *src) {
     clock_gettime(CLOCK_MONOTONIC, &parse_t1);
 #endif
 
-    po->tok_spans       = g_tok_spans;
-    po->num_tok_spans   = g_num_tok_spans;
-    po->tok_arena       = g_tok_arena;
-    po->num_sem_entries = g_num_sem_entries;
-
-    g_output          = NULL;
-    g_tok_spans       = NULL;
-    g_num_tok_spans   = 0;
-    g_tok_span_cap    = 0;
-    g_tok_arena       = NULL;
-    g_num_sem_entries = 0;
+    harvest_parse_globals(po);
 
     /* The grammar appends top-level declarations to root as they reduce,
      * which interleaves a project block's hoisted body children ahead of
