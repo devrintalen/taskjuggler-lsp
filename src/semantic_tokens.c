@@ -189,6 +189,25 @@ static void push_entry(uint32_t *buf, int *count,
  * @param prev_char   Tracks the previous emitted entry's column; updated
  *                    in lockstep with @p prev_line.
  */
+/** Push one semantic-token entry encoded relative to the previous token.
+ *  Computes the LSP delta-line / delta-start from (@p line, @p character)
+ *  against (*@p prev_line, *@p prev_char), appends the entry, then advances
+ *  the previous-position cursor to this token's origin.
+ *  @param buf,count            Destination entry buffer and its running count.
+ *  @param line,character,length Absolute origin and length of this token.
+ *  @param token_type,modifiers  Semantic classification of this token.
+ *  @param prev_line,prev_char   In/out previous-token origin for delta coding. */
+static void push_relative_entry(uint32_t *buf, int *count,
+                                uint32_t line, uint32_t character, uint32_t length,
+                                int token_type, int modifiers,
+                                uint32_t *prev_line, uint32_t *prev_char) {
+    uint32_t delta_line  = line - *prev_line;
+    uint32_t delta_start = (delta_line == 0) ? character - *prev_char : character;
+    push_entry(buf, count, delta_line, delta_start, length, token_type, modifiers);
+    *prev_line = line;
+    *prev_char = character;
+}
+
 static void emit_token(uint32_t *buf, int *count,
                         uint32_t start_line, uint32_t start_char,
                         uint32_t end_line,   uint32_t end_char,
@@ -197,14 +216,9 @@ static void emit_token(uint32_t *buf, int *count,
                         uint32_t *prev_line, uint32_t *prev_char) {
     if (start_line == end_line) {
         /* Single-line token. */
-        uint32_t delta_line  = start_line - *prev_line;
-        uint32_t delta_start = (delta_line == 0)
-                               ? start_char - *prev_char
-                               : start_char;
-        push_entry(buf, count, delta_line, delta_start,
-                   end_char - start_char, token_type, modifiers);
-        *prev_line = start_line;
-        *prev_char = start_char;
+        push_relative_entry(buf, count, start_line, start_char,
+                            end_char - start_char, token_type, modifiers,
+                            prev_line, prev_char);
         return;
     }
 
@@ -214,20 +228,13 @@ static void emit_token(uint32_t *buf, int *count,
     uint32_t current_char = start_char;
 
     while (current_line < end_line) {
-        uint32_t delta_line  = current_line - *prev_line;
-        uint32_t delta_start = (delta_line == 0)
-                               ? current_char - *prev_char
-                               : current_char;
-
         /* Count characters on this source line within the token text. */
         const char *nl = strchr(p, '\n');
         uint32_t seg_len = nl ? (uint32_t)(nl - p) : (uint32_t)strlen(p);
 
-        if (seg_len > 0) {
-            push_entry(buf, count, delta_line, delta_start, seg_len, token_type, modifiers);
-            *prev_line = current_line;
-            *prev_char = current_char;
-        }
+        if (seg_len > 0)
+            push_relative_entry(buf, count, current_line, current_char, seg_len,
+                                token_type, modifiers, prev_line, prev_char);
 
         if (nl) p = nl + 1;
         current_line++;
@@ -236,15 +243,8 @@ static void emit_token(uint32_t *buf, int *count,
 
     /* Last line: ends at end_char; current_char is 0 for all but the
      * degenerate single-line case (already handled above). */
-    {
-        uint32_t delta_line  = current_line - *prev_line;
-        uint32_t delta_start = (delta_line == 0)
-                               ? current_char - *prev_char
-                               : current_char;
-        push_entry(buf, count, delta_line, delta_start, end_char, token_type, modifiers);
-        *prev_line = current_line;
-        *prev_char = current_char;
-    }
+    push_relative_entry(buf, count, current_line, current_char, end_char,
+                        token_type, modifiers, prev_line, prev_char);
 }
 
 /* ── Integer serialization ───────────────────────────────────────────────── */
