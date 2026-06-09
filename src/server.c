@@ -713,6 +713,20 @@ cleanup:
  *  in-file LSP behavior (completion, hover, etc.) without bleeding into other
  *  projects' cross-file pools.
  *  @return  Newly allocated workspace_snapshot with refcount 1. */
+/** Populate one ws_doc from its live Document: take a ref on the current
+ *  parse snapshot and copy the per-kind include prefixes into the immutable
+ *  workspace snapshot.
+ *  @param w  Destination ws_doc in the snapshot under construction.
+ *  @param d  Source document whose snapshot and prefixes are captured. */
+static void populate_ws_doc(ws_doc *w, Document *d) {
+    w->snap            = docsnap_acquire(d->snap);
+    w->task_prefix     = d->task_prefix     ? strdup(d->task_prefix)     : NULL;
+    w->account_prefix  = d->account_prefix  ? strdup(d->account_prefix)  : NULL;
+    w->report_prefix   = d->report_prefix   ? strdup(d->report_prefix)   : NULL;
+    w->resource_prefix = d->resource_prefix ? strdup(d->resource_prefix) : NULL;
+    w->disk_only       = d->disk_only;
+}
+
 static workspace_snapshot *build_workspace_snapshot(void) {
     int slot_to_wsdoc[MAX_DOCS];
     int ndoc = 0;
@@ -729,14 +743,7 @@ static workspace_snapshot *build_workspace_snapshot(void) {
     for (int i = 0; i < MAX_DOCS; i++) {
         int wsd = slot_to_wsdoc[i];
         if (wsd < 0) continue;
-        Document *d = &docs[i];
-        ws_doc    *w = &ws->docs[wsd];
-        w->snap            = docsnap_acquire(d->snap);
-        w->task_prefix     = d->task_prefix     ? strdup(d->task_prefix)     : NULL;
-        w->account_prefix  = d->account_prefix  ? strdup(d->account_prefix)  : NULL;
-        w->report_prefix   = d->report_prefix   ? strdup(d->report_prefix)   : NULL;
-        w->resource_prefix = d->resource_prefix ? strdup(d->resource_prefix) : NULL;
-        w->disk_only       = d->disk_only;
+        populate_ws_doc(&ws->docs[wsd], &docs[i]);
     }
 
     /* Stamp the cc-status so the diagnostics workers can emit the per-file
