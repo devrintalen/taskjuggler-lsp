@@ -95,6 +95,60 @@ static int tokens_equal(const uint32_t *a, const uint32_t *b) {
  * @param out_n_ops  Output pointer set to the number of entries in
  *                   @p out_ops.
  */
+/**
+ * Coalesce a raw edit-step list into grouped EditOps.
+ *
+ * @p raw_kinds holds per-step kinds (0 = snake/match, 1 = delete from a,
+ * 2 = insert from b) in reverse chronological order. This walks the script
+ * chronologically (reverse of recorded order): a snake advances the running
+ * position in both sequences and closes any open edit run, while consecutive
+ * delete/insert steps merge into one EditOp spanning that run.
+ *
+ * @param raw_kinds  Step kinds, recorded in reverse chronological order.
+ * @param n_raw      Number of steps in @p raw_kinds.
+ * @param a_offset   Token offset of the diff window within the old buffer.
+ * @param b_offset   Token offset of the diff window within the new buffer.
+ * @param max_ops    Upper bound on edit runs (the Myers edit distance).
+ * @param out_ops    Receives the malloc'd EditOp array (caller frees).
+ * @param out_n_ops  Receives the number of EditOps produced.
+ */
+static void coalesce_edit_ops(const int *raw_kinds, size_t n_raw,
+                              size_t a_offset, size_t b_offset, size_t max_ops,
+                              EditOp **out_ops, size_t *out_n_ops) {
+    EditOp *ops = malloc(max_ops * sizeof(EditOp));
+    size_t n_ops = 0;
+    size_t cur_x = 0, cur_y = 0;
+    size_t idx = n_raw;
+    while (idx > 0) {
+        if (raw_kinds[idx - 1] == 0) {
+            cur_x++;
+            cur_y++;
+            idx--;
+            continue;
+        }
+        size_t edit_start_x = cur_x;
+        size_t edit_start_b = cur_y;
+        size_t del = 0, ins = 0;
+        while (idx > 0 && raw_kinds[idx - 1] != 0) {
+            if (raw_kinds[idx - 1] == 1) {
+                cur_x++;
+                del++;
+            } else {
+                cur_y++;
+                ins++;
+            }
+            idx--;
+        }
+        ops[n_ops].start_tok      = a_offset + edit_start_x;
+        ops[n_ops].delete_tok     = del;
+        ops[n_ops].insert_b_start = b_offset + edit_start_b;
+        ops[n_ops].insert_tok     = ins;
+        n_ops++;
+    }
+    *out_ops   = ops;
+    *out_n_ops = n_ops;
+}
+
 static void myers_diff_run(const uint32_t *a, size_t na,
                            const uint32_t *b, size_t nb,
                            size_t a_offset, size_t b_offset,
@@ -229,45 +283,10 @@ found:
 
     free(snap);
 
-    /* Coalesce: walk the raw script in chronological order (reverse of
-     * recorded order) and group consecutive non-snake ops into a single
-     * EditOp.  Snakes advance the running position in both a and b but
-     * close any open edit run. */
-    EditOp *ops = malloc((size_t)d_found * sizeof(EditOp));
-    size_t n_ops = 0;
-    size_t cur_x = 0, cur_y = 0;
-    size_t idx = n_raw;
-    while (idx > 0) {
-        if (raw_kinds[idx - 1] == 0) {
-            cur_x++;
-            cur_y++;
-            idx--;
-            continue;
-        }
-        size_t edit_start_x = cur_x;
-        size_t edit_start_b = cur_y;
-        size_t del = 0, ins = 0;
-        while (idx > 0 && raw_kinds[idx - 1] != 0) {
-            if (raw_kinds[idx - 1] == 1) {
-                cur_x++;
-                del++;
-            } else {
-                cur_y++;
-                ins++;
-            }
-            idx--;
-        }
-        ops[n_ops].start_tok      = a_offset + edit_start_x;
-        ops[n_ops].delete_tok     = del;
-        ops[n_ops].insert_b_start = b_offset + edit_start_b;
-        ops[n_ops].insert_tok     = ins;
-        n_ops++;
-    }
-
+    /* Group the raw step list into one EditOp per run of edits. */
+    coalesce_edit_ops(raw_kinds, n_raw, a_offset, b_offset,
+                      (size_t)d_found, out_ops, out_n_ops);
     free(raw_kinds);
-
-    *out_ops   = ops;
-    *out_n_ops = n_ops;
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
