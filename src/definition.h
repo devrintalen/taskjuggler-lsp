@@ -25,22 +25,18 @@
 #include <yyjson.h>
 
 /**
- * Build the textDocument/definition response for a dependency reference.
+ * Build the textDocument/definition response for a resolved dependency target.
  *
- * Resolves @p owner's dependency at @p dep_index against @p project_root
- * (memoizing in-node) and returns a single LSP `Location` pointing at the
- * target task's identifier.  Returns NULL — serialised as JSON `null` by
- * the caller — when the reference does not resolve.
+ * Returns a single LSP `Location` pointing at @p target's identifier, or NULL
+ * — serialised as JSON `null` by the caller — when @p target is NULL (the
+ * reference did not resolve). Callers obtain @p target via
+ * project_resolve_dep_ref().
  *
- * @param doc           Destination mutable JSON document.
- * @param owner         The ProjectNode task whose dependency is under the cursor.
- * @param dep_index     Index of the dependency within @p owner.
- * @param project_root  The requester's Project synthetic root.
+ * @param doc     Destination mutable JSON document.
+ * @param target  The resolved target task ProjectNode, or NULL.
  * @return A `Location` JSON object, or NULL.
  */
-yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
-                                       ProjectNode *owner, int dep_index,
-                                       ProjectNode *project_root);
+yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc, ProjectNode *target);
 
 /**
  * Handle "textDocument/definition": resolve the dependency reference under
