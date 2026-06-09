@@ -60,7 +60,7 @@ TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
         copy.text = strdup(tokens[found].text ? tokens[found].text : "");
         return copy;
     }
-    return (TokenSpan){ TK_EOF, pos, pos, strdup(""), NULL };
+    return (TokenSpan){ TK_EOF, pos, pos, strdup("") };
 }
 
 /* ── scan_kw_stack ───────────────────────────────────────────────────────── */
@@ -541,7 +541,7 @@ yyjson_mut_val *handle_hover(yyjson_mut_doc *doc, yyjson_val *id,
     tj_node          *owner = NULL;
     const Dependency *dep   = NULL;
     if (qc->project_root &&
-        dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
+        dependency_at_cursor(d->tok_spans, d->tok_owners, d->num_tok_spans, pos,
                              &owner, &dep)) {
         ProjectNode *merged_owner =
             project_node_for_doc_task(qc->project_root, d->task_prefix, owner);

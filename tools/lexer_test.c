@@ -272,13 +272,19 @@ static const char *token_kind_name(int k) {
 
 /* ── Stubs required by lexer.yy.c ───────────────────────────────────────── */
 
-/* g_push_tok_span: normally accumulates tokens into a ParseResult; here we just
- * print each token as it arrives. */
-void g_push_tok_span(int kind,
-                     uint32_t sl, uint32_t sc,
-                     uint32_t el, uint32_t ec,
-                     const char *text) {
-    /* Collapse newlines in text so each token fits on one line. */
+/* g_push_tok_span: normally accumulates tokens into a ParseResult and returns
+ * the interned lexeme; here we just print each token and return NULL (the
+ * standalone lexer driver never reads the value-stack text back).  The
+ * signature must match parser.c's definition so -flto sees one consistent
+ * declaration. */
+char *g_push_tok_span(int kind,
+                      uint32_t sl, uint32_t sc,
+                      uint32_t el, uint32_t ec,
+                      const char *text, size_t len) {
+    (void)len;
+    /* Collapse newlines in text so each token fits on one line.  text is NULL
+     * for punctuation whose lexeme the parser never records. */
+    if (!text) text = "";
     char display[48];
     int j = 0;
     for (int i = 0; text[i] && j < (int)sizeof(display) - 4; i++) {
@@ -294,6 +300,7 @@ void g_push_tok_span(int kind,
 
     printf("%3u:%-3u  %3u:%-3u  %-18s  %s\n",
            sl, sc, el, ec, token_kind_name(kind), display);
+    return NULL;
 }
 
 /* yylval: normally defined by bison's grammar.tab.c; provide it here so the

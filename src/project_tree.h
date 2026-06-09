@@ -62,7 +62,7 @@ typedef struct ProjectNode ProjectNode;
 typedef struct {
     DepKind            kind;           /**< whether this dep is `depends` or `precedes` */
     int                bang_count;     /**< number of leading `!` characters */
-    char              *path;           /**< owned; dotted identifier path */
+    char              *path;           /**< arena-owned (snapshot node_strings); dotted identifier path */
     LspRange           source_range;   /**< spans the bang(s) + path in source */
     _Atomic uintptr_t  resolved;       /**< memo cell; see above */
 } ProjectDep;
@@ -82,8 +82,8 @@ typedef struct {
 struct ProjectNode {
     /* ── Identity ── */
     int           keyword;          /**< KW_ / TK_ constant; 0 for the synthetic root */
-    char         *id;               /**< owned; NULL on the synthetic root */
-    char         *name;             /**< owned; NULL on the synthetic root */
+    char         *id;               /**< arena-owned (snapshot node_strings); NULL on the synthetic root */
+    char         *name;             /**< arena-owned (snapshot node_strings); NULL on the synthetic root */
 
     /* ── Source location ── */
     LspRange      range;            /**< full declaration including body */
@@ -93,31 +93,37 @@ struct ProjectNode {
      * URI of the document this node was copied from.  Owned (strdup of
      * Document.uri) so the tree stays valid independent of that document.
      * NULL on the synthetic root. */
-    char         *source_uri;       /**< owned; see above */
+    char         *source_uri;       /**< arena-owned (snapshot node_strings), shared per document; see above */
 
     /* ── Dependencies (task nodes only) ── */
-    ProjectDep   *dependencies;     /**< owned array; @see num_dependencies */
+    ProjectDep   *dependencies;     /**< arena-owned array (snapshot node arena); @see num_dependencies */
     int           num_dependencies; /**< number of valid entries in `dependencies` */
 
     /* ── Tree links ── */
     ProjectNode  *parent_node;      /**< parent in this tree; NULL on the synthetic root */
-    ProjectNode **children;         /**< owned array; @see num_children */
+    ProjectNode **children;         /**< owned heap array (grown dynamically); @see num_children */
     int           num_children;     /**< number of valid entries in `children` */
     int           num_children_cap; /**< allocated capacity of `children` */
 };
 
 /**
  * Deep-copy a tj_node subtree into a freshly allocated ProjectNode
- * subtree, stamping @p source_uri (deep-copied) onto every node.  Copies
- * id / name strings and the dependency array (each dependency's memo cell
- * initialized to unresolved).  `parent_node` is wired internally; the
- * returned root's `parent_node` is NULL.
+ * subtree, stamping @p source_uri onto every node.  Each node's id / name and
+ * every dependency path are copied into @p arena (the dependency memo cell is
+ * initialized to unresolved); @p source_uri is stored as-is and is expected to
+ * already live in @p arena (intern it once per document — it is identical for
+ * every node of a document).  `parent_node` is wired internally; the returned
+ * root's `parent_node` is NULL.  Only the node structs, children arrays, and
+ * dependency arrays are heap-allocated (freed by project_node_free); all
+ * strings belong to @p arena and are freed in bulk with it.
  *
  * @param src         Source tj_node.  NULL returns NULL.
- * @param source_uri  Owning document URI; deep-copied onto every node.
- * @return Newly allocated independent subtree.
+ * @param source_uri  Owning document URI, already interned in @p arena (or NULL).
+ * @param arena       String arena backing the copied id / name / dep paths.
+ * @return Newly allocated subtree; its strings are owned by @p arena.
  */
-ProjectNode *project_node_from_tj(const tj_node *src, const char *source_uri);
+ProjectNode *project_node_from_tj(const tj_node *src, char *source_uri,
+                                  str_arena *arena);
 
 /**
  * Append @p child under @p parent (growing the children array) and set

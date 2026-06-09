@@ -39,14 +39,15 @@
  * contains @p cursor.
  *
  * @param tokens      Token spans of the document under the cursor.
- * @param num_tokens  Length of @p tokens.
+ * @param owners      Per-token owner array, parallel to @p tokens.
+ * @param num_tokens  Length of @p tokens / @p owners.
  * @param cursor      Cursor position.
  * @param out_owner   Receives the task that declared the dependency.
  * @param out_dep     Receives the matched dependency.
  * @return 1 when a dependency reference is found, 0 otherwise.
  */
-int dependency_at_cursor(const TokenSpan *tokens, int num_tokens,
-                         LspPos cursor,
+int dependency_at_cursor(const TokenSpan *tokens, tj_node *const *owners,
+                         int num_tokens, LspPos cursor,
                          tj_node **out_owner, const Dependency **out_dep);
 
 /**
@@ -54,10 +55,11 @@ int dependency_at_cursor(const TokenSpan *tokens, int num_tokens,
  * contains @p cursor, walking outward from the innermost enclosing node.
  *
  * @param tokens      Token spans of the document under the cursor.
- * @param num_tokens  Length of @p tokens.
+ * @param owners      Per-token owner array, parallel to @p tokens.
+ * @param num_tokens  Length of @p tokens / @p owners.
  * @param cursor      Cursor position.
  * @return The matched task tj_node, or NULL when the cursor is not on a
  *         task identifier.
  */
-tj_node *task_decl_at_cursor(const TokenSpan *tokens, int num_tokens,
-                             LspPos cursor);
+tj_node *task_decl_at_cursor(const TokenSpan *tokens, tj_node *const *owners,
+                             int num_tokens, LspPos cursor);

@@ -255,14 +255,15 @@ static void doc_install_parse(Document *d, ParseOutput *po) {
     if (po) {
         uint64_t version = atomic_fetch_add(&d->doc_version, 1);
         fresh = docsnap_new(d->uri, d->text,
-                            po->root, po->tok_spans,
+                            po->root, po->tok_spans, po->tok_owners,
                             po->num_tok_spans, po->tok_arena,
                             po->num_sem_entries, version);
-        /* Ownership of the tree, token spans, and their backing arena moved
-         * into the snapshot; null them out so parse_output_free only releases
-         * what po still owns (the includes array and the struct shell). */
+        /* Ownership of the tree, token spans + owners, and their backing arena
+         * moved into the snapshot; null them out so parse_output_free only
+         * releases what po still owns (the includes array and the struct shell). */
         po->root            = NULL;
         po->tok_spans       = NULL;
+        po->tok_owners      = NULL;
         po->num_tok_spans   = 0;
         po->tok_arena       = NULL;
         po->num_sem_entries = 0;
@@ -582,6 +583,11 @@ static void copy_document_into_project(workspace_snapshot *ws, int pidx, Documen
     if (!d->snap || !d->snap->root) return;
     ProjectNode *proot = &ws->projects[pidx]->root;
     tj_node *root = d->snap->root;
+    /* Intern this document's URI once: every node copied below shares it, so a
+     * 10k-node document interns one string instead of strdup'ing per node. */
+    char *source_uri = d->uri
+        ? arena_strndup(ws->node_strings, d->uri, strlen(d->uri))
+        : NULL;
     for (int i = 0; i < root->num_children; i++) {
         tj_node    *child = root->children[i];
         const char *prefix;
@@ -601,8 +607,8 @@ static void copy_document_into_project(workspace_snapshot *ws, int pidx, Documen
         }
         ProjectNode *target = find_node_by_dotted_path(proot, prefix, kind);
         if (!target) continue;
-        project_node_append_child(target,
-                                  project_node_from_tj(child, d->uri));
+        project_node_append_child(
+            target, project_node_from_tj(child, source_uri, ws->node_strings));
     }
 }
 
@@ -1364,43 +1370,73 @@ static void handle_didchange(yyjson_val *params) {
     Document *d = doc_find(uri);
     if (!d) return;
 
-    char *current = d->text ? strdup(d->text) : strdup("");
-    if (!current) return;
+    /* `current` is NULL until the first change produces a fresh buffer; the
+     * first change reads straight from d->text (or "") so we avoid an upfront
+     * full-source strdup of a possibly multi-MB document on every keystroke. */
+    char *current = NULL;
 
     size_t idx, max;
     yyjson_val *change;
     yyjson_arr_foreach(changes, idx, max, change) {
+        const char *base = current ? current : (d->text ? d->text : "");
         yyjson_val *range_obj = yyjson_obj_get(change, "range");
         const char *new_text  = yyjson_get_str(yyjson_obj_get(change, "text"));
         if (!new_text) { free(current); return; }
 
+        char *next;
         if (range_obj) {
             LspRange range;
             range.start = json_to_pos(yyjson_obj_get(range_obj, "start"));
             range.end   = json_to_pos(yyjson_obj_get(range_obj, "end"));
-            char *next = apply_incremental_change(current, range, new_text);
-            free(current);
-            if (!next) return;
-            current = next;
+            next = apply_incremental_change(base, range, new_text);
         } else {
-            free(current);
-            current = strdup(new_text);
-            if (!current) return;
+            next = strdup(new_text);
         }
+        free(current);              /* NULL on the first iteration: a no-op */
+        if (!next) return;          /* d->text untouched; nothing leaked */
+        current = next;
     }
+    if (!current) return;           /* no usable change applied */
 
     free(d->text);
     d->text = current;
+
+    /* didChange runs serially on the coordinator, so its cost lands as latency
+     * on the next request.  Time each phase (parse dominates) under
+     * DEBUG_DOCSTORE >= LOG_VERBOSE; compiled out of the default build. */
+#if DEBUG_DOCSTORE >= LOG_VERBOSE
+    struct timespec dc_t[5];
+    clock_gettime(CLOCK_MONOTONIC, &dc_t[0]);
+#endif
     ParseOutput *po = parse(d->text);
+#if DEBUG_DOCSTORE >= LOG_VERBOSE
+    clock_gettime(CLOCK_MONOTONIC, &dc_t[1]);
+#endif
 
     char *path = uri_to_path(uri);
     if (path) {
         follow_includes(path, po);
         free(path);
     }
+#if DEBUG_DOCSTORE >= LOG_VERBOSE
+    clock_gettime(CLOCK_MONOTONIC, &dc_t[2]);
+#endif
     doc_install_parse(d, po);
+#if DEBUG_DOCSTORE >= LOG_VERBOSE
+    clock_gettime(CLOCK_MONOTONIC, &dc_t[3]);
+#endif
 
     revalidate_all_docs();
+#if DEBUG_DOCSTORE >= LOG_VERBOSE
+    clock_gettime(CLOCK_MONOTONIC, &dc_t[4]);
+    #define DC_MS(i, j) (((dc_t[j].tv_sec  - dc_t[i].tv_sec)  * 1000.0) \
+                       +  ((dc_t[j].tv_nsec - dc_t[i].tv_nsec) / 1e6))
+    DLOG(DEBUG_DOCSTORE, LOG_VERBOSE,
+         "didChange phases: parse=%.1f follow_includes=%.1f install=%.1f "
+         "revalidate=%.1f total=%.1f ms",
+         DC_MS(0, 1), DC_MS(1, 2), DC_MS(2, 3), DC_MS(3, 4), DC_MS(0, 4));
+    #undef DC_MS
+#endif
 }
 
 /** Handle the "textDocument/didClose" notification: revert the document to
@@ -1590,6 +1626,7 @@ static query_context *build_query_context_locked(const char *primary_uri,
             .resource_prefix = w->resource_prefix,
             .root            = s->root,
             .tok_spans       = s->tok_spans,
+            .tok_owners      = s->tok_owners,
             .num_tok_spans   = s->num_tok_spans,
             .num_sem_entries = s->num_sem_entries,
             .is_primary      = is_primary,

@@ -47,13 +47,15 @@
  *
  * @param doc          Destination mutable JSON document.
  * @param spans        Token spans of the current document.
- * @param num_spans    Length of @p spans.
+ * @param owners       Per-token owner array, parallel to @p spans.
+ * @param num_spans    Length of @p spans / @p owners.
  * @param symbols      Top-level symbols of the current document.
  * @param num_symbols  Length of @p symbols.
  * @return The newly created JSON array of CodeLens objects (may be empty).
  */
 yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
                                      const TokenSpan *spans,
+                                     tj_node *const *owners,
                                      int num_spans,
                                      tj_node *const *symbols,
                                      int num_symbols);

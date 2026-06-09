@@ -38,7 +38,7 @@ static char *dup_or_null(const char *s) {
 /* ── doc_snapshot ─────────────────────────────────────────────────────────── */
 
 doc_snapshot *docsnap_new(const char *uri, const char *text,
-                         tj_node *root, TokenSpan *tok_spans,
+                         tj_node *root, TokenSpan *tok_spans, tj_node **tok_owners,
                          int num_tok_spans, str_arena *tok_arena,
                          int num_sem_entries, uint64_t doc_version) {
     doc_snapshot *s = calloc(1, sizeof(doc_snapshot));
@@ -49,6 +49,7 @@ doc_snapshot *docsnap_new(const char *uri, const char *text,
     s->text            = dup_or_null(text);
     s->root            = root;        /* ownership moved in */
     s->tok_spans       = tok_spans;   /* ownership moved in */
+    s->tok_owners      = tok_owners;  /* ownership moved in */
     s->num_tok_spans   = num_tok_spans;
     s->tok_arena       = tok_arena;   /* ownership moved in */
     s->num_sem_entries = num_sem_entries;
@@ -68,8 +69,10 @@ void docsnap_release(doc_snapshot *s) {
 
     tj_node_free(s->root);
     /* Token lexemes live in tok_arena, freed as a few blocks rather than one
-     * free() per captured token. */
-    free(s->tok_spans);
+     * free() per captured token.  The span buffer is recycled (its pages stay
+     * mapped for the next parse) rather than free()'d. */
+    tok_spans_release(s->tok_spans);
+    free(s->tok_owners);
     arena_free(s->tok_arena);
     free(s->uri);
     free(s->text);
@@ -119,6 +122,7 @@ workspace_snapshot *ws_alloc(int num_docs) {
     if (!ws) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     atomic_init(&ws->refcount, 1);
     ws->num_docs = num_docs;
+    ws->node_strings = arena_new();
     if (num_docs > 0) {
         ws->docs = calloc((size_t)num_docs, sizeof(ws_doc));
         if (!ws->docs) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
@@ -171,6 +175,10 @@ void ws_release(workspace_snapshot *ws) {
         free(p);
     }
     free(ws->projects);
+
+    /* Every ProjectNode string lived in here; the per-node frees above no
+     * longer touch them, so release the whole arena in one shot. */
+    arena_free(ws->node_strings);
 
     free(ws);
 }

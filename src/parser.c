@@ -22,9 +22,12 @@
 #include "debug.h"
 #include "grammar.tab.h"  /* yyparse(), KW_* constants */
 
+#include <malloc.h>       /* malloc_usable_size() for tok_spans recycling */
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ── flex scanner interface ──────────────────────────────────────────────── *
  *
@@ -82,6 +85,56 @@ str_arena   *g_tok_arena      = NULL;
 /** Running upper bound on emitted semantic-token entries (one per source line covered). */
 int          g_num_sem_entries = 0;
 
+/* ── Token-span buffer recycling ─────────────────────────────────────────── *
+ *
+ * The token-span array is the largest single allocation a parse makes (≈40 B ×
+ * every token, tens of MB on a big file).  Because didChange re-parses the same
+ * document on every keystroke, freeing it with free() (a munmap for a multi-MB
+ * block) and mmap-ing a fresh one next parse means re-faulting every page —
+ * profiling showed this is the dominant kernel cost on the didChange path.
+ *
+ * Instead we keep one retired buffer in a lock-free single slot and hand it
+ * back to the next parse, so its pages stay mapped and resident.  parse() takes
+ * from the slot (coordinator-only); the buffer is released back when a snapshot
+ * is freed (docsnap_release, which can run on a query worker) or a transient
+ * ParseOutput is discarded — hence the atomics.  Only one buffer is ever
+ * cached; any extra retired buffer is freed normally. */
+static _Atomic(TokenSpan *) g_tok_spans_recycle = NULL;
+
+/** Only buffers at least this large are worth caching.  glibc keeps freed
+ *  blocks below its dynamic mmap threshold (which rises to ~32 MB as large
+ *  blocks are freed) on its own heap and hands them straight back to the next
+ *  same-size malloc — no munmap, no re-fault — so recycling them just adds
+ *  overhead.  Only blocks past that ceiling are munmap'd on free() and re-fault
+ *  on the next parse, which is exactly what this cache avoids. */
+#define TOK_SPANS_RECYCLE_MIN_BYTES (32u * 1024 * 1024)
+
+/** Take the recycled token-span buffer for a new parse, or NULL when the slot
+ *  is empty.  @p out_cap receives the buffer's capacity (derived from its
+ *  actual allocation size), 0 when none. */
+static TokenSpan *tok_spans_take(int *out_cap) {
+    TokenSpan *buf = atomic_exchange(&g_tok_spans_recycle, NULL);
+    *out_cap = buf ? (int)(malloc_usable_size(buf) / sizeof(TokenSpan)) : 0;
+    return buf;
+}
+
+void tok_spans_release(TokenSpan *buf) {
+    if (!buf) return;
+    /* Below the threshold glibc already recycles the block efficiently; only
+     * cache the big buffers whose free()/malloc() would otherwise munmap and
+     * re-fault. */
+    if (malloc_usable_size(buf) < TOK_SPANS_RECYCLE_MIN_BYTES) {
+        free(buf);
+        return;
+    }
+    /* Publish into the empty slot; if another buffer is already cached, this
+     * one is surplus and freed.  The exchange/CAS pair never loses or
+     * double-owns a buffer under concurrent release/take. */
+    TokenSpan *expected = NULL;
+    if (!atomic_compare_exchange_strong(&g_tok_spans_recycle, &expected, buf))
+        free(buf);
+}
+
 /**
  * Test whether a token of @p kind is emitted as a semantic token.
  * Mirrors the skip set in classify() in semantic_tokens.c.
@@ -105,11 +158,17 @@ static int is_sem_highlighted(int kind) {
  * @param ec    End column.
  * @param text  Borrowed lexeme; copied into the parse's token arena and
  *              pointed at by the new TokenSpan, or NULL.
+ * @param len   Length of @p text in bytes (the lexer already knows it as
+ *              yyleng / str_len, so we avoid a redundant strlen here).
+ * @return      The interned, NUL-terminated arena copy of @p text (stable for
+ *              the arena's lifetime), or NULL when @p text was NULL.  The
+ *              lexer reuses this pointer as the value-stack Token.text instead
+ *              of taking a second strdup, so a lexeme is copied at most once.
  */
-void g_push_tok_span(int kind,
-                     uint32_t sl, uint32_t sc,
-                     uint32_t el, uint32_t ec,
-                     const char *text) {
+char *g_push_tok_span(int kind,
+                      uint32_t sl, uint32_t sc,
+                      uint32_t el, uint32_t ec,
+                      const char *text, size_t len) {
     if (g_num_tok_spans >= g_tok_span_cap) {
         g_tok_span_cap = g_tok_span_cap ? g_tok_span_cap * 2 : 64;
         TokenSpan *tmp = realloc(g_tok_spans,
@@ -117,21 +176,26 @@ void g_push_tok_span(int kind,
         if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
         g_tok_spans = tmp;
     }
+    char *interned = text ? arena_strndup(g_tok_arena, text, len) : NULL;
     g_tok_spans[g_num_tok_spans++] = (TokenSpan){
         .token_kind = kind,
         .start      = { sl, sc },
         .end        = { el, ec },
-        .text       = text ? arena_strndup(g_tok_arena, text, strlen(text)) : NULL,
-        .owner      = NULL,
+        .text       = interned,
     };
     if (is_sem_highlighted(kind))
         g_num_sem_entries += (int)(el - sl + 1);
+    return interned;
 }
 
 /* ── Token helpers ───────────────────────────────────────────────────────── */
 
 void token_free(Token *t) {
-    free(t->text);
+    /* A Token's text points into the parse's token arena (interned once by
+     * g_push_tok_span); it is reclaimed in bulk when the arena is freed, never
+     * individually.  Grammar rules that need to retain a lexeme past the parse
+     * (a tj_node id/name, a prefix_path_id segment) strdup it at that point, so
+     * discarding a token here is just dropping the borrowed arena pointer. */
     t->text = NULL;
 }
 
@@ -153,10 +217,10 @@ int parse_tjp_date(const char *text, time_t *out) {
 
 void tj_node_free(tj_node *n) {
     if (!n) return;
-    free(n->id);
-    free(n->name);
-    for (int i = 0; i < n->num_dependencies; i++)
-        free(n->dependencies[i].path);
+    /* id / name and every dependency path are borrowed pointers into the
+     * parse's token arena (set by alloc_tj_node / the dep_path rule), reclaimed
+     * in bulk when that arena is freed — never here.  Only the arrays and the
+     * node struct are individually owned. */
     free(n->dependencies);
     for (int i = 0; i < n->num_children; i++)
         tj_node_free(n->children[i]);
@@ -206,8 +270,10 @@ void parse_output_free(ParseOutput *po) {
     if (!po) return;
     tj_node_free(po->root);
 
-    /* Token lexemes live in tok_arena, not in individual allocations. */
-    free(po->tok_spans);
+    /* Token lexemes live in tok_arena, not in individual allocations.  The
+     * span buffer goes back to the recycle slot for the next parse to reuse. */
+    tok_spans_release(po->tok_spans);
+    free(po->tok_owners);
     arena_free(po->tok_arena);
 
     for (int i = 0; i < po->num_includes; i++) {
@@ -311,19 +377,28 @@ static int range_within(LspRange inner, LspRange outer) {
 }
 
 /**
- * Walk all token spans in @p po and assign each one its innermost-enclosing
- * tj_node as the `owner` field.
+ * Compute, for every token span in @p po, its innermost-enclosing tj_node,
+ * storing the result in the parallel @p po->tok_owners array (allocated here).
  *
  * Uses a single-pass scope-stack algorithm over the top-level children sorted
  * by source position.  The project node (if present) is handled specially:
  * its hoisted body declarations are treated as scope-children for ownership
  * purposes even though they are siblings under root in the tj_node tree.
  *
- * @param po  ParseOutput whose tok_spans array will be annotated in place.
+ * @param po  ParseOutput whose tok_owners array is allocated and filled.
  */
 static void assign_token_owners(ParseOutput *po) {
+    int num = po->num_tok_spans;
+    po->tok_owners = num ? malloc((size_t)num * sizeof(tj_node *)) : NULL;
+    if (num && !po->tok_owners) {
+        fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+    }
+
     tj_node *root = po->root;
-    if (!root) return;
+    if (!root) {
+        for (int t = 0; t < num; t++) po->tok_owners[t] = NULL;
+        return;
+    }
 
     /* The project block (if any) is a top-level child like the rest, but
      * its body declarations were hoisted to siblings under root (the
@@ -425,7 +500,7 @@ static void assign_token_owners(ParseOutput *po) {
             stack[depth++] = (OwnerFrame){ kids, nkids, 0, child };
         }
 
-        po->tok_spans[t].owner = (depth > 1) ? stack[depth - 1].scope : NULL;
+        po->tok_owners[t] = (depth > 1) ? stack[depth - 1].scope : NULL;
     }
 
     free(stack);
@@ -441,11 +516,12 @@ ParseOutput *parse(const char *src) {
     if (!po) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     po->root = alloc_synthetic_root();
 
-    /* Set up global state for lexer.l and grammar.y */
+    /* Set up global state for lexer.l and grammar.y.  Reuse a retired
+     * token-span buffer when one is cached (its pages are already mapped),
+     * falling back to a fresh allocation on first parse. */
     g_output          = po;
-    g_tok_spans       = NULL;
+    g_tok_spans       = tok_spans_take(&g_tok_span_cap);
     g_num_tok_spans   = 0;
-    g_tok_span_cap    = 0;
     g_tok_arena       = arena_new();
     g_num_sem_entries = 0;
     yycolumn          = 0;
@@ -453,9 +529,16 @@ ParseOutput *parse(const char *src) {
     reset_pending_include_state();
     reset_eol_state();
 
+#if DEBUG_PARSER >= LOG_VERBOSE
+    struct timespec parse_t0, parse_t1, parse_t2;
+    clock_gettime(CLOCK_MONOTONIC, &parse_t0);
+#endif
     YY_BUFFER_STATE buf = yy_scan_string(src);
     yyparse();
     yy_delete_buffer(buf);
+#if DEBUG_PARSER >= LOG_VERBOSE
+    clock_gettime(CLOCK_MONOTONIC, &parse_t1);
+#endif
 
     po->tok_spans       = g_tok_spans;
     po->num_tok_spans   = g_num_tok_spans;
@@ -479,6 +562,16 @@ ParseOutput *parse(const char *src) {
     assign_parent_links(po->root, po->root->children,
                         po->root->num_children);
     assign_token_owners(po);
+#if DEBUG_PARSER >= LOG_VERBOSE
+    clock_gettime(CLOCK_MONOTONIC, &parse_t2);
+    DLOG(DEBUG_PARSER, LOG_VERBOSE,
+         "parse phases: lex+yyparse=%.1f postprocess=%.1f ms (tokens=%d)",
+         (parse_t1.tv_sec - parse_t0.tv_sec) * 1000.0
+             + (parse_t1.tv_nsec - parse_t0.tv_nsec) / 1e6,
+         (parse_t2.tv_sec - parse_t1.tv_sec) * 1000.0
+             + (parse_t2.tv_nsec - parse_t1.tv_nsec) / 1e6,
+         po->num_tok_spans);
+#endif
 
     DLOG(DEBUG_PARSER, LOG_VERBOSE,
          "parsed %zu bytes -> %d tokens, %d top-level nodes, %d includes",

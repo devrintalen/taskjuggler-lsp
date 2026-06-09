@@ -73,14 +73,17 @@ typedef struct {
     int    kind;         /**< one of the TK_* / KW_* values from grammar.tab.h */
     LspPos start;        /**< source position of the first character */
     LspPos end;          /**< source position one past the last character */
-    char  *text;         /**< heap-allocated; caller must free */
+    char  *text;         /**< borrowed pointer into the parse's token arena
+                          *   (interned by g_push_tok_span), or NULL.  Never
+                          *   freed via the token; strdup it to keep it. */
 } Token;
 
 /**
- * Free the heap-allocated text inside a Token (does not free the Token
- * itself).
+ * Drop a Token's borrowed lexeme pointer (sets `text` to NULL).  The text is
+ * arena-owned (see Token.text), so nothing is freed here; this only exists so
+ * grammar discard paths and the bison destructor have a uniform call.
  *
- * @param t  Token whose `text` field should be released and nulled out.
+ * @param t  Token whose `text` field should be nulled out.
  */
 void token_free(Token *t);
 
@@ -114,13 +117,14 @@ typedef enum {
  * resolution runs against the assembled per-Project ProjectNode tree
  * and is memoized there (ProjectDep.resolved, see project_tree.h).
  *
- * Memory ownership: the enclosing tj_node owns `path` (heap-allocated)
- * and the `dependencies` array.
+ * Memory ownership: the enclosing tj_node owns the `dependencies` array;
+ * `path` borrows the parse's token arena (built by the dep_path rule) and
+ * is reclaimed in bulk with it, never freed per dependency.
  */
 typedef struct Dependency {
     DepKind   kind;             /**< whether this dep is `depends` or `precedes` */
     int       bang_count;       /**< number of leading `!` characters */
-    char     *path;             /**< dotted identifier path, e.g. "foo.bar" */
+    char     *path;             /**< dotted identifier path; borrowed from the token arena */
     LspRange  source_range;     /**< spans the bang(s) + dotted path in source */
 } Dependency;
 
@@ -133,16 +137,17 @@ typedef struct Dependency {
  * folding, and dependency resolution — handlers branch on `keyword`
  * when they need to distinguish kinds.
  *
- * Memory: all heap fields (`id`, `name`, `dependencies`, `children`)
- * and every transitively reachable child node are owned by the
- * tj_node and freed by tj_node_free().  The cross-tree `parent_node`
- * pointer is borrowed and never freed here.
+ * Memory: `dependencies`, `children`, and every transitively reachable
+ * child node are owned by the tj_node and freed by tj_node_free().
+ * `id` and `name` instead borrow the parse's token arena (which outlives
+ * the tree within the same doc_snapshot), so they are not freed per node.
+ * The cross-tree `parent_node` pointer is borrowed and never freed here.
  */
 struct tj_node {
     /* ── Identity ── */
     int        keyword;        /**< KW_ / TK_ constant from grammar.tab.h; 0 for synthetic per-doc roots */
-    char      *id;              /**< TJP identifier, heap-allocated; NULL on synthetic roots */
-    char      *name;            /**< display name (quoted-string), heap-allocated; NULL on synthetic roots */
+    char      *id;              /**< TJP identifier; borrowed from the token arena, NULL on synthetic roots */
+    char      *name;            /**< display name; borrowed from the token arena, NULL on synthetic roots */
 
     /* ── Source location ── */
     LspRange   range;           /**< full declaration including body */
@@ -231,17 +236,28 @@ typedef struct Diagnostic Diagnostic;
  * never needed.  Caller must not modify or free it; it is released in bulk
  * when the arena is freed.
  *
- * `owner` points to the innermost enclosing tj_node in this same
- * document's per-kind tree (whichever tree the enclosing declaration
- * lives in).  NULL when the token sits outside every declaration.
+ * The innermost enclosing tj_node for each token (its "owner") is kept in a
+ * parallel array (ParseOutput / doc_snapshot `tok_owners`, indexed the same as
+ * `tok_spans`) rather than in this struct, so the hot span array stays 32 bytes
+ * — two per cache line and far less memory to fill, scan, and owner-annotate.
  */
 typedef struct {
     int       token_kind;   /**< raw TK_/KW_ constant from grammar.tab.h */
     LspPos    start;        /**< inclusive start position in the source */
     LspPos    end;          /**< exclusive end position in the source */
-    char     *text;         /**< owned strdup of the lexeme; may be NULL */
-    tj_node  *owner;        /**< borrowed innermost enclosing tj_node, or NULL */
+    char     *text;         /**< borrowed arena lexeme; may be NULL */
 } TokenSpan;
+
+/**
+ * Return a retired token-span buffer to the parser's single-entry recycle
+ * cache so the next parse can reuse its already-mapped pages instead of
+ * mmap-ing (and page-faulting) a fresh multi-MB block.  Called wherever a
+ * ParseOutput / doc_snapshot's `tok_spans` would otherwise be free()'d.
+ * Thread-safe; surplus buffers (slot already full) are freed.  NULL is a no-op.
+ *
+ * @param buf  The `tok_spans` buffer being retired (may be NULL).
+ */
+void tok_spans_release(TokenSpan *buf);
 
 /**
  * One entry per `include` directive seen in the source.  `filename` is the
@@ -285,6 +301,7 @@ typedef struct {
     int        num_tok_spans;   /**< number of valid entries in `tok_spans` */
     int        num_sem_entries; /**< upper bound on semantic-token entries (one per source line covered) */
     str_arena *tok_arena;       /**< owned backing store for every `tok_spans[i].text` */
+    tj_node  **tok_owners;      /**< owned array[num_tok_spans]; innermost enclosing node per token (parallel to tok_spans), or NULL */
 
     IncludeRef *includes;       /**< owned array; one entry per `include` directive */
     int         num_includes;   /**< number of valid entries in `includes` */

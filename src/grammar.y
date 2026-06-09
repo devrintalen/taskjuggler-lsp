@@ -52,6 +52,9 @@ typedef struct {
 
 /* Globals defined in parser.c, shared with lexer.l */
 extern ParseOutput *g_output;
+/* The in-progress parse's token arena; dep-path strings are built here so they
+ * share the tj_node tree's lifetime and need no per-path malloc/free. */
+extern str_arena *g_tok_arena;
 
 int  yylex(void);
 void yyerror(const char *msg);
@@ -187,15 +190,20 @@ static tj_node *alloc_tj_node(Token kw, Token id, Token name) {
     if (!s) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     s->keyword = kw.kind;
 
+    /* id / name borrow the token lexeme straight from the parse's token arena
+     * (emit_* interned it there).  The arena travels with this tj_node tree
+     * into the doc_snapshot and is freed in bulk only after the tree, so these
+     * pointers stay valid for the node's whole life and are never freed
+     * individually (see tj_node_free).  The default name reuses the id pointer. */
     if (id.text) {
-        s->id              = id.text;   /* take ownership */
+        s->id              = id.text;
         s->selection_range = (LspRange){ id.start, id.end };
     } else {
-        s->id              = strdup(kw.text);
+        s->id              = kw.text;
         s->selection_range = (LspRange){ kw.start, kw.end };
     }
 
-    s->name = name.text ? name.text : strdup(s->id); /* take ownership */
+    s->name = name.text ? name.text : s->id;
 
     /* Range start is always the keyword; end is filled after body parse. */
     s->range.start = kw.start;
@@ -257,17 +265,14 @@ static void discard_body(BodyResult *b) {
 %destructor { tj_node_free($$); }                       <sym>
 %destructor { if ($$.has_sym) tj_node_free($$.sym); }   <item>
 %destructor { free($$); }                               <text>
-/* A token carries a heap-allocated lexeme (emit_kw / emit_plain TK_IDENT /
- * the string helpers all strdup into .text).  Successful reductions free it
- * explicitly with token_free(); this destructor covers the other path —
- * tokens bison pops during error recovery or leaves on the stack at parse
- * end.  Because yyerror() is a silent no-op and `item: error` recovers
- * without a diagnostic, even an apparently clean parse can discard tokens
- * here (e.g. a `${macro}` call, whose braces gen_expr cannot consume), so
- * without this their lexemes leak.  token_free() tolerates a NULL .text, so
- * the punctuation/number tokens that no longer strdup are a no-op.  bison
- * never runs a destructor on a value a reduction already consumed, so this
- * cannot double-free a lexeme an action already released. */
+/* A token's lexeme (.text) points into the parse's token arena, interned once
+ * by g_push_tok_span and reclaimed in bulk with the arena — never owned by the
+ * token itself.  token_free() therefore just drops the borrowed pointer; this
+ * destructor runs it on tokens bison pops during error recovery or leaves on
+ * the stack at parse end (e.g. a `${macro}` call whose braces gen_expr cannot
+ * consume), purely for symmetry.  Rules that must keep a lexeme past the parse
+ * (a tj_node id/name, a prefix_path_id segment) strdup it; everything else
+ * borrows.  Since token_free() frees nothing, double-discard is harmless. */
 %destructor { token_free(&$$); }                        <tok>
 
 /* ── Remaining conflicts ─────────────────────────────────────────────────── *
@@ -1606,7 +1611,7 @@ dotted_id
  * an IncludeRef. */
 prefix_path_id
     : TK_IDENT
-        { $$ = $1.text; $1.text = NULL; /* transfer ownership */ }
+        { $$ = strdup($1.text); /* tok text is arena-borrowed; copy out */ }
     | prefix_path_id TK_DOT TK_IDENT
         {
             size_t plen = strlen($1);
@@ -1660,18 +1665,20 @@ dep_path_seg
  * Distinct from dotted_id so taskprefix/taskroot are unaffected.           */
 dep_path
     : dep_path_seg
-        { $$.bang_count = 0; $$.path = strdup($1.text);
+        /* A single segment's lexeme already lives in the token arena, so the
+         * path just borrows it — no copy.  Multi-segment paths (below) are
+         * built into the same arena.  Either way tj_node_free never frees a
+         * dep path; the arena reclaims it with the rest of the tree. */
+        { $$.bang_count = 0; $$.path = $1.text;
           $$.start = $1.start; $$.end = $1.end;
           token_free(&$1); }
     | dep_path TK_DOT dep_path_seg
         { size_t plen = strlen($1.path);
           size_t slen = strlen($3.text);
-          char *buf = malloc(plen + 1 + slen + 1);
-          if (!buf) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+          char *buf = arena_alloc(g_tok_arena, plen + 1 + slen + 1);
           memcpy(buf, $1.path, plen);
           buf[plen] = '.';
           memcpy(buf + plen + 1, $3.text, slen + 1);
-          free($1.path);
           $$.bang_count = 0;
           $$.path  = buf;
           $$.start = $1.start;
@@ -1706,8 +1713,8 @@ dep_ref
                 tj_node_push_dependency(task, dep);
             } else {
                 /* `depends`/`precedes` outside a task body — syntactically
-                 * possible during error recovery; nothing to attach to. */
-                free($1.path);
+                 * possible during error recovery; nothing to attach to.  The
+                 * path is arena-owned, so there is nothing to free here. */
             }
         }
     ;

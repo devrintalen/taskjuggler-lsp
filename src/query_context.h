@@ -81,8 +81,9 @@ typedef struct sem_token_data {
 /**
  * One document's immutable parse output, refcounted and shared.  Every
  * pointer field is owned and freed when the last ref drops.  The tj_node
- * tree and token spans are moved out of a ParseOutput at creation, so the
- * TokenSpan.owner pointers already address nodes within `root`.
+ * tree, token spans, and parallel `tok_owners` array are moved out of a
+ * ParseOutput at creation, so the `tok_owners` entries already address
+ * nodes within `root`.
  */
 typedef struct doc_snapshot {
     _Atomic int  refcount;        /**< outstanding references; freed at 0 */
@@ -92,8 +93,9 @@ typedef struct doc_snapshot {
     char        *text;            /**< owned copy of the parsed source text */
 
     tj_node     *root;            /**< owned synthetic root over all top-level decls */
-    TokenSpan   *tok_spans;       /**< owned; .owner points within `root` */
-    int          num_tok_spans;   /**< number of valid entries in `tok_spans` */
+    TokenSpan   *tok_spans;       /**< owned flat array of every captured token */
+    tj_node    **tok_owners;      /**< owned array[num_tok_spans]; innermost enclosing node per token (parallel to tok_spans) */
+    int          num_tok_spans;   /**< number of valid entries in `tok_spans` / `tok_owners` */
     int          num_sem_entries; /**< upper bound on semantic-token entries (one per source line covered) */
     str_arena   *tok_arena;       /**< owned backing store for every `tok_spans[i].text` */
 
@@ -109,7 +111,9 @@ typedef struct doc_snapshot {
  * @param text             Source text the parse consumed; deep-copied.
  * @param root             Owned synthetic root (transfer of ownership).
  * @param tok_spans        Owned token span array (transfer of ownership).
- * @param num_tok_spans    Number of entries in @p tok_spans.
+ * @param tok_owners       Owned per-token owner array, parallel to @p tok_spans
+ *                         (transfer of ownership); may be NULL when no tokens.
+ * @param num_tok_spans    Number of entries in @p tok_spans / @p tok_owners.
  * @param tok_arena        Owned arena backing the token texts (transfer of
  *                         ownership); may be NULL when there are no tokens.
  * @param num_sem_entries  Upper bound on emitted semantic-token entries.
@@ -117,7 +121,7 @@ typedef struct doc_snapshot {
  * @return Newly allocated snapshot with refcount 1.
  */
 doc_snapshot *docsnap_new(const char *uri, const char *text,
-                         tj_node *root, TokenSpan *tok_spans,
+                         tj_node *root, TokenSpan *tok_spans, tj_node **tok_owners,
                          int num_tok_spans, str_arena *tok_arena,
                          int num_sem_entries, uint64_t doc_version);
 
@@ -183,6 +187,13 @@ typedef struct workspace_snapshot {
     int          num_projects;     /**< number of valid entries in `projects` */
     int          projects_cap;     /**< allocated capacity of `projects` */
     int          cc_status;        /**< degradation status of the driving compile_commands.json (CC_STATUS_*) */
+    /** Backing store for every ProjectNode in this snapshot: the node structs,
+     *  their dependency arrays, and all their strings (id / name / source_uri /
+     *  dependency path), across all projects.  Bump-allocated during
+     *  build_workspace_snapshot() and freed as a few blocks in ws_release(),
+     *  instead of a malloc + free per node, per dep array, and per string.
+     *  (Only each node's dynamic children array stays individually heap-owned.) */
+    str_arena   *node_strings;
 } workspace_snapshot;
 
 /**
@@ -238,6 +249,7 @@ typedef struct query_doc {
 
     tj_node     *root;            /**< borrowed from snap */
     TokenSpan   *tok_spans;       /**< borrowed from snap */
+    tj_node    **tok_owners;      /**< borrowed from snap; per-token owner, parallel to tok_spans */
     int          num_tok_spans;   /**< matches snap->num_tok_spans */
     int          num_sem_entries; /**< matches snap->num_sem_entries */
 

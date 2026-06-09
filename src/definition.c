@@ -53,7 +53,7 @@ yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
     tj_node          *owner = NULL;
     const Dependency *dep   = NULL;
     yyjson_mut_val   *result = NULL;
-    if (dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
+    if (dependency_at_cursor(d->tok_spans, d->tok_owners, d->num_tok_spans, pos,
                              &owner, &dep)) {
         ProjectNode *merged_owner =
             project_node_for_doc_task(qc->project_root, d->task_prefix, owner);

@@ -1,0 +1,145 @@
+State #70 is non-accepting -
+ associated rule line numbers:
+	269
+ out-transitions: [ 0-9  d  h  m  w  y ]
+ jam-transitions: EOF [ \000-/  :-c  e-g  i-l  n-v  x  z-\377 ]
+
+State #71 is non-accepting -
+ associated rule line numbers:
+	227	269
+ out-transitions: [ 0-9  <  d  h  m  w  y ]
+ jam-transitions: EOF [ \000-/  :-;  =-c  e-g  i-l  n-v  x  z-\377 ]
+
+State #74 is non-accepting -
+ associated rule line numbers:
+	271
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #155 is non-accepting -
+ associated rule line numbers:
+	230
+ out-transitions: [ 8 ]
+ jam-transitions: EOF [ \000-7  9-\377 ]
+
+State #160 is non-accepting -
+ associated rule line numbers:
+	227
+ out-transitions: [ - ]
+ jam-transitions: EOF [ \000-,  .-\377 ]
+
+State #164 is non-accepting -
+ associated rule line numbers:
+	269
+ out-transitions: [ n ]
+ jam-transitions: EOF [ \000-m  o-\377 ]
+
+State #289 is non-accepting -
+ associated rule line numbers:
+	230
+ out-transitions: [ - ]
+ jam-transitions: EOF [ \000-,  .-\377 ]
+
+State #431 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #581 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #724 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ - ]
+ jam-transitions: EOF [ \000-,  .-\377 ]
+
+State #848 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #956 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #1110 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ +  -  0-9 ]
+ jam-transitions: EOF [ \000-*  ,  .-/  :-\377 ]
+
+State #1161 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #1162 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #1198 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #1199 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ : ]
+ jam-transitions: EOF [ \000-9  ;-\377 ]
+
+State #1228 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #1229 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #1253 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #1254 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #1286 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ +  - ]
+ jam-transitions: EOF [ \000-*  ,  .-\377 ]
+
+State #1287 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+State #1295 is non-accepting -
+ associated rule line numbers:
+	266
+ out-transitions: [ 0-9 ]
+ jam-transitions: EOF [ \000-/  :-\377 ]
+
+24 backing up (non-accepting) states.

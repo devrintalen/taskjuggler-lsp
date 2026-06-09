@@ -11,7 +11,10 @@ __pycache__/
 /src/grammar.tab.c
 /src/grammar.tab.h
 /lexer-test
+/lexer-test.d
 /grammar-test
+/parse-bench
+/parse-bench.d
 /test/large_*.tjp
 /doc/_build/
 /doc/_doxygen/

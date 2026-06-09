@@ -34,7 +34,8 @@
  *
  * @param doc          Destination mutable JSON document.
  * @param tokens       Token spans for the current document.
- * @param num_tokens   Length of @p tokens.
+ * @param owners       Per-token owner array, parallel to @p tokens.
+ * @param num_tokens   Length of @p tokens / @p owners.
  * @param cursor       Cursor position.
  * @param symbols      Top-level symbols of the current document.
  * @param num_symbols  Length of @p symbols.
@@ -46,7 +47,8 @@
  *         completions apply at @p cursor.
  */
 yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
-                                        const TokenSpan *tokens, int num_tokens,
+                                        const TokenSpan *tokens,
+                                        tj_node *const *owners, int num_tokens,
                                         LspPos cursor,
                                         tj_node *const *symbols, int num_symbols,
                                         tj_node *const **extra_pools,
