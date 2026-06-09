@@ -1030,42 +1030,13 @@ static void revalidate_all_docs(void) {
  *  @param params  "initialize" params object containing "rootUri" and client
  *                 capabilities; may be NULL.
  *  @return        JSON-RPC response object with server capabilities. */
-static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params) {
-    if (params && !g_workspace_root) {
-        yyjson_val *root_uri_val = yyjson_obj_get(params, "rootUri");
-        if (root_uri_val && yyjson_is_str(root_uri_val)) {
-            g_workspace_root = uri_to_path(yyjson_get_str(root_uri_val));
-        }
-    }
-    if (g_workspace_root && !g_cc_path) {
-        size_t root_len = strlen(g_workspace_root);
-        int need_sep = (root_len > 0 && g_workspace_root[root_len - 1] != '/');
-        const char *fname = "compile_commands.json";
-        size_t fname_len = strlen(fname);
-        g_cc_path = malloc(root_len + (need_sep ? 1 : 0) + fname_len + 1);
-        if (g_cc_path) {
-            memcpy(g_cc_path, g_workspace_root, root_len);
-            size_t off = root_len;
-            if (need_sep) g_cc_path[off++] = '/';
-            memcpy(g_cc_path + off, fname, fname_len + 1);
-        }
-    }
-
-    DLOG(DEBUG_LIFECYCLE, LOG_INFO, "initialize: workspace_root=%s cc_path=%s",
-         g_workspace_root ? g_workspace_root : "(none)",
-         g_cc_path ? g_cc_path : "(none)");
-#if DEBUG_LIFECYCLE
-    yyjson_val *trace_val = params ? yyjson_obj_get(params, "trace") : NULL;
-    if (trace_val && yyjson_is_str(trace_val))
-        DLOG(DEBUG_LIFECYCLE, LOG_VERBOSE, "initialize: client trace=%s",
-             yyjson_get_str(trace_val));
-#endif
-
-    yyjson_mut_val *server_info = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, server_info, "name",    "taskjuggler-lsp");
-    yyjson_mut_obj_add_str(doc, server_info, "version", VERSION_STRING);
-
+/** Build the server "capabilities" object advertised in the initialize
+ *  response: text-document sync options, the per-feature provider flags,
+ *  the semantic-token legend, and the workspace file-operation filters.
+ *  Kept separate so handle_initialize stays focused on lifecycle setup.
+ *  @param doc  Mutable document the capabilities tree is allocated in.
+ *  @return     The populated "capabilities" object. */
+static yyjson_mut_val *build_server_capabilities(yyjson_mut_doc *doc) {
     yyjson_mut_val *comp_triggers = yyjson_mut_arr(doc);
     yyjson_mut_arr_add_str(doc, comp_triggers, "!");
     yyjson_mut_arr_add_str(doc, comp_triggers, ".");
@@ -1133,6 +1104,47 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_obj_add_val(doc, workspace_caps, "workspaceFolders", workspace_folders_caps);
     yyjson_mut_obj_add_val(doc, workspace_caps, "fileOperations",   file_ops);
     yyjson_mut_obj_add_val(doc, caps, "workspace", workspace_caps);
+
+    return caps;
+}
+
+static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
+                                          yyjson_val *params) {
+    if (params && !g_workspace_root) {
+        yyjson_val *root_uri_val = yyjson_obj_get(params, "rootUri");
+        if (root_uri_val && yyjson_is_str(root_uri_val)) {
+            g_workspace_root = uri_to_path(yyjson_get_str(root_uri_val));
+        }
+    }
+    if (g_workspace_root && !g_cc_path) {
+        size_t root_len = strlen(g_workspace_root);
+        int need_sep = (root_len > 0 && g_workspace_root[root_len - 1] != '/');
+        const char *fname = "compile_commands.json";
+        size_t fname_len = strlen(fname);
+        g_cc_path = malloc(root_len + (need_sep ? 1 : 0) + fname_len + 1);
+        if (g_cc_path) {
+            memcpy(g_cc_path, g_workspace_root, root_len);
+            size_t off = root_len;
+            if (need_sep) g_cc_path[off++] = '/';
+            memcpy(g_cc_path + off, fname, fname_len + 1);
+        }
+    }
+
+    DLOG(DEBUG_LIFECYCLE, LOG_INFO, "initialize: workspace_root=%s cc_path=%s",
+         g_workspace_root ? g_workspace_root : "(none)",
+         g_cc_path ? g_cc_path : "(none)");
+#if DEBUG_LIFECYCLE
+    yyjson_val *trace_val = params ? yyjson_obj_get(params, "trace") : NULL;
+    if (trace_val && yyjson_is_str(trace_val))
+        DLOG(DEBUG_LIFECYCLE, LOG_VERBOSE, "initialize: client trace=%s",
+             yyjson_get_str(trace_val));
+#endif
+
+    yyjson_mut_val *server_info = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, server_info, "name",    "taskjuggler-lsp");
+    yyjson_mut_obj_add_str(doc, server_info, "version", VERSION_STRING);
+
+    yyjson_mut_val *caps = build_server_capabilities(doc);
 
     yyjson_mut_val *result = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, result, "capabilities", caps);
