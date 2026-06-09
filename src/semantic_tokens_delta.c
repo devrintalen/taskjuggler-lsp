@@ -272,6 +272,30 @@ found:
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
+/** Serialize one diff EditOp to an LSP SemanticTokensEdit object: the start
+ *  offset and delete count (converted from token units to flat-integer
+ *  units), plus the inserted token data when the op adds tokens.
+ *  @param doc      Destination mutable JSON document.
+ *  @param op       Edit operation to serialize.
+ *  @param new_buf  New token buffer the op's inserted slice points into.
+ *  @return The SemanticTokensEdit object. */
+static yyjson_mut_val *build_edit_json(yyjson_mut_doc *doc, const EditOp *op,
+                                       const uint32_t *new_buf) {
+    yyjson_mut_val *edit = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_uint(doc, edit, "start",
+                            (uint64_t)(op->start_tok * TUPLE_LEN));
+    yyjson_mut_obj_add_uint(doc, edit, "deleteCount",
+                            (uint64_t)(op->delete_tok * TUPLE_LEN));
+    if (op->insert_tok > 0) {
+        yyjson_mut_val *data = build_uint32_array_json(
+            doc,
+            &new_buf[op->insert_b_start * TUPLE_LEN],
+            op->insert_tok * TUPLE_LEN);
+        yyjson_mut_obj_add_val(doc, edit, "data", data);
+    }
+    return edit;
+}
+
 yyjson_mut_val *build_semantic_tokens_delta_json(yyjson_mut_doc *doc,
                                                   const uint32_t *prev_buf, size_t prev_count,
                                                   const uint32_t *new_buf,  size_t new_count,
@@ -310,21 +334,8 @@ yyjson_mut_val *build_semantic_tokens_delta_json(yyjson_mut_doc *doc,
         yyjson_mut_obj_add_strcpy(doc, result, "resultId", result_id);
 
     yyjson_mut_val *edits = yyjson_mut_arr(doc);
-    for (size_t i = 0; i < n_ops; i++) {
-        yyjson_mut_val *edit = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_uint(doc, edit, "start",
-                                (uint64_t)(ops[i].start_tok * TUPLE_LEN));
-        yyjson_mut_obj_add_uint(doc, edit, "deleteCount",
-                                (uint64_t)(ops[i].delete_tok * TUPLE_LEN));
-        if (ops[i].insert_tok > 0) {
-            yyjson_mut_val *data = build_uint32_array_json(
-                doc,
-                &new_buf[ops[i].insert_b_start * TUPLE_LEN],
-                ops[i].insert_tok * TUPLE_LEN);
-            yyjson_mut_obj_add_val(doc, edit, "data", data);
-        }
-        yyjson_mut_arr_add_val(edits, edit);
-    }
+    for (size_t i = 0; i < n_ops; i++)
+        yyjson_mut_arr_add_val(edits, build_edit_json(doc, &ops[i], new_buf));
     free(ops);
     yyjson_mut_obj_add_val(doc, result, "edits", edits);
     return result;
