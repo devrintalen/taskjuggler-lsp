@@ -65,6 +65,30 @@ TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
 
 /* ── scan_kw_stack ───────────────────────────────────────────────────────── */
 
+/** Count @p tok as an argument of the keyword currently in scope.
+ *  When @p tok lies fully before @p cursor, increment the argc of the
+ *  innermost keyword-stack entry at @p brace_depth (the active keyword whose
+ *  arguments are being counted). Tokens at or after the cursor do not count.
+ *  @param stack        Keyword scope stack.
+ *  @param stack_n      Number of valid entries in @p stack.
+ *  @param brace_depth  Current brace nesting depth.
+ *  @param tok          Token being considered as an argument.
+ *  @param cursor       Cursor position the count is relative to. */
+static void bump_active_argc(KwStackEntry *stack, int stack_n,
+                             uint32_t brace_depth, const TokenSpan *tok,
+                             LspPos cursor) {
+    int fully_before = (tok->end.line < cursor.line)
+        || (tok->end.line == cursor.line
+         && tok->end.character <= cursor.character);
+    if (!fully_before) return;
+    for (int j = stack_n - 1; j >= 0; j--) {
+        if (stack[j].depth == brace_depth) {
+            stack[j].argc++;
+            break;
+        }
+    }
+}
+
 int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
                   int kind_max, int track_argc,
                   KwStackEntry *stack, int stack_cap,
@@ -110,19 +134,8 @@ int scan_kw_stack(const TokenSpan *tokens, int num_tokens, LspPos cursor,
                 }
                 break;
             }
-            if (track_argc) {
-                int fully_before = (tok->end.line < cursor.line)
-                    || (tok->end.line == cursor.line
-                     && tok->end.character <= cursor.character);
-                if (fully_before) {
-                    for (int j = stack_n - 1; j >= 0; j--) {
-                        if (stack[j].depth == brace_depth) {
-                            stack[j].argc++;
-                            break;
-                        }
-                    }
-                }
-            }
+            if (track_argc)
+                bump_active_argc(stack, stack_n, brace_depth, tok, cursor);
             break;
         }
     }
