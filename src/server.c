@@ -632,6 +632,21 @@ static void copy_document_into_project(workspace_snapshot *ws, int pidx, Documen
  *  @param root          Root document that seeds the BFS (the compile_commands
  *                       entry point).
  *  @param slot_to_wsdoc Mapping from docs[] slot index to ws_doc index. */
+/** Copy @p d's top-level declarations into project @p pidx and stamp the
+ *  document's ws_doc with that project index, unless it was already claimed
+ *  by an earlier project (first include-BFS to reach a doc wins).
+ *  @param ws            Snapshot under construction.
+ *  @param pidx          Index of the project being assembled.
+ *  @param d             Member document to fold in.
+ *  @param slot_to_wsdoc docs[] slot -> ws_doc index map for the stamp. */
+static void assign_doc_to_project(workspace_snapshot *ws, int pidx, Document *d,
+                                  const int *slot_to_wsdoc) {
+    copy_document_into_project(ws, pidx, d);
+    int wsd = ws_doc_index_of(slot_to_wsdoc, d);
+    if (wsd >= 0 && ws->docs[wsd].project_index < 0)
+        ws->docs[wsd].project_index = pidx;
+}
+
 static void project_populate_from_root(workspace_snapshot *ws, int pidx,
                                        Document *root, const int *slot_to_wsdoc) {
     /* Queue holds borrowed Document pointers; visited[] dedupes within
@@ -666,10 +681,7 @@ static void project_populate_from_root(workspace_snapshot *ws, int pidx,
     /* Anchor the project on the root document's own top-level.  Its
      * prefixes are NULL, so every declaration lands unprefixed in the
      * matching per-kind tree. */
-    copy_document_into_project(ws, pidx, root);
-    int root_wsd = ws_doc_index_of(slot_to_wsdoc, root);
-    if (root_wsd >= 0 && ws->docs[root_wsd].project_index < 0)
-        ws->docs[root_wsd].project_index = pidx;
+    assign_doc_to_project(ws, pidx, root, slot_to_wsdoc);
 
     while (q_head < q_len) {
         Document *cur = queue[q_head++];
@@ -682,10 +694,7 @@ static void project_populate_from_root(workspace_snapshot *ws, int pidx,
             if (seen) continue;
             PUSH(visited, v_len, v_cap, child);
             PUSH(queue,   q_len, q_cap, child);
-            copy_document_into_project(ws, pidx, child);
-            int child_wsd = ws_doc_index_of(slot_to_wsdoc, child);
-            if (child_wsd >= 0 && ws->docs[child_wsd].project_index < 0)
-                ws->docs[child_wsd].project_index = pidx;
+            assign_doc_to_project(ws, pidx, child, slot_to_wsdoc);
         }
     }
 
