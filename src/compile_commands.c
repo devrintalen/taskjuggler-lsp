@@ -82,6 +82,42 @@ void compile_commands_free(CompileEntry *entries, int count) {
     free(entries);
 }
 
+/** Decode one compile_commands.json array element into @p out.
+ *
+ *  Requires a string "file" field; "directory" and "command" are optional.
+ *  The file is resolved to an absolute path against its directory (or the
+ *  workspace root). The "directory" and "command" strings are copied.
+ *
+ *  @param workspace_root  Fallback base for resolving relative file paths.
+ *  @param item            One array element from compile_commands.json.
+ *  @param out             Entry to populate on success.
+ *  @return 1 if @p out was populated, 0 if the element was skipped (not an
+ *          object, missing/invalid "file", or an unresolvable path). */
+static int parse_compile_entry(const char *workspace_root, yyjson_val *item,
+                               CompileEntry *out) {
+    if (!yyjson_is_obj(item)) return 0;
+
+    yyjson_val *file_v      = yyjson_obj_get(item, "file");
+    yyjson_val *directory_v = yyjson_obj_get(item, "directory");
+    yyjson_val *command_v   = yyjson_obj_get(item, "command");
+
+    if (!file_v || !yyjson_is_str(file_v)) return 0;
+
+    const char *file_s = yyjson_get_str(file_v);
+    const char *dir_s  = (directory_v && yyjson_is_str(directory_v))
+                          ? yyjson_get_str(directory_v) : NULL;
+    const char *cmd_s  = (command_v && yyjson_is_str(command_v))
+                          ? yyjson_get_str(command_v) : NULL;
+
+    char *abs_path = resolve_entry_path(workspace_root, dir_s, file_s);
+    if (!abs_path) return 0;
+
+    out->file_abs  = abs_path;
+    out->directory = dir_s ? strdup(dir_s) : NULL;
+    out->command   = cmd_s ? strdup(cmd_s) : NULL;
+    return 1;
+}
+
 CompileCommandsResult compile_commands_load(const char *workspace_root,
                                              CompileEntry **out_entries,
                                              int *out_count) {
@@ -128,27 +164,8 @@ CompileCommandsResult compile_commands_load(const char *workspace_root,
     size_t idx, max;
     yyjson_val *item;
     yyjson_arr_foreach(root, idx, max, item) {
-        if (!yyjson_is_obj(item)) continue;
-
-        yyjson_val *file_v      = yyjson_obj_get(item, "file");
-        yyjson_val *directory_v = yyjson_obj_get(item, "directory");
-        yyjson_val *command_v   = yyjson_obj_get(item, "command");
-
-        if (!file_v || !yyjson_is_str(file_v)) continue;
-
-        const char *file_s = yyjson_get_str(file_v);
-        const char *dir_s  = (directory_v && yyjson_is_str(directory_v))
-                              ? yyjson_get_str(directory_v) : NULL;
-        const char *cmd_s  = (command_v && yyjson_is_str(command_v))
-                              ? yyjson_get_str(command_v) : NULL;
-
-        char *abs_path = resolve_entry_path(workspace_root, dir_s, file_s);
-        if (!abs_path) continue;
-
-        entries[written].file_abs  = abs_path;
-        entries[written].directory = dir_s ? strdup(dir_s) : NULL;
-        entries[written].command   = cmd_s ? strdup(cmd_s) : NULL;
-        written++;
+        if (parse_compile_entry(workspace_root, item, &entries[written]))
+            written++;
     }
 
     yyjson_doc_free(doc);
