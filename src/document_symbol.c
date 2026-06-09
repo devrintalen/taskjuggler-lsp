@@ -71,7 +71,8 @@ tj_node *const *tj_node_find_path(tj_node *const *syms, int n,
     return NULL;
 }
 
-tj_node *tj_node_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
+tj_node *tj_node_at(const TokenSpan *tokens, tj_node *const *owners,
+                    int num_tokens, LspPos pos) {
     int lo = 0, hi = num_tokens - 1, found = -1;
     while (lo <= hi) {
         int mid = lo + (hi - lo) / 2;
@@ -84,7 +85,7 @@ tj_node *tj_node_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
         }
     }
     if (found < 0) return NULL;
-    tj_node *s = tokens[found].owner;
+    tj_node *s = owners ? owners[found] : NULL;
     while (s && pos_cmp(pos, s->range.end) >= 0)
         s = s->parent_node;
     return s;

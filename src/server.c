@@ -255,14 +255,15 @@ static void doc_install_parse(Document *d, ParseOutput *po) {
     if (po) {
         uint64_t version = atomic_fetch_add(&d->doc_version, 1);
         fresh = docsnap_new(d->uri, d->text,
-                            po->root, po->tok_spans,
+                            po->root, po->tok_spans, po->tok_owners,
                             po->num_tok_spans, po->tok_arena,
                             po->num_sem_entries, version);
-        /* Ownership of the tree, token spans, and their backing arena moved
-         * into the snapshot; null them out so parse_output_free only releases
-         * what po still owns (the includes array and the struct shell). */
+        /* Ownership of the tree, token spans + owners, and their backing arena
+         * moved into the snapshot; null them out so parse_output_free only
+         * releases what po still owns (the includes array and the struct shell). */
         po->root            = NULL;
         po->tok_spans       = NULL;
+        po->tok_owners      = NULL;
         po->num_tok_spans   = 0;
         po->tok_arena       = NULL;
         po->num_sem_entries = 0;
@@ -1625,6 +1626,7 @@ static query_context *build_query_context_locked(const char *primary_uri,
             .resource_prefix = w->resource_prefix,
             .root            = s->root,
             .tok_spans       = s->tok_spans,
+            .tok_owners      = s->tok_owners,
             .num_tok_spans   = s->num_tok_spans,
             .num_sem_entries = s->num_sem_entries,
             .is_primary      = is_primary,

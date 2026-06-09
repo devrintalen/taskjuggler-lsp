@@ -182,7 +182,6 @@ char *g_push_tok_span(int kind,
         .start      = { sl, sc },
         .end        = { el, ec },
         .text       = interned,
-        .owner      = NULL,
     };
     if (is_sem_highlighted(kind))
         g_num_sem_entries += (int)(el - sl + 1);
@@ -274,6 +273,7 @@ void parse_output_free(ParseOutput *po) {
     /* Token lexemes live in tok_arena, not in individual allocations.  The
      * span buffer goes back to the recycle slot for the next parse to reuse. */
     tok_spans_release(po->tok_spans);
+    free(po->tok_owners);
     arena_free(po->tok_arena);
 
     for (int i = 0; i < po->num_includes; i++) {
@@ -377,19 +377,28 @@ static int range_within(LspRange inner, LspRange outer) {
 }
 
 /**
- * Walk all token spans in @p po and assign each one its innermost-enclosing
- * tj_node as the `owner` field.
+ * Compute, for every token span in @p po, its innermost-enclosing tj_node,
+ * storing the result in the parallel @p po->tok_owners array (allocated here).
  *
  * Uses a single-pass scope-stack algorithm over the top-level children sorted
  * by source position.  The project node (if present) is handled specially:
  * its hoisted body declarations are treated as scope-children for ownership
  * purposes even though they are siblings under root in the tj_node tree.
  *
- * @param po  ParseOutput whose tok_spans array will be annotated in place.
+ * @param po  ParseOutput whose tok_owners array is allocated and filled.
  */
 static void assign_token_owners(ParseOutput *po) {
+    int num = po->num_tok_spans;
+    po->tok_owners = num ? malloc((size_t)num * sizeof(tj_node *)) : NULL;
+    if (num && !po->tok_owners) {
+        fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+    }
+
     tj_node *root = po->root;
-    if (!root) return;
+    if (!root) {
+        for (int t = 0; t < num; t++) po->tok_owners[t] = NULL;
+        return;
+    }
 
     /* The project block (if any) is a top-level child like the rest, but
      * its body declarations were hoisted to siblings under root (the
@@ -491,7 +500,7 @@ static void assign_token_owners(ParseOutput *po) {
             stack[depth++] = (OwnerFrame){ kids, nkids, 0, child };
         }
 
-        po->tok_spans[t].owner = (depth > 1) ? stack[depth - 1].scope : NULL;
+        po->tok_owners[t] = (depth > 1) ? stack[depth - 1].scope : NULL;
     }
 
     free(stack);

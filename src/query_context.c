@@ -38,7 +38,7 @@ static char *dup_or_null(const char *s) {
 /* ── doc_snapshot ─────────────────────────────────────────────────────────── */
 
 doc_snapshot *docsnap_new(const char *uri, const char *text,
-                         tj_node *root, TokenSpan *tok_spans,
+                         tj_node *root, TokenSpan *tok_spans, tj_node **tok_owners,
                          int num_tok_spans, str_arena *tok_arena,
                          int num_sem_entries, uint64_t doc_version) {
     doc_snapshot *s = calloc(1, sizeof(doc_snapshot));
@@ -49,6 +49,7 @@ doc_snapshot *docsnap_new(const char *uri, const char *text,
     s->text            = dup_or_null(text);
     s->root            = root;        /* ownership moved in */
     s->tok_spans       = tok_spans;   /* ownership moved in */
+    s->tok_owners      = tok_owners;  /* ownership moved in */
     s->num_tok_spans   = num_tok_spans;
     s->tok_arena       = tok_arena;   /* ownership moved in */
     s->num_sem_entries = num_sem_entries;
@@ -71,6 +72,7 @@ void docsnap_release(doc_snapshot *s) {
      * free() per captured token.  The span buffer is recycled (its pages stay
      * mapped for the next parse) rather than free()'d. */
     tok_spans_release(s->tok_spans);
+    free(s->tok_owners);
     arena_free(s->tok_arena);
     free(s->uri);
     free(s->text);

@@ -312,11 +312,12 @@ static void push_lens(yyjson_mut_doc *doc, yyjson_mut_val *arr,
  * complementary endpoint and emit a lens.
  *
  * The `symbols` / `num_symbols` parameters are unused — endpoint data
- * is read directly from each token's `owner` — but kept for symmetry
- * with other build_*_json entry points.
+ * is read directly from each token's owner (the parallel `owners` array)
+ * — but kept for symmetry with other build_*_json entry points.
  */
 yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
-                                     const TokenSpan *spans, int num_spans,
+                                     const TokenSpan *spans,
+                                     tj_node *const *owners, int num_spans,
                                      tj_node *const *symbols,
                                      int num_symbols) {
     (void)symbols;
@@ -328,7 +329,7 @@ yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
     for (int i = 0; i < num_spans; i++) {
         const TokenSpan *t = &spans[i];
         if (t->token_kind != KW_LENGTH && t->token_kind != KW_DURATION) continue;
-        tj_node *owner = t->owner;
+        tj_node *owner = owners ? owners[i] : NULL;
         if (!owner || owner->keyword != KW_TASK) continue;
         if (!owner->has_start && !owner->has_end) continue;
 
@@ -380,6 +381,7 @@ yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
     doc_symbol_pool(d, &top, &n);
     yyjson_mut_val *arr = build_code_lens_json(doc,
                                                d->tok_spans,
+                                               d->tok_owners,
                                                d->num_tok_spans,
                                                top, n);
     return make_response(doc, id, arr);

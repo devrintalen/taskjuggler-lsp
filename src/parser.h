@@ -236,16 +236,16 @@ typedef struct Diagnostic Diagnostic;
  * never needed.  Caller must not modify or free it; it is released in bulk
  * when the arena is freed.
  *
- * `owner` points to the innermost enclosing tj_node in this same
- * document's per-kind tree (whichever tree the enclosing declaration
- * lives in).  NULL when the token sits outside every declaration.
+ * The innermost enclosing tj_node for each token (its "owner") is kept in a
+ * parallel array (ParseOutput / doc_snapshot `tok_owners`, indexed the same as
+ * `tok_spans`) rather than in this struct, so the hot span array stays 32 bytes
+ * — two per cache line and far less memory to fill, scan, and owner-annotate.
  */
 typedef struct {
     int       token_kind;   /**< raw TK_/KW_ constant from grammar.tab.h */
     LspPos    start;        /**< inclusive start position in the source */
     LspPos    end;          /**< exclusive end position in the source */
-    char     *text;         /**< owned strdup of the lexeme; may be NULL */
-    tj_node  *owner;        /**< borrowed innermost enclosing tj_node, or NULL */
+    char     *text;         /**< borrowed arena lexeme; may be NULL */
 } TokenSpan;
 
 /**
@@ -301,6 +301,7 @@ typedef struct {
     int        num_tok_spans;   /**< number of valid entries in `tok_spans` */
     int        num_sem_entries; /**< upper bound on semantic-token entries (one per source line covered) */
     str_arena *tok_arena;       /**< owned backing store for every `tok_spans[i].text` */
+    tj_node  **tok_owners;      /**< owned array[num_tok_spans]; innermost enclosing node per token (parallel to tok_spans), or NULL */
 
     IncludeRef *includes;       /**< owned array; one entry per `include` directive */
     int         num_includes;   /**< number of valid entries in `includes` */

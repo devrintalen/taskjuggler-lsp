@@ -40,10 +40,10 @@ static int pos_in_range(LspPos p, LspRange r) {
     return after && before;
 }
 
-int dependency_at_cursor(const TokenSpan *tokens, int num_tokens,
-                         LspPos cursor,
+int dependency_at_cursor(const TokenSpan *tokens, tj_node *const *owners,
+                         int num_tokens, LspPos cursor,
                          tj_node **out_owner, const Dependency **out_dep) {
-    for (tj_node *node = tj_node_at(tokens, num_tokens, cursor);
+    for (tj_node *node = tj_node_at(tokens, owners, num_tokens, cursor);
          node != NULL; node = node->parent_node) {
         for (int i = 0; i < node->num_dependencies; i++) {
             if (pos_in_range(cursor, node->dependencies[i].source_range)) {
@@ -56,9 +56,9 @@ int dependency_at_cursor(const TokenSpan *tokens, int num_tokens,
     return 0;
 }
 
-tj_node *task_decl_at_cursor(const TokenSpan *tokens, int num_tokens,
-                             LspPos cursor) {
-    for (tj_node *node = tj_node_at(tokens, num_tokens, cursor);
+tj_node *task_decl_at_cursor(const TokenSpan *tokens, tj_node *const *owners,
+                             int num_tokens, LspPos cursor) {
+    for (tj_node *node = tj_node_at(tokens, owners, num_tokens, cursor);
          node != NULL; node = node->parent_node) {
         if (node->keyword == KW_TASK &&
                 pos_in_range(cursor, node->selection_range))

@@ -26,14 +26,17 @@
 
 /**
  * Return the innermost tj_node whose range contains @p pos (inclusive
- * start, exclusive end), using the precomputed `.owner` field on @p tokens.
+ * start, exclusive end), using the precomputed per-token @p owners array
+ * (parallel to @p tokens).
  *
  * @param tokens      Token spans of the current document.
- * @param num_tokens  Length of @p tokens.
+ * @param owners      Per-token innermost-enclosing node, parallel to @p tokens.
+ * @param num_tokens  Length of @p tokens / @p owners.
  * @param pos         Position to look up.
  * @return The matching node, or NULL when @p pos is outside every tj_node.
  */
-tj_node *tj_node_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
+tj_node *tj_node_at(const TokenSpan *tokens, tj_node *const *owners,
+                    int num_tokens, LspPos pos);
 
 /**
  * Navigate a tj_node tree by following @p path (an array of @p plen

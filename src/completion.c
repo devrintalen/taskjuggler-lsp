@@ -256,19 +256,20 @@ static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor
  * order into a scratch array and emitting them outermost-first.
  *
  * @param tokens      Token spans of the current document.
- * @param num_tokens  Length of @p tokens.
+ * @param owners      Per-token owner array, parallel to @p tokens.
+ * @param num_tokens  Length of @p tokens / @p owners.
  * @param cursor      Cursor position.
  * @param out_n       Receives the stack depth.
  * @return Heap-allocated array of KW_* values; caller must free.  NULL when
  *         @p cursor sits outside every tj_node.
  */
-static int *block_stack(const TokenSpan *tokens, int num_tokens,
-                        LspPos cursor, int *out_n) {
+static int *block_stack(const TokenSpan *tokens, tj_node *const *owners,
+                        int num_tokens, LspPos cursor, int *out_n) {
     *out_n = 0;
 
     /* Count the chain depth up from the innermost. */
     int depth = 0;
-    for (tj_node *sym = tj_node_at(tokens, num_tokens, cursor);
+    for (tj_node *sym = tj_node_at(tokens, owners, num_tokens, cursor);
          sym != NULL; sym = sym->parent_node)
         depth++;
     if (depth == 0) return NULL;
@@ -278,7 +279,7 @@ static int *block_stack(const TokenSpan *tokens, int num_tokens,
 
     /* Fill in reverse so the result reads outermost-first. */
     int i = depth;
-    for (tj_node *sym = tj_node_at(tokens, num_tokens, cursor);
+    for (tj_node *sym = tj_node_at(tokens, owners, num_tokens, cursor);
          sym != NULL; sym = sym->parent_node)
         result[--i] = sym->keyword;
 
@@ -524,17 +525,18 @@ static void collect_ids(tj_node *const *syms, int n, int kind,
  * output outermost-first.
  *
  * @param tokens      Token spans of the current document.
- * @param num_tokens  Length of @p tokens.
+ * @param owners      Per-token owner array, parallel to @p tokens.
+ * @param num_tokens  Length of @p tokens / @p owners.
  * @param cursor      Cursor position.
  * @param out_n       Receives the depth of the returned array.
  * @return Heap-allocated array of heap-allocated strings; caller must free
  *         each string and the array.  NULL when no enclosing task exists.
  */
-static char **current_task_scope(const TokenSpan *tokens, int num_tokens,
-                                 LspPos cursor, int *out_n) {
+static char **current_task_scope(const TokenSpan *tokens, tj_node *const *owners,
+                                 int num_tokens, LspPos cursor, int *out_n) {
     *out_n = 0;
 
-    tj_node *innermost = tj_node_at(tokens, num_tokens, cursor);
+    tj_node *innermost = tj_node_at(tokens, owners, num_tokens, cursor);
 
     int depth = 0;
     for (tj_node *sym = innermost; sym != NULL; sym = sym->parent_node) {
@@ -744,7 +746,8 @@ static void emit_id_item(yyjson_mut_doc *doc, yyjson_mut_val *items,
  * @param doc            Destination mutable JSON document.
  * @param items          CompletionItem[] array to append to.
  * @param tokens         Token spans of the current document.
- * @param num_tokens     Length of @p tokens.
+ * @param owners         Per-token owner array, parallel to @p tokens.
+ * @param num_tokens     Length of @p tokens / @p owners.
  * @param cursor         Cursor position.
  * @param symbols        Top-level symbols of the current document.
  * @param num_symbols    Length of @p symbols.
@@ -757,7 +760,8 @@ static void emit_id_item(yyjson_mut_doc *doc, yyjson_mut_val *items,
  * @return Number of items added to @p items.
  */
 static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
-                                  const TokenSpan *tokens, int num_tokens,
+                                  const TokenSpan *tokens,
+                                  tj_node *const *owners, int num_tokens,
                                   LspPos cursor,
                                   tj_node *const *symbols, int num_symbols,
                                   tj_node *const **extra_pools,
@@ -774,7 +778,7 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
                         num_extra, id_kind, &ids);
     } else {
         int scope_n = 0;
-        char **scope = current_task_scope(tokens, num_tokens, cursor, &scope_n);
+        char **scope = current_task_scope(tokens, owners, num_tokens, cursor, &scope_n);
 
         if (bang_count <= scope_n) {
             int ch_n = 0;
@@ -816,7 +820,8 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
  * @param doc            Destination mutable JSON document.
  * @param items          CompletionItem[] array to append to.
  * @param tokens         Token spans of the current document.
- * @param num_tokens     Length of @p tokens.
+ * @param owners         Per-token owner array, parallel to @p tokens.
+ * @param num_tokens     Length of @p tokens / @p owners.
  * @param cursor         Cursor position.
  * @param symbols        Top-level symbols of the current document.
  * @param num_symbols    Length of @p symbols.
@@ -829,14 +834,15 @@ static int build_dep_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
  * @return Number of items added to @p items.
  */
 static int build_id_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
-                                const TokenSpan *tokens, int num_tokens,
+                                const TokenSpan *tokens,
+                                tj_node *const *owners, int num_tokens,
                                 LspPos cursor,
                                 tj_node *const *symbols, int num_symbols,
                                 tj_node *const **extra_pools,
                                 const int *extra_counts, int num_extra,
                                 int id_kind, int *out_incomplete) {
     if (id_kind == KW_TASK)
-        return build_dep_completions(doc, items, tokens, num_tokens, cursor,
+        return build_dep_completions(doc, items, tokens, owners, num_tokens, cursor,
                                      symbols, num_symbols,
                                      extra_pools, extra_counts, num_extra,
                                      id_kind, out_incomplete);
@@ -902,7 +908,8 @@ static int build_keyword_completions(yyjson_mut_doc *doc, yyjson_mut_val *items,
  *   — Keyword completions when at a statement-start position
  */
 yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
-                                        const TokenSpan *tokens, int num_tokens,
+                                        const TokenSpan *tokens,
+                                        tj_node *const *owners, int num_tokens,
                                         LspPos cursor,
                                         tj_node *const *symbols, int num_symbols,
                                         tj_node *const **extra_pools,
@@ -916,7 +923,7 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
 
     /* Gather cursor context: enclosing block stack, partial word, first word */
     int    stack_n    = 0;
-    int   *stack      = block_stack(tokens, num_tokens, cursor, &stack_n);
+    int   *stack      = block_stack(tokens, owners, num_tokens, cursor, &stack_n);
     char  *partial    = partial_word(tokens, num_tokens, cursor);
     char  *first_word = line_first_word(tokens, num_tokens, cursor);
 
@@ -942,7 +949,7 @@ yyjson_mut_val *build_completions_json(yyjson_mut_doc *doc,
 
         if (id_kind) {
             item_count = build_id_completions(doc, items,
-                                              tokens, num_tokens,
+                                              tokens, owners, num_tokens,
                                               cursor,
                                               symbols, num_symbols,
                                               extra_pools, extra_counts, num_extra,
@@ -1008,6 +1015,7 @@ yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     LspPos pos             = json_to_pos(pos_obj);
     yyjson_mut_val *result = build_completions_json(doc,
                                                     d->tok_spans,
+                                                    d->tok_owners,
                                                     d->num_tok_spans,
                                                     pos,
                                                     self_top, self_n,

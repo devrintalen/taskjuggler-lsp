@@ -155,13 +155,13 @@ yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc, yyjson_val *id,
      * both directions).  Resolution runs against the pinned snapshot's
      * ProjectNode tree, exactly as definition/references do. */
     ProjectNode *wanted = NULL;
-    tj_node *decl = task_decl_at_cursor(d->tok_spans, d->num_tok_spans, pos);
+    tj_node *decl = task_decl_at_cursor(d->tok_spans, d->tok_owners, d->num_tok_spans, pos);
     if (decl) {
         wanted = project_node_for_doc_task(qc->project_root, d->task_prefix, decl);
     } else {
         tj_node          *owner = NULL;
         const Dependency *dep   = NULL;
-        if (dependency_at_cursor(d->tok_spans, d->num_tok_spans, pos,
+        if (dependency_at_cursor(d->tok_spans, d->tok_owners, d->num_tok_spans, pos,
                                  &owner, &dep)) {
             ProjectNode *merged_owner =
                 project_node_for_doc_task(qc->project_root, d->task_prefix, owner);
