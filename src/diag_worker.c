@@ -288,6 +288,27 @@ static void registry_remove_at(int idx) {
     g_workers[idx] = g_workers[--g_num_workers];
 }
 
+/** Find or (re)spawn the diagnostics worker for project @p id running in
+ *  @p mode. If an existing worker's class flipped (the project was added to
+ *  or removed from compile_commands.json) the old worker is retired and a new
+ *  one spawned in the correct class.
+ *  @return The worker for @p id, or NULL if spawning failed. */
+static diag_worker *acquire_project_worker(const char *id, tj3_mode mode) {
+    diag_worker *w = registry_find(id);
+    if (w && w->mode != mode) {
+        for (int i = 0; i < g_num_workers; i++)
+            if (g_workers[i] == w) { registry_remove_at(i); break; }
+        diag_worker_retire(w, 1);
+        w = NULL;
+    }
+    if (!w) {
+        w = diag_worker_spawn(id, mode);
+        if (!w) return NULL;
+        registry_add(w);
+    }
+    return w;
+}
+
 void diag_registry_update(workspace_snapshot *ws) {
     if (!ws) return;
 
@@ -299,20 +320,8 @@ void diag_registry_update(workspace_snapshot *ws) {
         if (!proj->id) continue;
         tj3_mode mode = proj->from_compile_commands ? TJ3_FULL : TJ3_SYNTAX_ONLY;
 
-        diag_worker *w = registry_find(proj->id);
-        if (w && w->mode != mode) {
-            /* Class flipped (added to / removed from compile_commands.json):
-             * retire the old worker and respawn in the new class. */
-            for (int i = 0; i < g_num_workers; i++)
-                if (g_workers[i] == w) { registry_remove_at(i); break; }
-            diag_worker_retire(w, 1);
-            w = NULL;
-        }
-        if (!w) {
-            w = diag_worker_spawn(proj->id, mode);
-            if (!w) continue;
-            registry_add(w);
-        }
+        diag_worker *w = acquire_project_worker(proj->id, mode);
+        if (!w) continue;
         w->seen = 1;
         diag_worker_request(w, ws);
     }
