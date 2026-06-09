@@ -787,6 +787,25 @@ static void republish_all_diagnostics(void) {
  *
  *  Updates the mtime/size cache on every call (even on failure) so
  *  the stat-poll does not re-trigger until the file changes again. */
+/** Load every .tjp listed in a parsed compile_commands.json into docs[] and
+ *  tag each as a project root. Each load_file_from_disk() cascades through
+ *  follow_includes() to pull in the file's transitive .tji closure; the
+ *  is_cc_root tag seeds build_workspace_snapshot()'s per-project BFS.
+ *  @param entries  Parsed compile_commands entries.
+ *  @param n        Number of entries. */
+static void load_compile_entries(const CompileEntry *entries, int n) {
+    for (int i = 0; i < n; i++) {
+        if (!entries[i].file_abs) continue;
+        DLOG(DEBUG_COMPILE_COMMANDS, LOG_VERBOSE, "  entry[%d] %s",
+             i, entries[i].file_abs);
+        load_file_from_disk(entries[i].file_abs);
+        char *uri = path_to_uri(entries[i].file_abs);
+        Document *root = uri ? doc_find(uri) : NULL;
+        free(uri);
+        if (root) root->is_cc_root = 1;
+    }
+}
+
 static void reload_compile_commands(void) {
     g_cc_attempted = 1;
     DLOG(DEBUG_COMPILE_COMMANDS, LOG_INFO, "reload: cc_path=%s",
@@ -823,19 +842,7 @@ static void reload_compile_commands(void) {
 
     switch (res) {
     case CC_OK:
-        for (int i = 0; i < n; i++) {
-            if (!entries[i].file_abs) continue;
-            DLOG(DEBUG_COMPILE_COMMANDS, LOG_VERBOSE, "  entry[%d] %s",
-                 i, entries[i].file_abs);
-            load_file_from_disk(entries[i].file_abs);
-            /* Tag the doc that holds this compile_commands entry as a
-             * project root.  build_workspace_snapshot() seeds one project
-             * per is_cc_root doc and BFS-walks its include closure. */
-            char *uri = path_to_uri(entries[i].file_abs);
-            Document *root = uri ? doc_find(uri) : NULL;
-            free(uri);
-            if (root) root->is_cc_root = 1;
-        }
+        load_compile_entries(entries, n);
         break;
     case CC_NOT_FOUND:
         /* compile_commands.json is absent at the workspace root.  As with the
