@@ -39,6 +39,32 @@
  * @param container  Name of the parent symbol, or NULL at the top level.
  * @param arr        SymbolInformation[] array to append matches to.
  */
+/** Append one WorkspaceSymbol (SymbolInformation) entry for @p sym to @p arr:
+ *  its name, kind, optional containerName, and a Location in @p uri.
+ *  @param doc        Destination mutable JSON document.
+ *  @param sym        Symbol to serialize.
+ *  @param name       Display name (already defaulted from sym->name).
+ *  @param uri        Document URI the symbol lives in.
+ *  @param container  Enclosing symbol name, or NULL for top-level.
+ *  @param arr        SymbolInformation[] array to append to. */
+static void emit_workspace_symbol(yyjson_mut_doc *doc, const tj_node *sym,
+                                  const char *name, const char *uri,
+                                  const char *container, yyjson_mut_val *arr) {
+    yyjson_mut_val *entry = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, entry, "name", name);
+    yyjson_mut_obj_add_uint(doc, entry, "kind", (uint64_t)symbol_kind_for(sym->keyword));
+    if (container)
+        yyjson_mut_obj_add_str(doc, entry, "containerName", container);
+
+    yyjson_mut_val *location = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, location, "uri", uri);
+    yyjson_mut_obj_add_val(doc, location, "range",
+                           range_json(doc, sym->selection_range));
+    yyjson_mut_obj_add_val(doc, entry, "location", location);
+
+    yyjson_mut_arr_add_val(arr, entry);
+}
+
 static void collect_recursive(yyjson_mut_doc *doc, const char *query,
                                tj_node *const *syms, int n,
                                const char *uri, const char *container,
@@ -51,21 +77,8 @@ static void collect_recursive(yyjson_mut_doc *doc, const char *query,
         /* Empty query matches everything; otherwise case-insensitive substring. */
         int matches = (query[0] == '\0') || (strcasestr(name, query) != NULL);
 
-        if (matches) {
-            yyjson_mut_val *entry = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_str(doc, entry, "name", name);
-            yyjson_mut_obj_add_uint(doc, entry, "kind", (uint64_t)symbol_kind_for(sym->keyword));
-            if (container)
-                yyjson_mut_obj_add_str(doc, entry, "containerName", container);
-
-            yyjson_mut_val *location = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_str(doc, location, "uri", uri);
-            yyjson_mut_obj_add_val(doc, location, "range",
-                                   range_json(doc, sym->selection_range));
-            yyjson_mut_obj_add_val(doc, entry, "location", location);
-
-            yyjson_mut_arr_add_val(arr, entry);
-        }
+        if (matches)
+            emit_workspace_symbol(doc, sym, name, uri, container, arr);
 
         if (sym->num_children > 0)
             collect_recursive(doc, query,
