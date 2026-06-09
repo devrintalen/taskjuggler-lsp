@@ -334,18 +334,81 @@ static const char *map_reported_path(const char *path,
 }
 
 /**
- * Parse tj3 stderr output and populate @p out with the resulting
- * diagnostics.
+ * Decode one tj3 stderr line and, if it reports a diagnostic, append it to
+ * @p out.
  *
- * Each non-empty line is examined for an ": Error: " or ": Warning: "
- * marker.  Lines that match are decoded into a Diagnostic (file path,
- * 1-based line number, severity, message) and appended to @p out.
- * Lines that do not match are silently ignored.
+ * A line matches when it contains an ": Error: " or ": Warning: " marker
+ * preceded by a "<path>:<lineno>" prefix that maps to a project member.
+ * Matching lines become a Diagnostic (file path, 1-based line number,
+ * severity, message); non-matching lines are ignored.
+ *
+ * @param line      One stderr line (NUL-terminated); read but not modified.
+ * @param tmpdir    Temporary directory used for the tj3 run; passed to
+ *                  map_reported_path() for path normalisation.
+ * @param real_tmp  realpath() result for @p tmpdir, or NULL.
+ * @param members   Array of project member descriptors.
+ * @param nmembers  Number of entries in @p members.
+ * @param out       Destination diag_set to receive the diagnostic.
+ */
+static void parse_diagnostic_line(char *line,
+                                  const char *tmpdir, const char *real_tmp,
+                                  const member *members, int nmembers,
+                                  diag_set *out) {
+    int   severity;
+    char *marker;
+    size_t marker_len;
+    if ((marker = strstr(line, ": Error: ")) != NULL) {
+        severity   = DIAG_ERROR;
+        marker_len = strlen(": Error: ");
+    } else if ((marker = strstr(line, ": Warning: ")) != NULL) {
+        severity   = DIAG_WARNING;
+        marker_len = strlen(": Warning: ");
+    } else {
+        return;
+    }
+
+    const char *message = marker + marker_len;
+
+    /* The segment [line, marker) is "<path>:<lineno>". */
+    char *colon = NULL;
+    for (char *q = line; q < marker; q++)
+        if (*q == ':') colon = q;
+    if (!colon) return;
+
+    int lineno = 0, have_digits = 0;
+    for (char *q = colon + 1; q < marker; q++) {
+        if (*q < '0' || *q > '9') { have_digits = 0; break; }
+        lineno = lineno * 10 + (*q - '0');
+        have_digits = 1;
+    }
+    if (!have_digits) return;
+
+    char *path = strndup(line, (size_t)(colon - line));
+    if (!path) return;
+    const char *uri = map_reported_path(path, tmpdir, real_tmp,
+                                        members, nmembers);
+    free(path);
+    if (!uri) return;
+
+    uint32_t l = lineno > 0 ? (uint32_t)(lineno - 1) : 0;
+    Diagnostic d;
+    d.range.start.line      = l;
+    d.range.start.character = 0;
+    d.range.end.line        = l;
+    d.range.end.character   = (uint32_t)INT_MAX;
+    d.severity              = severity;
+    d.source                = "tj3";
+    d.message               = strdup(message);
+    diag_set_add(out, uri, d);
+}
+
+/**
+ * Parse tj3 stderr output and populate @p out with the resulting
+ * diagnostics, one per matching line (see parse_diagnostic_line()).
  *
  * @param stderr_buf  NUL-terminated buffer of tj3 stderr; modified in
  *                    place by strtok_r.  May be NULL (no-op).
- * @param tmpdir      Temporary directory used for the tj3 run; passed
- *                    to map_reported_path() for path normalisation.
+ * @param tmpdir      Temporary directory used for the tj3 run.
  * @param real_tmp    realpath() result for @p tmpdir, or NULL.
  * @param members     Array of project member descriptors.
  * @param nmembers    Number of entries in @p members.
@@ -361,55 +424,8 @@ static void parse_diagnostics(char *stderr_buf,
     char *save = NULL;
     for (char *line = strtok_r(stderr_buf, "\n", &save);
          line;
-         line = strtok_r(NULL, "\n", &save)) {
-
-        int   severity;
-        char *marker;
-        size_t marker_len;
-        if ((marker = strstr(line, ": Error: ")) != NULL) {
-            severity   = DIAG_ERROR;
-            marker_len = strlen(": Error: ");
-        } else if ((marker = strstr(line, ": Warning: ")) != NULL) {
-            severity   = DIAG_WARNING;
-            marker_len = strlen(": Warning: ");
-        } else {
-            continue;
-        }
-
-        const char *message = marker + marker_len;
-
-        /* The segment [line, marker) is "<path>:<lineno>". */
-        char *colon = NULL;
-        for (char *q = line; q < marker; q++)
-            if (*q == ':') colon = q;
-        if (!colon) continue;
-
-        int lineno = 0, have_digits = 0;
-        for (char *q = colon + 1; q < marker; q++) {
-            if (*q < '0' || *q > '9') { have_digits = 0; break; }
-            lineno = lineno * 10 + (*q - '0');
-            have_digits = 1;
-        }
-        if (!have_digits) continue;
-
-        char *path = strndup(line, (size_t)(colon - line));
-        if (!path) continue;
-        const char *uri = map_reported_path(path, tmpdir, real_tmp,
-                                            members, nmembers);
-        free(path);
-        if (!uri) continue;
-
-        uint32_t l = lineno > 0 ? (uint32_t)(lineno - 1) : 0;
-        Diagnostic d;
-        d.range.start.line      = l;
-        d.range.start.character = 0;
-        d.range.end.line        = l;
-        d.range.end.character   = (uint32_t)INT_MAX;
-        d.severity              = severity;
-        d.source                = "tj3";
-        d.message               = strdup(message);
-        diag_set_add(out, uri, d);
-    }
+         line = strtok_r(NULL, "\n", &save))
+        parse_diagnostic_line(line, tmpdir, real_tmp, members, nmembers, out);
 }
 
 /* ── entry point ─────────────────────────────────────────────────────────── */
