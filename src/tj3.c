@@ -495,6 +495,27 @@ static int assign_member_relpaths(member *members, int nmembers) {
     return 1;
 }
 
+/** Write each member's text into @p tmpdir at its relpath, creating parent
+ *  directories as needed, so tj3 can run over a faithful on-disk copy of the
+ *  project's source.
+ *  @param tmpdir    Staging directory (already created).
+ *  @param members   Member array with relpath and text set.
+ *  @param nmembers  Number of entries in @p members. */
+static void stage_members_to_tmpdir(const char *tmpdir, const member *members,
+                                    int nmembers) {
+    for (int i = 0; i < nmembers; i++) {
+        char *dest = path_join(tmpdir, members[i].relpath);
+        char *slash = strrchr(dest, '/');
+        if (slash) {
+            *slash = '\0';
+            make_dirs(dest);
+            *slash = '/';
+        }
+        write_text_file(dest, members[i].text);
+        free(dest);
+    }
+}
+
 void tj3_collect_project(const workspace_snapshot *ws, const ws_project *proj,
                          tj3_mode mode, diag_set *out) {
     if (!ws || !proj || !out) return;
@@ -527,17 +548,7 @@ void tj3_collect_project(const workspace_snapshot *ws, const ws_project *proj,
     if (!tmpdir) goto cleanup;
     char *real_tmp = realpath(tmpdir, NULL);
 
-    for (int i = 0; i < nmembers; i++) {
-        char *dest = path_join(tmpdir, members[i].relpath);
-        char *slash = strrchr(dest, '/');
-        if (slash) {
-            *slash = '\0';
-            make_dirs(dest);
-            *slash = '/';
-        }
-        write_text_file(dest, members[i].text);
-        free(dest);
-    }
+    stage_members_to_tmpdir(tmpdir, members, nmembers);
 
     char *argv[4];
     int ai = 0;
