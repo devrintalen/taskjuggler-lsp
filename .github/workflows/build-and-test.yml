@@ -18,7 +18,7 @@ jobs:
       TASKJUGGLER_VERSION: "3.8.4"
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - run: sudo apt update
     - run: sudo apt install flex bison cmake
     - name: install yyjson
