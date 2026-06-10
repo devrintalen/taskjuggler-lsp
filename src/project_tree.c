@@ -44,7 +44,10 @@ void project_node_append_child(ProjectNode *parent, ProjectNode *child) {
 }
 
 /** Copy a NUL-terminated string into @p arena, or return NULL when @p s is
- *  NULL.  The result is owned by the arena, not the caller. */
+ *  NULL.  The result is owned by the arena, not the caller.
+ *  @param arena  Arena the copy is carved from.
+ *  @param s      Source string to copy, or NULL.
+ *  @return The arena-owned copy, or NULL when @p s is NULL. */
 static char *arena_str(str_arena *arena, const char *s) {
     return s ? arena_strndup(arena, s, strlen(s)) : NULL;
 }

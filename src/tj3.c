@@ -194,17 +194,6 @@ static int tj3_available(void) {
 /* ── run tj3, capturing stderr ───────────────────────────────────────────── */
 
 /**
- * Fork and exec tj3 with cwd set to @p tmpdir, capturing its stderr
- * output into a heap-allocated string.
- *
- * @param tmpdir Working directory for the tj3 child process.
- * @param argv   NULL-terminated argument vector passed to execvp;
- *               argv[0] must be "tj3".
- * @return Heap-allocated NUL-terminated string containing the full
- *         stderr output of tj3, owned by the caller; NULL on fork,
- *         pipe, or allocation failure.
- */
-/**
  * Read @p fd to EOF into a freshly allocated NUL-terminated buffer.
  *
  * On allocation failure the partial buffer is freed and @p fd is still
@@ -238,6 +227,17 @@ static char *read_fd_to_string(int fd, size_t *out_len) {
     return buf;
 }
 
+/**
+ * Fork and exec tj3 with cwd set to @p tmpdir, capturing its stderr
+ * output into a heap-allocated string.
+ *
+ * @param tmpdir Working directory for the tj3 child process.
+ * @param argv   NULL-terminated argument vector passed to execvp;
+ *               argv[0] must be "tj3".
+ * @return Heap-allocated NUL-terminated string containing the full
+ *         stderr output of tj3, owned by the caller; NULL on fork,
+ *         pipe, or allocation failure.
+ */
 static char *run_tj3(const char *tmpdir, char *const argv[]) {
     int errpipe[2];
     if (pipe(errpipe) != 0) return NULL;

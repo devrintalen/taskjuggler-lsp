@@ -400,16 +400,12 @@ static void replace_string(char **slot, const char *value) {
     *slot = value ? strdup(value) : NULL;
 }
 
-/** Resolve each include directive in @p po against @p file_path's directory,
- *  load any not-yet-tracked included file from disk, propagate the
- *  include's per-kind prefix strings onto the includee's Document slot,
- *  and record the resolved URI in the includer's @c included_uris[] array.
- *  @param file_path  Filesystem path of the file that was just parsed.
- *  @param po         Parse output from parsing @p file_path; may be NULL. */
 /** Resolve an include directive's filename to an absolute filesystem path.
  *  Absolute filenames are copied as-is; relative ones are joined against the
  *  directory containing @p includer_path (or copied as-is when the includer
  *  has no directory component).
+ *  @param includer_path  Path of the file containing the include directive.
+ *  @param filename       The include directive's (possibly relative) filename.
  *  @return malloc'd path the caller must free, or NULL on allocation failure. */
 static char *resolve_include_path(const char *includer_path, const char *filename) {
     size_t fname_len = strlen(filename);
@@ -438,7 +434,10 @@ static char *resolve_include_path(const char *includer_path, const char *filenam
 /** Append @p uri to @p includer's included_uris[], growing the array as
  *  needed. On success the array takes ownership of @p uri and 1 is returned;
  *  on allocation failure the list is left unchanged and 0 is returned (the
- *  caller retains ownership of @p uri). */
+ *  caller retains ownership of @p uri).
+ *  @param includer  Document whose included_uris[] is appended to.
+ *  @param uri       URI to append (ownership transfers on success).
+ *  @return 1 on success, 0 on allocation failure. */
 static int includer_append_included_uri(Document *includer, char *uri) {
     if (includer->num_included_uris >= includer->included_uris_cap) {
         int new_cap = includer->included_uris_cap
@@ -453,6 +452,12 @@ static int includer_append_included_uri(Document *includer, char *uri) {
     return 1;
 }
 
+/** Resolve each include directive in @p po against @p file_path's directory,
+ *  load any not-yet-tracked included file from disk, propagate the
+ *  include's per-kind prefix strings onto the includee's Document slot,
+ *  and record the resolved URI in the includer's @c included_uris[] array.
+ *  @param file_path  Filesystem path of the file that was just parsed.
+ *  @param po         Parse output from parsing @p file_path; may be NULL. */
 static void follow_includes(const char *file_path, const ParseOutput *po) {
     /* Look up the includer Document so we can repopulate its
      * included_uris[] as we resolve each include below.  follow_includes
@@ -623,15 +628,6 @@ static void copy_document_into_project(workspace_snapshot *ws, int pidx, Documen
     }
 }
 
-/** BFS from @p root along included_uris[], copying every reachable Document's
- *  top-level into project @p pidx with prefixes applied, and stamping each
- *  visited doc's ws_doc.project_index to @p pidx unless a prior project
- *  already claimed it.
- *  @param ws            Workspace snapshot being built.
- *  @param pidx          Index of the target project within @p ws->projects.
- *  @param root          Root document that seeds the BFS (the compile_commands
- *                       entry point).
- *  @param slot_to_wsdoc Mapping from docs[] slot index to ws_doc index. */
 /** Copy @p d's top-level declarations into project @p pidx and stamp the
  *  document's ws_doc with that project index, unless it was already claimed
  *  by an earlier project (first include-BFS to reach a doc wins).
@@ -647,6 +643,15 @@ static void assign_doc_to_project(workspace_snapshot *ws, int pidx, Document *d,
         ws->docs[wsd].project_index = pidx;
 }
 
+/** BFS from @p root along included_uris[], copying every reachable Document's
+ *  top-level into project @p pidx with prefixes applied, and stamping each
+ *  visited doc's ws_doc.project_index to @p pidx unless a prior project
+ *  already claimed it.
+ *  @param ws            Workspace snapshot being built.
+ *  @param pidx          Index of the target project within @p ws->projects.
+ *  @param root          Root document that seeds the BFS (the compile_commands
+ *                       entry point).
+ *  @param slot_to_wsdoc Mapping from docs[] slot index to ws_doc index. */
 static void project_populate_from_root(workspace_snapshot *ws, int pidx,
                                        Document *root, const int *slot_to_wsdoc) {
     /* Queue holds borrowed Document pointers; visited[] dedupes within
@@ -704,15 +709,6 @@ cleanup:
     #undef PUSH
 }
 
-/** Build an immutable workspace_snapshot from the current docs[]: one ws_doc
- *  per parsed in-use document (referencing its doc_snapshot and capturing the
- *  include-prefixes in force now), one project per is_cc_root document with
- *  its include closure assembled, and one singleton "orphan" project for
- *  every remaining document not reached by any closure.  Orphans exist so
- *  editor-opened files outside the compile_commands.json closure still get
- *  in-file LSP behavior (completion, hover, etc.) without bleeding into other
- *  projects' cross-file pools.
- *  @return  Newly allocated workspace_snapshot with refcount 1. */
 /** Populate one ws_doc from its live Document: take a ref on the current
  *  parse snapshot and copy the per-kind include prefixes into the immutable
  *  workspace snapshot.
@@ -727,6 +723,15 @@ static void populate_ws_doc(ws_doc *w, Document *d) {
     w->disk_only       = d->disk_only;
 }
 
+/** Build an immutable workspace_snapshot from the current docs[]: one ws_doc
+ *  per parsed in-use document (referencing its doc_snapshot and capturing the
+ *  include-prefixes in force now), one project per is_cc_root document with
+ *  its include closure assembled, and one singleton "orphan" project for
+ *  every remaining document not reached by any closure.  Orphans exist so
+ *  editor-opened files outside the compile_commands.json closure still get
+ *  in-file LSP behavior (completion, hover, etc.) without bleeding into other
+ *  projects' cross-file pools.
+ *  @return  Newly allocated workspace_snapshot with refcount 1. */
 static workspace_snapshot *build_workspace_snapshot(void) {
     int slot_to_wsdoc[MAX_DOCS];
     int ndoc = 0;
@@ -822,6 +827,11 @@ static void load_compile_entries(const CompileEntry *entries, int n) {
     }
 }
 
+/** (Re)load compile_commands.json from the workspace root into docs[],
+ *  refreshing the cached stat metadata and setting @c g_cc_status to OK,
+ *  MISSING, or MALFORMED according to the load result.  A missing file or
+ *  absent workspace root is treated as a legitimate single-file scenario
+ *  (reported per-file via diagnostics), not a hard error. */
 static void reload_compile_commands(void) {
     g_cc_attempted = 1;
     DLOG(DEBUG_COMPILE_COMMANDS, LOG_INFO, "reload: cc_path=%s",
@@ -1056,14 +1066,6 @@ static void revalidate_all_docs(void) {
    and are invoked from server_run_query() below.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/** Handle the LSP "initialize" request: extract the workspace root URI,
- *  construct the path to compile_commands.json, and return the server's
- *  capabilities and version.
- *  @param doc     Mutable document for building the response.
- *  @param id      Request id from the incoming JSON-RPC message.
- *  @param params  "initialize" params object containing "rootUri" and client
- *                 capabilities; may be NULL.
- *  @return        JSON-RPC response object with server capabilities. */
 /** Build the server "capabilities" object advertised in the initialize
  *  response: text-document sync options, the per-feature provider flags,
  *  the semantic-token legend, and the workspace file-operation filters.
@@ -1142,6 +1144,14 @@ static yyjson_mut_val *build_server_capabilities(yyjson_mut_doc *doc) {
     return caps;
 }
 
+/** Handle the LSP "initialize" request: extract the workspace root URI,
+ *  construct the path to compile_commands.json, and return the server's
+ *  capabilities and version.
+ *  @param doc     Mutable document for building the response.
+ *  @param id      Request id from the incoming JSON-RPC message.
+ *  @param params  "initialize" params object containing "rootUri" and client
+ *                 capabilities; may be NULL.
+ *  @return        JSON-RPC response object with server capabilities. */
 static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params) {
     if (params && !g_workspace_root) {
@@ -1246,10 +1256,6 @@ static void handle_initialized(void) {
     if (g_workspace_root) revalidate_all_docs();
 }
 
-/** Handle the "workspace/didChangeWatchedFiles" notification: reload or
- *  remove each changed disk-only document as indicated by its event type,
- *  then revalidate if anything changed.
- *  @param params  JSON params object with a "changes" array of file events. */
 /** Replace @p document's text with @p text and reparse it as a background
  *  (disk_only) entry: takes ownership of @p text, marks the slot disk_only,
  *  then parses, follows includes (resolved against @p path), and installs the
@@ -1302,6 +1308,10 @@ static int admit_watched_file(const char *uri) {
     return 1;
 }
 
+/** Handle the "workspace/didChangeWatchedFiles" notification: reload or
+ *  remove each changed disk-only document as indicated by its event type,
+ *  then revalidate if anything changed.
+ *  @param params  JSON params object with a "changes" array of file events. */
 static void handle_did_change_watched_files(yyjson_val *params) {
     if (!params) return;
     yyjson_val *changes = yyjson_obj_get(params, "changes");
@@ -1420,10 +1430,6 @@ static void handle_didopen(yyjson_val *params) {
     revalidate_all_docs();
 }
 
-/** Handle the "textDocument/didChange" notification: apply each content
- *  change (incremental or full-replace) to the document's text, re-parse
- *  the result, follow includes, and trigger revalidation.
- *  @param params  JSON params with "textDocument" and "contentChanges". */
 /** Fold an LSP "contentChanges" array onto @p base_text, applying each
  *  incremental (or full-replace) change in arrival order.
  *
@@ -1433,6 +1439,9 @@ static void handle_didopen(yyjson_val *params) {
  *  current text — avoiding an upfront full-source strdup of a possibly
  *  multi-MB document on every keystroke.
  *
+ *  @param base_text  Current document text the first change reads from; read
+ *                    but never freed (may be NULL).
+ *  @param changes    LSP "contentChanges" array to apply in arrival order.
  *  @return New buffer with all changes applied, or NULL when no usable change
  *          was produced (a change object missing "text", an allocation
  *          failure, or an empty change list). On NULL the caller must leave
@@ -1463,6 +1472,10 @@ static char *apply_content_changes(const char *base_text, yyjson_val *changes) {
     return current;
 }
 
+/** Handle the "textDocument/didChange" notification: apply each content
+ *  change (incremental or full-replace) to the document's text, re-parse
+ *  the result, follow includes, and trigger revalidation.
+ *  @param params  JSON params with "textDocument" and "contentChanges". */
 static void handle_didchange(yyjson_val *params) {
     if (!params) return;
     yyjson_val *tdi     = yyjson_obj_get(params, "textDocument");
@@ -1647,22 +1660,13 @@ static const char *request_primary_uri(yyjson_val *params) {
     return NULL;
 }
 
-/** Build the query_context for one query by pinning the currently published
- *  workspace snapshot and populating borrowed query_doc views from its
- *  ws_docs.  When @p want_all_docs is set every document is included (no
- *  primary); otherwise the context holds the primary document plus its
- *  same-project siblings.  The primary's previous snapshot is also retained
- *  for semanticTokens/delta.  Caller must hold docs_mutex.
- *  @param primary_uri  Canonical URI of the document the request targets;
- *                      may be NULL for workspace-global requests.
- *  @param want_all_docs  Non-zero to include all documents (workspace/symbol).
- *  @return             Heap-allocated query_context; caller takes ownership. */
 /** Build a query_doc view over @p w's current snapshot for a pinned query
  *  context. All pointers are borrowed from the snapshot (the context holds a
  *  ref on the workspace snapshot for the query's lifetime); @p is_primary
  *  marks the single document the request targets.
  *  @param w           Workspace doc whose snapshot is non-NULL.
- *  @param is_primary  Non-zero when this is the request's primary document. */
+ *  @param is_primary  Non-zero when this is the request's primary document.
+ *  @return            A query_doc view borrowing from @p w's snapshot. */
 static query_doc make_query_doc(ws_doc *w, int is_primary) {
     doc_snapshot *s = w->snap;
     return (query_doc){
@@ -1682,6 +1686,16 @@ static query_doc make_query_doc(ws_doc *w, int is_primary) {
     };
 }
 
+/** Build the query_context for one query by pinning the currently published
+ *  workspace snapshot and populating borrowed query_doc views from its
+ *  ws_docs.  When @p want_all_docs is set every document is included (no
+ *  primary); otherwise the context holds the primary document plus its
+ *  same-project siblings.  The primary's previous snapshot is also retained
+ *  for semanticTokens/delta.  Caller must hold docs_mutex.
+ *  @param primary_uri  Canonical URI of the document the request targets;
+ *                      may be NULL for workspace-global requests.
+ *  @param want_all_docs  Non-zero to include all documents (workspace/symbol).
+ *  @return             Heap-allocated query_context; caller takes ownership. */
 static query_context *build_query_context_locked(const char *primary_uri,
                                                  int want_all_docs) {
     query_context *qc = calloc(1, sizeof(query_context));

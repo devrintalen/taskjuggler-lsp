@@ -292,6 +292,8 @@ static void registry_remove_at(int idx) {
  *  @p mode. If an existing worker's class flipped (the project was added to
  *  or removed from compile_commands.json) the old worker is retired and a new
  *  one spawned in the correct class.
+ *  @param id    Project identifier to find or spawn a worker for.
+ *  @param mode  tj3 execution mode the worker must run in.
  *  @return The worker for @p id, or NULL if spawning failed. */
 static diag_worker *acquire_project_worker(const char *id, tj3_mode mode) {
     diag_worker *w = registry_find(id);

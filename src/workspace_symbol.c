@@ -25,20 +25,6 @@
 #include <string.h>
 #include <strings.h>
 
-/**
- * Recursively walk @p syms, appending matching SymbolInformation entries
- * to @p arr.  Recurses into every node's children regardless of whether
- * the node itself matched.
- *
- * @param doc        Destination mutable JSON document.
- * @param query      Case-insensitive substring filter; `""` matches
- *                   everything.
- * @param syms       Sibling symbols to search.
- * @param n          Length of @p syms.
- * @param uri        Document URI to embed in each Location result.
- * @param container  Name of the parent symbol, or NULL at the top level.
- * @param arr        SymbolInformation[] array to append matches to.
- */
 /** Append one WorkspaceSymbol (SymbolInformation) entry for @p sym to @p arr:
  *  its name, kind, optional containerName, and a Location in @p uri.
  *  @param doc        Destination mutable JSON document.
@@ -65,6 +51,20 @@ static void emit_workspace_symbol(yyjson_mut_doc *doc, const tj_node *sym,
     yyjson_mut_arr_add_val(arr, entry);
 }
 
+/**
+ * Recursively walk @p syms, appending matching SymbolInformation entries
+ * to @p arr.  Recurses into every node's children regardless of whether
+ * the node itself matched.
+ *
+ * @param doc        Destination mutable JSON document.
+ * @param query      Case-insensitive substring filter; `""` matches
+ *                   everything.
+ * @param syms       Sibling symbols to search.
+ * @param n          Length of @p syms.
+ * @param uri        Document URI to embed in each Location result.
+ * @param container  Name of the parent symbol, or NULL at the top level.
+ * @param arr        SymbolInformation[] array to append matches to.
+ */
 static void collect_recursive(yyjson_mut_doc *doc, const char *query,
                                tj_node *const *syms, int n,
                                const char *uri, const char *container,

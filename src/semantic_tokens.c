@@ -164,6 +164,25 @@ static void push_entry(uint32_t *buf, int *count,
     buf[(*count)++] = (uint32_t)modifiers;
 }
 
+/** Push one semantic-token entry encoded relative to the previous token.
+ *  Computes the LSP delta-line / delta-start from (@p line, @p character)
+ *  against (*@p prev_line, *@p prev_char), appends the entry, then advances
+ *  the previous-position cursor to this token's origin.
+ *  @param buf,count            Destination entry buffer and its running count.
+ *  @param line,character,length Absolute origin and length of this token.
+ *  @param token_type,modifiers  Semantic classification of this token.
+ *  @param prev_line,prev_char   In/out previous-token origin for delta coding. */
+static void push_relative_entry(uint32_t *buf, int *count,
+                                uint32_t line, uint32_t character, uint32_t length,
+                                int token_type, int modifiers,
+                                uint32_t *prev_line, uint32_t *prev_char) {
+    uint32_t delta_line  = line - *prev_line;
+    uint32_t delta_start = (delta_line == 0) ? character - *prev_char : character;
+    push_entry(buf, count, delta_line, delta_start, length, token_type, modifiers);
+    *prev_line = line;
+    *prev_char = character;
+}
+
 /**
  * Emit one or more data entries for a single token, splitting across
  * source lines when necessary.
@@ -189,25 +208,6 @@ static void push_entry(uint32_t *buf, int *count,
  * @param prev_char   Tracks the previous emitted entry's column; updated
  *                    in lockstep with @p prev_line.
  */
-/** Push one semantic-token entry encoded relative to the previous token.
- *  Computes the LSP delta-line / delta-start from (@p line, @p character)
- *  against (*@p prev_line, *@p prev_char), appends the entry, then advances
- *  the previous-position cursor to this token's origin.
- *  @param buf,count            Destination entry buffer and its running count.
- *  @param line,character,length Absolute origin and length of this token.
- *  @param token_type,modifiers  Semantic classification of this token.
- *  @param prev_line,prev_char   In/out previous-token origin for delta coding. */
-static void push_relative_entry(uint32_t *buf, int *count,
-                                uint32_t line, uint32_t character, uint32_t length,
-                                int token_type, int modifiers,
-                                uint32_t *prev_line, uint32_t *prev_char) {
-    uint32_t delta_line  = line - *prev_line;
-    uint32_t delta_start = (delta_line == 0) ? character - *prev_char : character;
-    push_entry(buf, count, delta_line, delta_start, length, token_type, modifiers);
-    *prev_line = line;
-    *prev_char = character;
-}
-
 static void emit_token(uint32_t *buf, int *count,
                         uint32_t start_line, uint32_t start_char,
                         uint32_t end_line,   uint32_t end_char,

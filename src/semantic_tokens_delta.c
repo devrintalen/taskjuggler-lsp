@@ -70,32 +70,6 @@ static int tokens_equal(const uint32_t *a, const uint32_t *b) {
  */
 
 /**
- * Compute the minimal edit script from sequence @p a (length @p na
- * tokens) to sequence @p b (length @p nb tokens) using Myers' diff,
- * then coalesce adjacent operations into LSP-style edits.
- *
- * Token offsets in the output are shifted by @p a_offset and
- * @p b_offset so the caller can position the edits inside larger
- * surrounding buffers (after prefix/suffix trimming).
- *
- * When @p na + @p nb exceeds #D_BOUND the algorithm falls back to a
- * single replace-everything edit to bound snapshot memory.
- *
- * @param a          Pointer to the previous (old) token data array.
- * @param na         Number of tokens in @p a.
- * @param b          Pointer to the new token data array.
- * @param nb         Number of tokens in @p b.
- * @param a_offset   Token index offset added to each edit's start position
- *                   (accounts for already-trimmed common prefix in @p a).
- * @param b_offset   Token index offset added to each edit's insert position
- *                   (accounts for already-trimmed common prefix in @p b).
- * @param out_ops    Output pointer set to a heap-allocated array of coalesced
- *                   #EditOp values; caller must free.  Set to NULL when there
- *                   are no edits.
- * @param out_n_ops  Output pointer set to the number of entries in
- *                   @p out_ops.
- */
-/**
  * Coalesce a raw edit-step list into grouped EditOps.
  *
  * @p raw_kinds holds per-step kinds (0 = snake/match, 1 = delete from a,
@@ -149,6 +123,32 @@ static void coalesce_edit_ops(const int *raw_kinds, size_t n_raw,
     *out_n_ops = n_ops;
 }
 
+/**
+ * Compute the minimal edit script from sequence @p a (length @p na
+ * tokens) to sequence @p b (length @p nb tokens) using Myers' diff,
+ * then coalesce adjacent operations into LSP-style edits.
+ *
+ * Token offsets in the output are shifted by @p a_offset and
+ * @p b_offset so the caller can position the edits inside larger
+ * surrounding buffers (after prefix/suffix trimming).
+ *
+ * When @p na + @p nb exceeds #D_BOUND the algorithm falls back to a
+ * single replace-everything edit to bound snapshot memory.
+ *
+ * @param a          Pointer to the previous (old) token data array.
+ * @param na         Number of tokens in @p a.
+ * @param b          Pointer to the new token data array.
+ * @param nb         Number of tokens in @p b.
+ * @param a_offset   Token index offset added to each edit's start position
+ *                   (accounts for already-trimmed common prefix in @p a).
+ * @param b_offset   Token index offset added to each edit's insert position
+ *                   (accounts for already-trimmed common prefix in @p b).
+ * @param out_ops    Output pointer set to a heap-allocated array of coalesced
+ *                   #EditOp values; caller must free.  Set to NULL when there
+ *                   are no edits.
+ * @param out_n_ops  Output pointer set to the number of entries in
+ *                   @p out_ops.
+ */
 static void myers_diff_run(const uint32_t *a, size_t na,
                            const uint32_t *b, size_t nb,
                            size_t a_offset, size_t b_offset,
