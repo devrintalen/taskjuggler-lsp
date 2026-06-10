@@ -49,7 +49,10 @@ str_arena *arena_new(void) {
 }
 
 /** Allocate a fresh block with at least @p need usable bytes and push it to
- *  the front of @p a's block list. */
+ *  the front of @p a's block list.
+ *  @param a     Arena to push the new block onto.
+ *  @param need  Minimum usable bytes the new block must provide.
+ *  @return The newly allocated block, now at the head of @p a's list. */
 static arena_block *arena_grow(str_arena *a, size_t need) {
     size_t cap = ARENA_BLOCK_SIZE;
     if (need > cap) cap = need;

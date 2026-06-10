@@ -65,15 +65,6 @@ TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos) {
 
 /* ── scan_kw_stack ───────────────────────────────────────────────────────── */
 
-/** Count @p tok as an argument of the keyword currently in scope.
- *  When @p tok lies fully before @p cursor, increment the argc of the
- *  innermost keyword-stack entry at @p brace_depth (the active keyword whose
- *  arguments are being counted). Tokens at or after the cursor do not count.
- *  @param stack        Keyword scope stack.
- *  @param stack_n      Number of valid entries in @p stack.
- *  @param brace_depth  Current brace nesting depth.
- *  @param tok          Token being considered as an argument.
- *  @param cursor       Cursor position the count is relative to. */
 /** Push a keyword token onto the scope stack at @p brace_depth. First pops any
  *  entries at or deeper than @p brace_depth, since a new keyword at this level
  *  closes the previous sibling keyword's scope. A no-op (other than the pop)
@@ -96,6 +87,15 @@ static void push_keyword_entry(KwStackEntry *stack, int *stack_n, int stack_cap,
         };
 }
 
+/** Count @p tok as an argument of the keyword currently in scope.
+ *  When @p tok lies fully before @p cursor, increment the argc of the
+ *  innermost keyword-stack entry at @p brace_depth (the active keyword whose
+ *  arguments are being counted). Tokens at or after the cursor do not count.
+ *  @param stack        Keyword scope stack.
+ *  @param stack_n      Number of valid entries in @p stack.
+ *  @param brace_depth  Current brace nesting depth.
+ *  @param tok          Token being considered as an argument.
+ *  @param cursor       Cursor position the count is relative to. */
 static void bump_active_argc(KwStackEntry *stack, int stack_n,
                              uint32_t brace_depth, const TokenSpan *tok,
                              LspPos cursor) {

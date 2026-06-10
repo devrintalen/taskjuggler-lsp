@@ -144,6 +144,9 @@ yyjson_mut_val *build_document_highlight_json(
  *  highlight target is the same in both directions). Resolution runs against
  *  the pinned snapshot's ProjectNode tree, exactly as definition/references
  *  do.
+ *  @param qc   Pinned query context holding the workspace snapshot.
+ *  @param d    Query document the cursor is in.
+ *  @param pos  Cursor position to resolve.
  *  @return The target ProjectNode, or NULL when the cursor is on neither a
  *          task declaration nor a resolvable dependency. */
 static ProjectNode *resolve_highlight_target(const query_context *qc,

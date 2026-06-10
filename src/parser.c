@@ -99,6 +99,8 @@ int          g_num_sem_entries = 0;
  * is freed (docsnap_release, which can run on a query worker) or a transient
  * ParseOutput is discarded — hence the atomics.  Only one buffer is ever
  * cached; any extra retired buffer is freed normally. */
+/** Single lock-free slot caching one retired token-span buffer for reuse by
+ *  the next parse (see the note above). */
 static _Atomic(TokenSpan *) g_tok_spans_recycle = NULL;
 
 /** Only buffers at least this large are worth caching.  glibc keeps freed
@@ -110,8 +112,10 @@ static _Atomic(TokenSpan *) g_tok_spans_recycle = NULL;
 #define TOK_SPANS_RECYCLE_MIN_BYTES (32u * 1024 * 1024)
 
 /** Take the recycled token-span buffer for a new parse, or NULL when the slot
- *  is empty.  @p out_cap receives the buffer's capacity (derived from its
- *  actual allocation size), 0 when none. */
+ *  is empty.
+ *  @param out_cap  Receives the buffer's capacity (derived from its actual
+ *                  allocation size), 0 when none.
+ *  @return The recycled buffer, or NULL when the slot is empty. */
 static TokenSpan *tok_spans_take(int *out_cap) {
     TokenSpan *buf = atomic_exchange(&g_tok_spans_recycle, NULL);
     *out_cap = buf ? (int)(malloc_usable_size(buf) / sizeof(TokenSpan)) : 0;
@@ -387,17 +391,6 @@ static int range_within(LspRange inner, LspRange outer) {
 }
 
 /**
- * Compute, for every token span in @p po, its innermost-enclosing tj_node,
- * storing the result in the parallel @p po->tok_owners array (allocated here).
- *
- * Uses a single-pass scope-stack algorithm over the top-level children sorted
- * by source position.  The project node (if present) is handled specially:
- * its hoisted body declarations are treated as scope-children for ownership
- * purposes even though they are siblings under root in the tj_node tree.
- *
- * @param po  ParseOutput whose tok_owners array is allocated and filled.
- */
-/**
  * Build the top-level scope layout for the token-owner walk.
  *
  * The project block (if any) is a top-level child like the rest, but its body
@@ -463,6 +456,17 @@ static owner_scope build_owner_scope(tj_node *root, tj_node *project) {
     return (owner_scope){ top, top_n, proj_kids, proj_kids_n };
 }
 
+/**
+ * Compute, for every token span in @p po, its innermost-enclosing tj_node,
+ * storing the result in the parallel @p po->tok_owners array (allocated here).
+ *
+ * Uses a single-pass scope-stack algorithm over the top-level children sorted
+ * by source position.  The project node (if present) is handled specially:
+ * its hoisted body declarations are treated as scope-children for ownership
+ * purposes even though they are siblings under root in the tj_node tree.
+ *
+ * @param po  ParseOutput whose tok_owners array is allocated and filled.
+ */
 static void assign_token_owners(ParseOutput *po) {
     int num = po->num_tok_spans;
     po->tok_owners = num ? malloc((size_t)num * sizeof(tj_node *)) : NULL;
@@ -536,7 +540,8 @@ static void assign_token_owners(ParseOutput *po) {
 
 /** Install the shared lexer/parser global state for a fresh parse of @p po.
  *  Reuses a retired token-span buffer when one is cached (its pages are
- *  already mapped), falling back to a fresh allocation on first parse. */
+ *  already mapped), falling back to a fresh allocation on first parse.
+ *  @param po  ParseOutput the parse will populate. */
 static void install_parse_globals(ParseOutput *po) {
     g_output          = po;
     g_tok_spans       = tok_spans_take(&g_tok_span_cap);
@@ -550,7 +555,8 @@ static void install_parse_globals(ParseOutput *po) {
 }
 
 /** Move the token spans / arena / counts accumulated in the parser globals
- *  into @p po, then clear the shared global state for the next parse. */
+ *  into @p po, then clear the shared global state for the next parse.
+ *  @param po  ParseOutput that receives the accumulated parse state. */
 static void harvest_parse_globals(ParseOutput *po) {
     po->tok_spans       = g_tok_spans;
     po->num_tok_spans   = g_num_tok_spans;
