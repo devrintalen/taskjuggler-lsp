@@ -23,14 +23,7 @@
 #include "dependency.h"       /* dependency_at_cursor */
 #include "rpc.h"
 
-yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc,
-                                       ProjectNode *owner, int dep_index,
-                                       ProjectNode *project_root) {
-    if (!owner || !project_root ||
-        dep_index < 0 || dep_index >= owner->num_dependencies)
-        return NULL;
-
-    ProjectNode *target = project_dep_resolve(owner, dep_index, project_root);
+yyjson_mut_val *build_definition_json(yyjson_mut_doc *doc, ProjectNode *target) {
     if (!target) return NULL;
 
     yyjson_mut_val *location = yyjson_mut_obj(doc);
@@ -55,14 +48,9 @@ yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_val   *result = NULL;
     if (dependency_at_cursor(d->tok_spans, d->tok_owners, d->num_tok_spans, pos,
                              &owner, &dep)) {
-        ProjectNode *merged_owner =
-            project_node_for_doc_task(qc->project_root, d->task_prefix, owner);
-        if (merged_owner) {
-            int ordinal = (int)(dep - owner->dependencies);
-            if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
-                result = build_definition_json(doc, merged_owner, ordinal,
-                                               qc->project_root);
-        }
+        ProjectNode *target =
+            project_resolve_dep_ref(qc->project_root, d->task_prefix, owner, dep);
+        result = build_definition_json(doc, target);
     }
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));
     return make_response(doc, id, result);

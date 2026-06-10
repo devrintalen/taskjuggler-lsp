@@ -293,13 +293,13 @@ ProjectNode *project_node_for_doc_task(ProjectNode *project_root,
                                        const tj_node *per_doc_task) {
     if (!project_root || !per_doc_task) return NULL;
 
-    char *qid = sym_qualified_id(per_doc_task);   /* unprefixed in-file path */
-    if (!qid || !qid[0]) { free(qid); return NULL; }
+    char *qualified_id = sym_qualified_id(per_doc_task);   /* unprefixed in-file path */
+    if (!qualified_id || !qualified_id[0]) { free(qualified_id); return NULL; }
 
     ProjectNode *cur = find_node_by_dotted_path(project_root, task_prefix,
                                                 NODE_KIND_TASK);
     char *save = NULL;
-    for (char *seg = strtok_r(qid, ".", &save); seg && cur;
+    for (char *seg = strtok_r(qualified_id, ".", &save); seg && cur;
          seg = strtok_r(NULL, ".", &save)) {
         ProjectNode *next = NULL;
         for (int i = 0; i < cur->num_children && !next; i++) {
@@ -310,6 +310,19 @@ ProjectNode *project_node_for_doc_task(ProjectNode *project_root,
         }
         cur = next;
     }
-    free(qid);
+    free(qualified_id);
     return cur;
+}
+
+ProjectNode *project_resolve_dep_ref(ProjectNode *project_root,
+                                     const char *task_prefix,
+                                     const tj_node *owner,
+                                     const Dependency *dep) {
+    ProjectNode *merged_owner =
+        project_node_for_doc_task(project_root, task_prefix, owner);
+    if (!merged_owner) return NULL;
+
+    int ordinal = (int)(dep - owner->dependencies);
+    if (ordinal < 0 || ordinal >= merged_owner->num_dependencies) return NULL;
+    return project_dep_resolve(merged_owner, ordinal, project_root);
 }

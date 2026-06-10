@@ -351,6 +351,16 @@ typedef struct {
     tj_node  *scope;    /**< node whose range covers tokens currently being owned */
 } OwnerFrame;
 
+/** Top-level scope layout for the token-owner walk, built by
+ *  build_owner_scope(). Both arrays are heap-allocated and owned by the
+ *  caller (assign_token_owners frees them after the walk). */
+typedef struct {
+    tj_node **top;             /**< top-level scope frame, sorted by start pos */
+    int       top_n;           /**< number of entries in `top` */
+    tj_node **project_kids;    /**< project node's synthetic scope-children, sorted */
+    int       project_kids_n;  /**< number of entries in `project_kids` */
+} owner_scope;
+
 /**
  * qsort comparator that orders tj_node pointers by their range start position.
  *
@@ -387,35 +397,23 @@ static int range_within(LspRange inner, LspRange outer) {
  *
  * @param po  ParseOutput whose tok_owners array is allocated and filled.
  */
-static void assign_token_owners(ParseOutput *po) {
-    int num = po->num_tok_spans;
-    po->tok_owners = num ? malloc((size_t)num * sizeof(tj_node *)) : NULL;
-    if (num && !po->tok_owners) {
-        fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
-    }
-
-    tj_node *root = po->root;
-    if (!root) {
-        for (int t = 0; t < num; t++) po->tok_owners[t] = NULL;
-        return;
-    }
-
-    /* The project block (if any) is a top-level child like the rest, but
-     * its body declarations were hoisted to siblings under root (the
-     * project node keeps no children) while its range still spans them.
-     * For ownership we must restore that nesting: any sibling whose range
-     * falls within the project's range becomes a scope-child of the
-     * project, so tokens inside it resolve to the node rather than
-     * dead-ending on the childless project.  Siblings outside the
-     * project's range (declared after the project block) stay as true
-     * top-level entries. */
-    tj_node *project = NULL;
-    for (int i = 0; i < root->num_children; i++)
-        if (root->children[i]->keyword == KW_PROJECT) {
-            project = root->children[i];
-            break;
-        }
-
+/**
+ * Build the top-level scope layout for the token-owner walk.
+ *
+ * The project block (if any) is a top-level child like the rest, but its body
+ * declarations were hoisted to siblings under root (the project node keeps no
+ * children) while its range still spans them. For ownership we restore that
+ * nesting: any sibling whose range falls within the project's range becomes a
+ * scope-child of the project, so tokens inside it resolve to the node rather
+ * than dead-ending on the childless project. Siblings outside the project's
+ * range (declared after the project block) stay as true top-level entries.
+ * Both result arrays are sorted by source position.
+ *
+ * @param root     Synthetic root whose children are the top-level decls.
+ * @param project  The project node among root's children, or NULL if none.
+ * @return Heap-allocated scope arrays the caller must free (top, project_kids).
+ */
+static owner_scope build_owner_scope(tj_node *root, tj_node *project) {
     /* hoisted = every top-level child except the project node itself.
      * (When a project node is present num_children is at least 1, so this
      * cannot go negative; the clamp makes that explicit for the size
@@ -461,11 +459,37 @@ static void assign_token_owners(ParseOutput *po) {
     if (top_n > 1)
         qsort(top, (size_t)top_n, sizeof(tj_node *), compare_node_starts);
 
+    free(hoisted);
+    return (owner_scope){ top, top_n, proj_kids, proj_kids_n };
+}
+
+static void assign_token_owners(ParseOutput *po) {
+    int num = po->num_tok_spans;
+    po->tok_owners = num ? malloc((size_t)num * sizeof(tj_node *)) : NULL;
+    if (num && !po->tok_owners) {
+        fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1);
+    }
+
+    tj_node *root = po->root;
+    if (!root) {
+        for (int t = 0; t < num; t++) po->tok_owners[t] = NULL;
+        return;
+    }
+
+    tj_node *project = NULL;
+    for (int i = 0; i < root->num_children; i++)
+        if (root->children[i]->keyword == KW_PROJECT) {
+            project = root->children[i];
+            break;
+        }
+
+    owner_scope scope = build_owner_scope(root, project);
+
     int frame_cap = 64;
     OwnerFrame *stack = malloc((size_t)frame_cap * sizeof(OwnerFrame));
     if (!stack) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
     int depth = 1;
-    stack[0] = (OwnerFrame){ top, top_n, 0, NULL };
+    stack[0] = (OwnerFrame){ scope.top, scope.top_n, 0, NULL };
 
     for (int t = 0; t < po->num_tok_spans; t++) {
         LspPos pos = po->tok_spans[t].start;
@@ -495,8 +519,8 @@ static void assign_token_owners(ParseOutput *po) {
             /* The project node carries its hoisted body decls as
              * scope-children here even though its own `children` array is
              * empty. */
-            tj_node **kids = (child == project) ? proj_kids : child->children;
-            int       nkids = (child == project) ? proj_kids_n : child->num_children;
+            tj_node **kids = (child == project) ? scope.project_kids : child->children;
+            int       nkids = (child == project) ? scope.project_kids_n : child->num_children;
             stack[depth++] = (OwnerFrame){ kids, nkids, 0, child };
         }
 
@@ -504,21 +528,16 @@ static void assign_token_owners(ParseOutput *po) {
     }
 
     free(stack);
-    free(top);
-    free(proj_kids);
-    free(hoisted);
+    free(scope.top);
+    free(scope.project_kids);
 }
 
 /* ── Public parse() entry point ──────────────────────────────────────────── */
 
-ParseOutput *parse(const char *src) {
-    ParseOutput *po = calloc(1, sizeof(ParseOutput));
-    if (!po) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    po->root = alloc_synthetic_root();
-
-    /* Set up global state for lexer.l and grammar.y.  Reuse a retired
-     * token-span buffer when one is cached (its pages are already mapped),
-     * falling back to a fresh allocation on first parse. */
+/** Install the shared lexer/parser global state for a fresh parse of @p po.
+ *  Reuses a retired token-span buffer when one is cached (its pages are
+ *  already mapped), falling back to a fresh allocation on first parse. */
+static void install_parse_globals(ParseOutput *po) {
     g_output          = po;
     g_tok_spans       = tok_spans_take(&g_tok_span_cap);
     g_num_tok_spans   = 0;
@@ -528,6 +547,30 @@ ParseOutput *parse(const char *src) {
     yylineno          = 1;
     reset_pending_include_state();
     reset_eol_state();
+}
+
+/** Move the token spans / arena / counts accumulated in the parser globals
+ *  into @p po, then clear the shared global state for the next parse. */
+static void harvest_parse_globals(ParseOutput *po) {
+    po->tok_spans       = g_tok_spans;
+    po->num_tok_spans   = g_num_tok_spans;
+    po->tok_arena       = g_tok_arena;
+    po->num_sem_entries = g_num_sem_entries;
+
+    g_output          = NULL;
+    g_tok_spans       = NULL;
+    g_num_tok_spans   = 0;
+    g_tok_span_cap    = 0;
+    g_tok_arena       = NULL;
+    g_num_sem_entries = 0;
+}
+
+ParseOutput *parse(const char *src) {
+    ParseOutput *po = calloc(1, sizeof(ParseOutput));
+    if (!po) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    po->root = alloc_synthetic_root();
+
+    install_parse_globals(po);
 
 #if DEBUG_PARSER >= LOG_VERBOSE
     struct timespec parse_t0, parse_t1, parse_t2;
@@ -540,17 +583,7 @@ ParseOutput *parse(const char *src) {
     clock_gettime(CLOCK_MONOTONIC, &parse_t1);
 #endif
 
-    po->tok_spans       = g_tok_spans;
-    po->num_tok_spans   = g_num_tok_spans;
-    po->tok_arena       = g_tok_arena;
-    po->num_sem_entries = g_num_sem_entries;
-
-    g_output          = NULL;
-    g_tok_spans       = NULL;
-    g_num_tok_spans   = 0;
-    g_tok_span_cap    = 0;
-    g_tok_arena       = NULL;
-    g_num_sem_entries = 0;
+    harvest_parse_globals(po);
 
     /* The grammar appends top-level declarations to root as they reduce,
      * which interleaves a project block's hoisted body children ahead of

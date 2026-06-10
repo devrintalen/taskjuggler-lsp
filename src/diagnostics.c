@@ -104,6 +104,55 @@ static void add_warning(diag_set *out, const char *uri,
 }
 
 /**
+ * Emit compile_commands degradation warnings for a single member document.
+ *
+ * A .tji fragment opened without an including .tjp is parsed in isolation,
+ * so it gets one whole-file warning. A .tjp gets one warning per `include`
+ * directive, located on its KW_INCLUDE token (a .tjp with no includes loses
+ * nothing cross-file and gets no warning). @p status selects the malformed
+ * vs missing wording.
+ *
+ * @param s       Document snapshot to inspect.
+ * @param status  Workspace cc_status (CC_STATUS_MALFORMED or CC_STATUS_MISSING).
+ * @param out     Output diag_set; new warnings are appended.
+ */
+static void collect_doc_cc_warnings(const doc_snapshot *s, int status,
+                                    diag_set *out) {
+    size_t uri_len = strlen(s->uri);
+    int is_tji = uri_len >= 4 && strcmp(s->uri + (uri_len - 4), ".tji") == 0;
+    if (is_tji) {
+        /* TODO: offer an LSP code action to generate a compile_commands.json
+         * for the user when it is missing for a .tjp that includes this
+         * fragment. */
+        LspRange r = { { 0, 0 }, { 0, (uint32_t)INT_MAX } };
+        if (status == CC_STATUS_MALFORMED)
+            add_warning(out, s->uri, r,
+                "Malformed compile_commands.json, this file will be parsed "
+                "stand-alone, not as part of any other loaded .tjp file "
+                "that includes it.");
+        else
+            add_warning(out, s->uri, r,
+                "Missing compile_commands.json, this file will be parsed "
+                "stand-alone, not as part of any other loaded .tjp file "
+                "that includes it.");
+        return;
+    }
+
+    for (int t = 0; t < s->num_tok_spans; t++) {
+        if (s->tok_spans[t].token_kind != KW_INCLUDE) continue;
+        LspRange r = { s->tok_spans[t].start, s->tok_spans[t].end };
+        if (status == CC_STATUS_MALFORMED)
+            add_warning(out, s->uri, r,
+                "Malformed compile_commands.json, cross-file LSP features "
+                "are disabled.");
+        else
+            add_warning(out, s->uri, r,
+                "Missing compile_commands.json, cross-file LSP features "
+                "are disabled.");
+    }
+}
+
+/**
  * See diagnostics.h for the full contract.
  *
  * @param ws    Workspace snapshot whose cc_status drives this collection.
@@ -122,46 +171,7 @@ void diag_collect_cc_missing(const workspace_snapshot *ws,
     for (int i = 0; i < ws->num_docs; i++) {
         const ws_doc *w = &ws->docs[i];
         if (w->project_index != pindex || w->disk_only || !w->snap) continue;
-        const doc_snapshot *s = w->snap;
-
-        size_t uri_len = strlen(s->uri);
-        int is_tji = uri_len >= 4 && strcmp(s->uri + (uri_len - 4), ".tji") == 0;
-        if (is_tji) {
-            /* An include fragment opened with no including .tjp is parsed in
-             * isolation; warn once at the top of the file.
-             *
-             * TODO: offer an LSP code action to generate a compile_commands.json
-             * for the user when it is missing for a .tjp that includes this
-             * fragment. */
-            LspRange r = { { 0, 0 }, { 0, (uint32_t)INT_MAX } };
-            if (ws->cc_status == CC_STATUS_MALFORMED)
-                add_warning(out, s->uri, r,
-                    "Malformed compile_commands.json, this file will be parsed "
-                    "stand-alone, not as part of any other loaded .tjp file "
-                    "that includes it.");
-            else
-                add_warning(out, s->uri, r,
-                    "Missing compile_commands.json, this file will be parsed "
-                    "stand-alone, not as part of any other loaded .tjp file "
-                    "that includes it.");
-            continue;
-        }
-
-        /* .tjp: one warning per `include` directive, located on its
-         * KW_INCLUDE token.  A .tjp with no includes loses nothing
-         * cross-file and gets no warning. */
-        for (int t = 0; t < s->num_tok_spans; t++) {
-            if (s->tok_spans[t].token_kind != KW_INCLUDE) continue;
-            LspRange r = { s->tok_spans[t].start, s->tok_spans[t].end };
-            if (ws->cc_status == CC_STATUS_MALFORMED)
-                add_warning(out, s->uri, r,
-                    "Malformed compile_commands.json, cross-file LSP features "
-                    "are disabled.");
-            else
-                add_warning(out, s->uri, r,
-                    "Missing compile_commands.json, cross-file LSP features "
-                    "are disabled.");
-        }
+        collect_doc_cc_warnings(w->snap, ws->cc_status, out);
     }
 }
 

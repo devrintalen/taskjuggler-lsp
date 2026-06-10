@@ -406,6 +406,53 @@ static void replace_string(char **slot, const char *value) {
  *  and record the resolved URI in the includer's @c included_uris[] array.
  *  @param file_path  Filesystem path of the file that was just parsed.
  *  @param po         Parse output from parsing @p file_path; may be NULL. */
+/** Resolve an include directive's filename to an absolute filesystem path.
+ *  Absolute filenames are copied as-is; relative ones are joined against the
+ *  directory containing @p includer_path (or copied as-is when the includer
+ *  has no directory component).
+ *  @return malloc'd path the caller must free, or NULL on allocation failure. */
+static char *resolve_include_path(const char *includer_path, const char *filename) {
+    size_t fname_len = strlen(filename);
+
+    size_t path_len = strlen(includer_path);
+    const char *last_slash = NULL;
+    for (size_t i = path_len; i-- > 0; ) {
+        if (includer_path[i] == '/') { last_slash = includer_path + i; break; }
+    }
+
+    if (filename[0] == '/' || !last_slash) {
+        char *full_path = malloc(fname_len + 1);
+        if (full_path) memcpy(full_path, filename, fname_len + 1);
+        return full_path;
+    }
+
+    size_t dir_len = (size_t)(last_slash - includer_path);
+    char *full_path = malloc(dir_len + 1 + fname_len + 1);
+    if (!full_path) return NULL;
+    memcpy(full_path, includer_path, dir_len);
+    full_path[dir_len] = '/';
+    memcpy(full_path + dir_len + 1, filename, fname_len + 1);
+    return full_path;
+}
+
+/** Append @p uri to @p includer's included_uris[], growing the array as
+ *  needed. On success the array takes ownership of @p uri and 1 is returned;
+ *  on allocation failure the list is left unchanged and 0 is returned (the
+ *  caller retains ownership of @p uri). */
+static int includer_append_included_uri(Document *includer, char *uri) {
+    if (includer->num_included_uris >= includer->included_uris_cap) {
+        int new_cap = includer->included_uris_cap
+                      ? includer->included_uris_cap * 2 : 4;
+        char **grown = realloc(includer->included_uris,
+                               (size_t)new_cap * sizeof(char *));
+        if (!grown) return 0;
+        includer->included_uris     = grown;
+        includer->included_uris_cap = new_cap;
+    }
+    includer->included_uris[includer->num_included_uris++] = uri;
+    return 1;
+}
+
 static void follow_includes(const char *file_path, const ParseOutput *po) {
     /* Look up the includer Document so we can repopulate its
      * included_uris[] as we resolve each include below.  follow_includes
@@ -423,35 +470,13 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
 
     if (!po || !po->num_includes) return;
 
-    size_t path_len = strlen(file_path);
-    const char *last_slash = NULL;
-    for (size_t i = path_len; i-- > 0; ) {
-        if (file_path[i] == '/') { last_slash = file_path + i; break; }
-    }
-    size_t dir_len = last_slash ? (size_t)(last_slash - file_path) : 0;
-
     for (int i = 0; i < po->num_includes; i++) {
         const IncludeRef *inc = &po->includes[i];
         const char *filename = inc->filename;
         if (!filename) continue;
-        size_t fname_len = strlen(filename);
 
-        char *full_path;
-        if (filename[0] == '/') {
-            full_path = malloc(fname_len + 1);
-            if (!full_path) continue;
-            memcpy(full_path, filename, fname_len + 1);
-        } else if (last_slash) {
-            full_path = malloc(dir_len + 1 + fname_len + 1);
-            if (!full_path) continue;
-            memcpy(full_path, file_path, dir_len);
-            full_path[dir_len] = '/';
-            memcpy(full_path + dir_len + 1, filename, fname_len + 1);
-        } else {
-            full_path = malloc(fname_len + 1);
-            if (!full_path) continue;
-            memcpy(full_path, filename, fname_len + 1);
-        }
+        char *full_path = resolve_include_path(file_path, filename);
+        if (!full_path) continue;
 
         DLOG(DEBUG_INCLUDES, LOG_VERBOSE, "include '%s' -> %s", filename, full_path);
         load_file_from_disk(full_path);
@@ -474,22 +499,8 @@ static void follow_includes(const char *file_path, const ParseOutput *po) {
         /* Record this resolved URI on the includer so
          * build_workspace_snapshot() can BFS the include graph.  Ownership
          * of target_uri transfers to includer->included_uris[]. */
-        if (includer && target_uri) {
-            if (includer->num_included_uris >= includer->included_uris_cap) {
-                int new_cap = includer->included_uris_cap
-                              ? includer->included_uris_cap * 2 : 4;
-                char **tmp = realloc(includer->included_uris,
-                                     (size_t)new_cap * sizeof(char *));
-                if (tmp) {
-                    includer->included_uris     = tmp;
-                    includer->included_uris_cap = new_cap;
-                }
-            }
-            if (includer->num_included_uris < includer->included_uris_cap) {
-                includer->included_uris[includer->num_included_uris++] = target_uri;
-                target_uri = NULL;
-            }
-        }
+        if (includer && target_uri && includer_append_included_uri(includer, target_uri))
+            target_uri = NULL;
         free(target_uri);
 
         free(full_path);
@@ -621,6 +632,21 @@ static void copy_document_into_project(workspace_snapshot *ws, int pidx, Documen
  *  @param root          Root document that seeds the BFS (the compile_commands
  *                       entry point).
  *  @param slot_to_wsdoc Mapping from docs[] slot index to ws_doc index. */
+/** Copy @p d's top-level declarations into project @p pidx and stamp the
+ *  document's ws_doc with that project index, unless it was already claimed
+ *  by an earlier project (first include-BFS to reach a doc wins).
+ *  @param ws            Snapshot under construction.
+ *  @param pidx          Index of the project being assembled.
+ *  @param d             Member document to fold in.
+ *  @param slot_to_wsdoc docs[] slot -> ws_doc index map for the stamp. */
+static void assign_doc_to_project(workspace_snapshot *ws, int pidx, Document *d,
+                                  const int *slot_to_wsdoc) {
+    copy_document_into_project(ws, pidx, d);
+    int wsd = ws_doc_index_of(slot_to_wsdoc, d);
+    if (wsd >= 0 && ws->docs[wsd].project_index < 0)
+        ws->docs[wsd].project_index = pidx;
+}
+
 static void project_populate_from_root(workspace_snapshot *ws, int pidx,
                                        Document *root, const int *slot_to_wsdoc) {
     /* Queue holds borrowed Document pointers; visited[] dedupes within
@@ -655,10 +681,7 @@ static void project_populate_from_root(workspace_snapshot *ws, int pidx,
     /* Anchor the project on the root document's own top-level.  Its
      * prefixes are NULL, so every declaration lands unprefixed in the
      * matching per-kind tree. */
-    copy_document_into_project(ws, pidx, root);
-    int root_wsd = ws_doc_index_of(slot_to_wsdoc, root);
-    if (root_wsd >= 0 && ws->docs[root_wsd].project_index < 0)
-        ws->docs[root_wsd].project_index = pidx;
+    assign_doc_to_project(ws, pidx, root, slot_to_wsdoc);
 
     while (q_head < q_len) {
         Document *cur = queue[q_head++];
@@ -671,10 +694,7 @@ static void project_populate_from_root(workspace_snapshot *ws, int pidx,
             if (seen) continue;
             PUSH(visited, v_len, v_cap, child);
             PUSH(queue,   q_len, q_cap, child);
-            copy_document_into_project(ws, pidx, child);
-            int child_wsd = ws_doc_index_of(slot_to_wsdoc, child);
-            if (child_wsd >= 0 && ws->docs[child_wsd].project_index < 0)
-                ws->docs[child_wsd].project_index = pidx;
+            assign_doc_to_project(ws, pidx, child, slot_to_wsdoc);
         }
     }
 
@@ -693,6 +713,20 @@ cleanup:
  *  in-file LSP behavior (completion, hover, etc.) without bleeding into other
  *  projects' cross-file pools.
  *  @return  Newly allocated workspace_snapshot with refcount 1. */
+/** Populate one ws_doc from its live Document: take a ref on the current
+ *  parse snapshot and copy the per-kind include prefixes into the immutable
+ *  workspace snapshot.
+ *  @param w  Destination ws_doc in the snapshot under construction.
+ *  @param d  Source document whose snapshot and prefixes are captured. */
+static void populate_ws_doc(ws_doc *w, Document *d) {
+    w->snap            = docsnap_acquire(d->snap);
+    w->task_prefix     = d->task_prefix     ? strdup(d->task_prefix)     : NULL;
+    w->account_prefix  = d->account_prefix  ? strdup(d->account_prefix)  : NULL;
+    w->report_prefix   = d->report_prefix   ? strdup(d->report_prefix)   : NULL;
+    w->resource_prefix = d->resource_prefix ? strdup(d->resource_prefix) : NULL;
+    w->disk_only       = d->disk_only;
+}
+
 static workspace_snapshot *build_workspace_snapshot(void) {
     int slot_to_wsdoc[MAX_DOCS];
     int ndoc = 0;
@@ -709,14 +743,7 @@ static workspace_snapshot *build_workspace_snapshot(void) {
     for (int i = 0; i < MAX_DOCS; i++) {
         int wsd = slot_to_wsdoc[i];
         if (wsd < 0) continue;
-        Document *d = &docs[i];
-        ws_doc    *w = &ws->docs[wsd];
-        w->snap            = docsnap_acquire(d->snap);
-        w->task_prefix     = d->task_prefix     ? strdup(d->task_prefix)     : NULL;
-        w->account_prefix  = d->account_prefix  ? strdup(d->account_prefix)  : NULL;
-        w->report_prefix   = d->report_prefix   ? strdup(d->report_prefix)   : NULL;
-        w->resource_prefix = d->resource_prefix ? strdup(d->resource_prefix) : NULL;
-        w->disk_only       = d->disk_only;
+        populate_ws_doc(&ws->docs[wsd], &docs[i]);
     }
 
     /* Stamp the cc-status so the diagnostics workers can emit the per-file
@@ -776,6 +803,25 @@ static void republish_all_diagnostics(void) {
  *
  *  Updates the mtime/size cache on every call (even on failure) so
  *  the stat-poll does not re-trigger until the file changes again. */
+/** Load every .tjp listed in a parsed compile_commands.json into docs[] and
+ *  tag each as a project root. Each load_file_from_disk() cascades through
+ *  follow_includes() to pull in the file's transitive .tji closure; the
+ *  is_cc_root tag seeds build_workspace_snapshot()'s per-project BFS.
+ *  @param entries  Parsed compile_commands entries.
+ *  @param n        Number of entries. */
+static void load_compile_entries(const CompileEntry *entries, int n) {
+    for (int i = 0; i < n; i++) {
+        if (!entries[i].file_abs) continue;
+        DLOG(DEBUG_COMPILE_COMMANDS, LOG_VERBOSE, "  entry[%d] %s",
+             i, entries[i].file_abs);
+        load_file_from_disk(entries[i].file_abs);
+        char *uri = path_to_uri(entries[i].file_abs);
+        Document *root = uri ? doc_find(uri) : NULL;
+        free(uri);
+        if (root) root->is_cc_root = 1;
+    }
+}
+
 static void reload_compile_commands(void) {
     g_cc_attempted = 1;
     DLOG(DEBUG_COMPILE_COMMANDS, LOG_INFO, "reload: cc_path=%s",
@@ -812,19 +858,7 @@ static void reload_compile_commands(void) {
 
     switch (res) {
     case CC_OK:
-        for (int i = 0; i < n; i++) {
-            if (!entries[i].file_abs) continue;
-            DLOG(DEBUG_COMPILE_COMMANDS, LOG_VERBOSE, "  entry[%d] %s",
-                 i, entries[i].file_abs);
-            load_file_from_disk(entries[i].file_abs);
-            /* Tag the doc that holds this compile_commands entry as a
-             * project root.  build_workspace_snapshot() seeds one project
-             * per is_cc_root doc and BFS-walks its include closure. */
-            char *uri = path_to_uri(entries[i].file_abs);
-            Document *root = uri ? doc_find(uri) : NULL;
-            free(uri);
-            if (root) root->is_cc_root = 1;
-        }
+        load_compile_entries(entries, n);
         break;
     case CC_NOT_FOUND:
         /* compile_commands.json is absent at the workspace root.  As with the
@@ -1030,42 +1064,13 @@ static void revalidate_all_docs(void) {
  *  @param params  "initialize" params object containing "rootUri" and client
  *                 capabilities; may be NULL.
  *  @return        JSON-RPC response object with server capabilities. */
-static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
-                                          yyjson_val *params) {
-    if (params && !g_workspace_root) {
-        yyjson_val *root_uri_val = yyjson_obj_get(params, "rootUri");
-        if (root_uri_val && yyjson_is_str(root_uri_val)) {
-            g_workspace_root = uri_to_path(yyjson_get_str(root_uri_val));
-        }
-    }
-    if (g_workspace_root && !g_cc_path) {
-        size_t root_len = strlen(g_workspace_root);
-        int need_sep = (root_len > 0 && g_workspace_root[root_len - 1] != '/');
-        const char *fname = "compile_commands.json";
-        size_t fname_len = strlen(fname);
-        g_cc_path = malloc(root_len + (need_sep ? 1 : 0) + fname_len + 1);
-        if (g_cc_path) {
-            memcpy(g_cc_path, g_workspace_root, root_len);
-            size_t off = root_len;
-            if (need_sep) g_cc_path[off++] = '/';
-            memcpy(g_cc_path + off, fname, fname_len + 1);
-        }
-    }
-
-    DLOG(DEBUG_LIFECYCLE, LOG_INFO, "initialize: workspace_root=%s cc_path=%s",
-         g_workspace_root ? g_workspace_root : "(none)",
-         g_cc_path ? g_cc_path : "(none)");
-#if DEBUG_LIFECYCLE
-    yyjson_val *trace_val = params ? yyjson_obj_get(params, "trace") : NULL;
-    if (trace_val && yyjson_is_str(trace_val))
-        DLOG(DEBUG_LIFECYCLE, LOG_VERBOSE, "initialize: client trace=%s",
-             yyjson_get_str(trace_val));
-#endif
-
-    yyjson_mut_val *server_info = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, server_info, "name",    "taskjuggler-lsp");
-    yyjson_mut_obj_add_str(doc, server_info, "version", VERSION_STRING);
-
+/** Build the server "capabilities" object advertised in the initialize
+ *  response: text-document sync options, the per-feature provider flags,
+ *  the semantic-token legend, and the workspace file-operation filters.
+ *  Kept separate so handle_initialize stays focused on lifecycle setup.
+ *  @param doc  Mutable document the capabilities tree is allocated in.
+ *  @return     The populated "capabilities" object. */
+static yyjson_mut_val *build_server_capabilities(yyjson_mut_doc *doc) {
     yyjson_mut_val *comp_triggers = yyjson_mut_arr(doc);
     yyjson_mut_arr_add_str(doc, comp_triggers, "!");
     yyjson_mut_arr_add_str(doc, comp_triggers, ".");
@@ -1133,6 +1138,47 @@ static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_obj_add_val(doc, workspace_caps, "workspaceFolders", workspace_folders_caps);
     yyjson_mut_obj_add_val(doc, workspace_caps, "fileOperations",   file_ops);
     yyjson_mut_obj_add_val(doc, caps, "workspace", workspace_caps);
+
+    return caps;
+}
+
+static yyjson_mut_val *handle_initialize(yyjson_mut_doc *doc, yyjson_val *id,
+                                          yyjson_val *params) {
+    if (params && !g_workspace_root) {
+        yyjson_val *root_uri_val = yyjson_obj_get(params, "rootUri");
+        if (root_uri_val && yyjson_is_str(root_uri_val)) {
+            g_workspace_root = uri_to_path(yyjson_get_str(root_uri_val));
+        }
+    }
+    if (g_workspace_root && !g_cc_path) {
+        size_t root_len = strlen(g_workspace_root);
+        int need_sep = (root_len > 0 && g_workspace_root[root_len - 1] != '/');
+        const char *fname = "compile_commands.json";
+        size_t fname_len = strlen(fname);
+        g_cc_path = malloc(root_len + (need_sep ? 1 : 0) + fname_len + 1);
+        if (g_cc_path) {
+            memcpy(g_cc_path, g_workspace_root, root_len);
+            size_t off = root_len;
+            if (need_sep) g_cc_path[off++] = '/';
+            memcpy(g_cc_path + off, fname, fname_len + 1);
+        }
+    }
+
+    DLOG(DEBUG_LIFECYCLE, LOG_INFO, "initialize: workspace_root=%s cc_path=%s",
+         g_workspace_root ? g_workspace_root : "(none)",
+         g_cc_path ? g_cc_path : "(none)");
+#if DEBUG_LIFECYCLE
+    yyjson_val *trace_val = params ? yyjson_obj_get(params, "trace") : NULL;
+    if (trace_val && yyjson_is_str(trace_val))
+        DLOG(DEBUG_LIFECYCLE, LOG_VERBOSE, "initialize: client trace=%s",
+             yyjson_get_str(trace_val));
+#endif
+
+    yyjson_mut_val *server_info = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, server_info, "name",    "taskjuggler-lsp");
+    yyjson_mut_obj_add_str(doc, server_info, "version", VERSION_STRING);
+
+    yyjson_mut_val *caps = build_server_capabilities(doc);
 
     yyjson_mut_val *result = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, result, "capabilities", caps);
@@ -1204,6 +1250,58 @@ static void handle_initialized(void) {
  *  remove each changed disk-only document as indicated by its event type,
  *  then revalidate if anything changed.
  *  @param params  JSON params object with a "changes" array of file events. */
+/** Replace @p document's text with @p text and reparse it as a background
+ *  (disk_only) entry: takes ownership of @p text, marks the slot disk_only,
+ *  then parses, follows includes (resolved against @p path), and installs the
+ *  new ParseOutput.
+ *  @param document  Document slot to update.
+ *  @param text      New file contents; ownership transfers to @p document.
+ *  @param path      Filesystem path of the file, for include resolution
+ *                   (borrowed; the caller still owns and frees it). */
+static void install_disk_text(Document *document, char *text, const char *path) {
+    free(document->text);
+    document->text      = text;
+    document->disk_only = 1;
+    ParseOutput *po = parse(text);
+    follow_includes(path, po);
+    doc_install_parse(document, po);
+}
+
+/** Drop a background (disk_only) document in response to a watched-file
+ *  delete event. Editor-managed documents are left for didClose to handle.
+ *  @param uri  URI of the deleted file.
+ *  @return 1 if a document was removed from docs[], 0 otherwise. */
+static int forget_watched_file(const char *uri) {
+    Document *document = doc_find(uri);
+    if (document && document->disk_only) {
+        doc_free(document);
+        return 1;
+    }
+    return 0;
+}
+
+/** Load or reload a watched file into a background (disk_only) slot in
+ *  response to a create/change event. Files the editor already manages
+ *  (non-disk_only) are left untouched so editor content stays authoritative.
+ *  @param uri  URI of the created/changed file.
+ *  @return 1 if docs[] changed, 0 otherwise. */
+static int admit_watched_file(const char *uri) {
+    Document *document = doc_find(uri);
+    if (document && !document->disk_only) return 0;
+
+    char *path = uri_to_path(uri);
+    if (!path) return 0;
+    char *text = read_file(path);
+    if (!text) { free(path); return 0; }
+
+    if (!document) document = doc_alloc(uri);
+    if (!document) { free(text); free(path); return 0; }
+
+    install_disk_text(document, text, path);
+    free(path);
+    return 1;
+}
+
 static void handle_did_change_watched_files(yyjson_val *params) {
     if (!params) return;
     yyjson_val *changes = yyjson_obj_get(params, "changes");
@@ -1222,33 +1320,11 @@ static void handle_did_change_watched_files(yyjson_val *params) {
         DLOG(DEBUG_DOCSTORE, LOG_VERBOSE,
              "watched file event: type=%d %s", type, uri);
 
-        if (type == 3) {
-            Document *document = doc_find(uri);
-            if (document && document->disk_only) {
-                doc_free(document);
-                changed = 1;
-            }
-        } else {
-            Document *document = doc_find(uri);
-            if (document && !document->disk_only) continue;
-
-            char *path = uri_to_path(uri);
-            if (!path) continue;
-            char *text = read_file(path);
-            if (!text) { free(path); continue; }
-
-            if (!document) document = doc_alloc(uri);
-            if (!document) { free(text); free(path); continue; }
-
-            free(document->text);
-            document->text      = text;
-            document->disk_only = 1;
-            ParseOutput *po = parse(text);
-            follow_includes(path, po);
-            doc_install_parse(document, po);
-            free(path);
-            changed = 1;
-        }
+        /* WatchKind 3 is Deleted; Created (1) and Changed (2) both reload. */
+        if (type == 3)
+            changed |= forget_watched_file(uri);
+        else
+            changed |= admit_watched_file(uri);
     }
 
     if (changed) revalidate_all_docs();
@@ -1291,12 +1367,7 @@ static void handle_did_rename_files(yyjson_val *params) {
         if (!new_doc) new_doc = doc_alloc(new_uri);
         if (!new_doc) { free(text); free(path); continue; }
 
-        free(new_doc->text);
-        new_doc->text      = text;
-        new_doc->disk_only = 1;
-        ParseOutput *po = parse(text);
-        follow_includes(path, po);
-        doc_install_parse(new_doc, po);
+        install_disk_text(new_doc, text, path);
         free(path);
         changed = 1;
     }
@@ -1353,6 +1424,45 @@ static void handle_didopen(yyjson_val *params) {
  *  change (incremental or full-replace) to the document's text, re-parse
  *  the result, follow includes, and trigger revalidation.
  *  @param params  JSON params with "textDocument" and "contentChanges". */
+/** Fold an LSP "contentChanges" array onto @p base_text, applying each
+ *  incremental (or full-replace) change in arrival order.
+ *
+ *  @p base_text is read but never freed; the result is a freshly allocated
+ *  buffer the caller owns. @p base_text starts as NULL until the first change
+ *  produces a buffer, so the first change reads straight from the document's
+ *  current text — avoiding an upfront full-source strdup of a possibly
+ *  multi-MB document on every keystroke.
+ *
+ *  @return New buffer with all changes applied, or NULL when no usable change
+ *          was produced (a change object missing "text", an allocation
+ *          failure, or an empty change list). On NULL the caller must leave
+ *          the document text untouched. */
+static char *apply_content_changes(const char *base_text, yyjson_val *changes) {
+    char *current = NULL;
+    size_t idx, max;
+    yyjson_val *change;
+    yyjson_arr_foreach(changes, idx, max, change) {
+        const char *base = current ? current : (base_text ? base_text : "");
+        yyjson_val *range_obj = yyjson_obj_get(change, "range");
+        const char *new_text  = yyjson_get_str(yyjson_obj_get(change, "text"));
+        if (!new_text) { free(current); return NULL; }
+
+        char *next;
+        if (range_obj) {
+            LspRange range;
+            range.start = json_to_pos(yyjson_obj_get(range_obj, "start"));
+            range.end   = json_to_pos(yyjson_obj_get(range_obj, "end"));
+            next = apply_incremental_change(base, range, new_text);
+        } else {
+            next = strdup(new_text);
+        }
+        free(current);              /* NULL on the first iteration: a no-op */
+        if (!next) return NULL;     /* base_text untouched; nothing leaked */
+        current = next;
+    }
+    return current;
+}
+
 static void handle_didchange(yyjson_val *params) {
     if (!params) return;
     yyjson_val *tdi     = yyjson_obj_get(params, "textDocument");
@@ -1370,33 +1480,8 @@ static void handle_didchange(yyjson_val *params) {
     Document *d = doc_find(uri);
     if (!d) return;
 
-    /* `current` is NULL until the first change produces a fresh buffer; the
-     * first change reads straight from d->text (or "") so we avoid an upfront
-     * full-source strdup of a possibly multi-MB document on every keystroke. */
-    char *current = NULL;
-
-    size_t idx, max;
-    yyjson_val *change;
-    yyjson_arr_foreach(changes, idx, max, change) {
-        const char *base = current ? current : (d->text ? d->text : "");
-        yyjson_val *range_obj = yyjson_obj_get(change, "range");
-        const char *new_text  = yyjson_get_str(yyjson_obj_get(change, "text"));
-        if (!new_text) { free(current); return; }
-
-        char *next;
-        if (range_obj) {
-            LspRange range;
-            range.start = json_to_pos(yyjson_obj_get(range_obj, "start"));
-            range.end   = json_to_pos(yyjson_obj_get(range_obj, "end"));
-            next = apply_incremental_change(base, range, new_text);
-        } else {
-            next = strdup(new_text);
-        }
-        free(current);              /* NULL on the first iteration: a no-op */
-        if (!next) return;          /* d->text untouched; nothing leaked */
-        current = next;
-    }
-    if (!current) return;           /* no usable change applied */
+    char *current = apply_content_changes(d->text, changes);
+    if (!current) return;           /* no usable change applied; d->text kept */
 
     free(d->text);
     d->text = current;
@@ -1572,6 +1657,31 @@ static const char *request_primary_uri(yyjson_val *params) {
  *                      may be NULL for workspace-global requests.
  *  @param want_all_docs  Non-zero to include all documents (workspace/symbol).
  *  @return             Heap-allocated query_context; caller takes ownership. */
+/** Build a query_doc view over @p w's current snapshot for a pinned query
+ *  context. All pointers are borrowed from the snapshot (the context holds a
+ *  ref on the workspace snapshot for the query's lifetime); @p is_primary
+ *  marks the single document the request targets.
+ *  @param w           Workspace doc whose snapshot is non-NULL.
+ *  @param is_primary  Non-zero when this is the request's primary document. */
+static query_doc make_query_doc(ws_doc *w, int is_primary) {
+    doc_snapshot *s = w->snap;
+    return (query_doc){
+        .uri             = s->uri,
+        .text            = s->text,
+        .task_prefix     = w->task_prefix,
+        .account_prefix  = w->account_prefix,
+        .report_prefix   = w->report_prefix,
+        .resource_prefix = w->resource_prefix,
+        .root            = s->root,
+        .tok_spans       = s->tok_spans,
+        .tok_owners      = s->tok_owners,
+        .num_tok_spans   = s->num_tok_spans,
+        .num_sem_entries = s->num_sem_entries,
+        .is_primary      = is_primary,
+        .snap            = s,
+    };
+}
+
 static query_context *build_query_context_locked(const char *primary_uri,
                                                  int want_all_docs) {
     query_context *qc = calloc(1, sizeof(query_context));
@@ -1617,21 +1727,7 @@ static query_context *build_query_context_locked(const char *primary_uri,
              * no siblings, so the primary stands alone. */
             if (primary_proj < 0 || w->project_index != primary_proj) continue;
         }
-        qc->docs[n] = (query_doc){
-            .uri             = s->uri,
-            .text            = s->text,
-            .task_prefix     = w->task_prefix,
-            .account_prefix  = w->account_prefix,
-            .report_prefix   = w->report_prefix,
-            .resource_prefix = w->resource_prefix,
-            .root            = s->root,
-            .tok_spans       = s->tok_spans,
-            .tok_owners      = s->tok_owners,
-            .num_tok_spans   = s->num_tok_spans,
-            .num_sem_entries = s->num_sem_entries,
-            .is_primary      = is_primary,
-            .snap            = s,
-        };
+        qc->docs[n] = make_query_doc(w, is_primary);
         if (is_primary) qc->primary_idx = n;
         n++;
     }

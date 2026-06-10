@@ -240,3 +240,25 @@ ProjectNode *find_node_by_dotted_path(ProjectNode *start, const char *path,
 ProjectNode *project_node_for_doc_task(ProjectNode *project_root,
                                        const char *task_prefix,
                                        const tj_node *per_doc_task);
+
+/**
+ * Resolve a dependency reference to its target task in the assembled Project
+ * tree.
+ *
+ * Bridges the in-file task @p owner to its merged ProjectNode (via
+ * project_node_for_doc_task under @p task_prefix), then resolves the @p dep
+ * edge by its ordinal among @p owner's dependencies. Shared by the hover and
+ * document-highlight handlers, which both trigger from a dependency under the
+ * cursor.
+ *
+ * @param project_root  The assembled project's synthetic root.
+ * @param task_prefix   The document's task-namespace prefix; may be NULL.
+ * @param owner         Per-document task tj_node that declares @p dep.
+ * @param dep           The dependency edge on @p owner to resolve.
+ * @return The target ProjectNode, or NULL when the owner or target does not
+ *         resolve.
+ */
+ProjectNode *project_resolve_dep_ref(ProjectNode *project_root,
+                                     const char *task_prefix,
+                                     const tj_node *owner,
+                                     const Dependency *dep);

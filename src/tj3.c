@@ -204,6 +204,40 @@ static int tj3_available(void) {
  *         stderr output of tj3, owned by the caller; NULL on fork,
  *         pipe, or allocation failure.
  */
+/**
+ * Read @p fd to EOF into a freshly allocated NUL-terminated buffer.
+ *
+ * On allocation failure the partial buffer is freed and @p fd is still
+ * drained to EOF (so the writer at the other end can finish and exit),
+ * then NULL is returned.
+ *
+ * @param fd       Readable file descriptor; not closed by this function.
+ * @param out_len  Receives the number of bytes read, excluding the NUL.
+ * @return Heap-allocated buffer the caller must free, or NULL on OOM.
+ */
+static char *read_fd_to_string(int fd, size_t *out_len) {
+    char  *buf = NULL;
+    size_t len = 0, cap = 0;
+    char   chunk[4096];
+    ssize_t n;
+    while ((n = read(fd, chunk, sizeof(chunk))) > 0) {
+        if (len + (size_t)n + 1 > cap) {
+            size_t new_cap = (len + (size_t)n + 1) * 2;
+            char *grown = realloc(buf, new_cap);
+            if (!grown) { free(buf); buf = NULL; len = 0; cap = 0; break; }
+            buf = grown;
+            cap = new_cap;
+        }
+        memcpy(buf + len, chunk, (size_t)n);
+        len += (size_t)n;
+    }
+    /* Drain any remaining bytes if we bailed on OOM, so the child can exit. */
+    if (!buf) while (read(fd, chunk, sizeof(chunk)) > 0) { }
+    if (buf) buf[len] = '\0';
+    *out_len = len;
+    return buf;
+}
+
 static char *run_tj3(const char *tmpdir, char *const argv[]) {
     int errpipe[2];
     if (pipe(errpipe) != 0) return NULL;
@@ -238,24 +272,8 @@ static char *run_tj3(const char *tmpdir, char *const argv[]) {
 
     /* Parent: drain stderr to EOF, then reap. */
     close(errpipe[1]);
-    char  *buf = NULL;
-    size_t len = 0, cap = 0;
-    char   chunk[4096];
-    ssize_t n;
-    while ((n = read(errpipe[0], chunk, sizeof(chunk))) > 0) {
-        if (len + (size_t)n + 1 > cap) {
-            size_t nc = (len + (size_t)n + 1) * 2;
-            char *t = realloc(buf, nc);
-            if (!t) { free(buf); buf = NULL; len = 0; cap = 0; break; }
-            buf = t;
-            cap = nc;
-        }
-        memcpy(buf + len, chunk, (size_t)n);
-        len += (size_t)n;
-    }
-    /* Drain any remaining bytes if we bailed on OOM, so the child can exit. */
-    if (!buf) while (read(errpipe[0], chunk, sizeof(chunk)) > 0) { }
-    if (buf) buf[len] = '\0';
+    size_t len = 0;
+    char *buf = read_fd_to_string(errpipe[0], &len);
     close(errpipe[0]);
 
     int status;
@@ -316,18 +334,81 @@ static const char *map_reported_path(const char *path,
 }
 
 /**
- * Parse tj3 stderr output and populate @p out with the resulting
- * diagnostics.
+ * Decode one tj3 stderr line and, if it reports a diagnostic, append it to
+ * @p out.
  *
- * Each non-empty line is examined for an ": Error: " or ": Warning: "
- * marker.  Lines that match are decoded into a Diagnostic (file path,
- * 1-based line number, severity, message) and appended to @p out.
- * Lines that do not match are silently ignored.
+ * A line matches when it contains an ": Error: " or ": Warning: " marker
+ * preceded by a "<path>:<lineno>" prefix that maps to a project member.
+ * Matching lines become a Diagnostic (file path, 1-based line number,
+ * severity, message); non-matching lines are ignored.
+ *
+ * @param line      One stderr line (NUL-terminated); read but not modified.
+ * @param tmpdir    Temporary directory used for the tj3 run; passed to
+ *                  map_reported_path() for path normalisation.
+ * @param real_tmp  realpath() result for @p tmpdir, or NULL.
+ * @param members   Array of project member descriptors.
+ * @param nmembers  Number of entries in @p members.
+ * @param out       Destination diag_set to receive the diagnostic.
+ */
+static void parse_diagnostic_line(char *line,
+                                  const char *tmpdir, const char *real_tmp,
+                                  const member *members, int nmembers,
+                                  diag_set *out) {
+    int   severity;
+    char *marker;
+    size_t marker_len;
+    if ((marker = strstr(line, ": Error: ")) != NULL) {
+        severity   = DIAG_ERROR;
+        marker_len = strlen(": Error: ");
+    } else if ((marker = strstr(line, ": Warning: ")) != NULL) {
+        severity   = DIAG_WARNING;
+        marker_len = strlen(": Warning: ");
+    } else {
+        return;
+    }
+
+    const char *message = marker + marker_len;
+
+    /* The segment [line, marker) is "<path>:<lineno>". */
+    char *colon = NULL;
+    for (char *q = line; q < marker; q++)
+        if (*q == ':') colon = q;
+    if (!colon) return;
+
+    int lineno = 0, have_digits = 0;
+    for (char *q = colon + 1; q < marker; q++) {
+        if (*q < '0' || *q > '9') { have_digits = 0; break; }
+        lineno = lineno * 10 + (*q - '0');
+        have_digits = 1;
+    }
+    if (!have_digits) return;
+
+    char *path = strndup(line, (size_t)(colon - line));
+    if (!path) return;
+    const char *uri = map_reported_path(path, tmpdir, real_tmp,
+                                        members, nmembers);
+    free(path);
+    if (!uri) return;
+
+    uint32_t l = lineno > 0 ? (uint32_t)(lineno - 1) : 0;
+    Diagnostic d;
+    d.range.start.line      = l;
+    d.range.start.character = 0;
+    d.range.end.line        = l;
+    d.range.end.character   = (uint32_t)INT_MAX;
+    d.severity              = severity;
+    d.source                = "tj3";
+    d.message               = strdup(message);
+    diag_set_add(out, uri, d);
+}
+
+/**
+ * Parse tj3 stderr output and populate @p out with the resulting
+ * diagnostics, one per matching line (see parse_diagnostic_line()).
  *
  * @param stderr_buf  NUL-terminated buffer of tj3 stderr; modified in
  *                    place by strtok_r.  May be NULL (no-op).
- * @param tmpdir      Temporary directory used for the tj3 run; passed
- *                    to map_reported_path() for path normalisation.
+ * @param tmpdir      Temporary directory used for the tj3 run.
  * @param real_tmp    realpath() result for @p tmpdir, or NULL.
  * @param members     Array of project member descriptors.
  * @param nmembers    Number of entries in @p members.
@@ -343,58 +424,97 @@ static void parse_diagnostics(char *stderr_buf,
     char *save = NULL;
     for (char *line = strtok_r(stderr_buf, "\n", &save);
          line;
-         line = strtok_r(NULL, "\n", &save)) {
-
-        int   severity;
-        char *marker;
-        size_t marker_len;
-        if ((marker = strstr(line, ": Error: ")) != NULL) {
-            severity   = DIAG_ERROR;
-            marker_len = strlen(": Error: ");
-        } else if ((marker = strstr(line, ": Warning: ")) != NULL) {
-            severity   = DIAG_WARNING;
-            marker_len = strlen(": Warning: ");
-        } else {
-            continue;
-        }
-
-        const char *message = marker + marker_len;
-
-        /* The segment [line, marker) is "<path>:<lineno>". */
-        char *colon = NULL;
-        for (char *q = line; q < marker; q++)
-            if (*q == ':') colon = q;
-        if (!colon) continue;
-
-        int lineno = 0, have_digits = 0;
-        for (char *q = colon + 1; q < marker; q++) {
-            if (*q < '0' || *q > '9') { have_digits = 0; break; }
-            lineno = lineno * 10 + (*q - '0');
-            have_digits = 1;
-        }
-        if (!have_digits) continue;
-
-        char *path = strndup(line, (size_t)(colon - line));
-        if (!path) continue;
-        const char *uri = map_reported_path(path, tmpdir, real_tmp,
-                                            members, nmembers);
-        free(path);
-        if (!uri) continue;
-
-        uint32_t l = lineno > 0 ? (uint32_t)(lineno - 1) : 0;
-        Diagnostic d;
-        d.range.start.line      = l;
-        d.range.start.character = 0;
-        d.range.end.line        = l;
-        d.range.end.character   = (uint32_t)INT_MAX;
-        d.severity              = severity;
-        d.source                = "tj3";
-        d.message               = strdup(message);
-        diag_set_add(out, uri, d);
-    }
+         line = strtok_r(NULL, "\n", &save))
+        parse_diagnostic_line(line, tmpdir, real_tmp, members, nmembers, out);
 }
 
 /* ── entry point ─────────────────────────────────────────────────────────── */
+
+/**
+ * Gather the member documents of project @p pindex from @p ws into a freshly
+ * allocated array.
+ *
+ * Each member's `path` is heap-allocated (the caller frees it); `relpath` is
+ * left NULL for assign_member_relpaths() to fill in later, while `uri` and
+ * `text` borrow the document snapshot. A member whose URI cannot be converted
+ * to a path is skipped.
+ *
+ * @param ws            Workspace snapshot to scan.
+ * @param pindex        Index of the project whose members are wanted.
+ * @param out_nmembers  Receives the number of members collected.
+ * @return Heap-allocated member array (NULL when the project has no usable
+ *         members), owned by the caller.
+ */
+static member *collect_project_members(const workspace_snapshot *ws, int pindex,
+                                       int *out_nmembers) {
+    member *members = NULL;
+    int     nmembers = 0, cap = 0;
+    for (int i = 0; i < ws->num_docs; i++) {
+        const ws_doc *wd = &ws->docs[i];
+        if (wd->project_index != pindex || !wd->snap) continue;
+        char *path = uri_to_path(wd->snap->uri);
+        if (!path) continue;
+        if (nmembers >= cap) {
+            cap = cap ? cap * 2 : 4;
+            member *grown = realloc(members, (size_t)cap * sizeof(member));
+            if (!grown) { free(path); break; }
+            members = grown;
+        }
+        members[nmembers].path    = path;
+        members[nmembers].relpath = NULL;
+        members[nmembers].uri     = wd->snap->uri;
+        members[nmembers].text    = wd->snap->text;
+        nmembers++;
+    }
+    *out_nmembers = nmembers;
+    return members;
+}
+
+/** Fill each member's relpath: the portion of its absolute path below the
+ *  members' common ancestor directory, so includes resolve identically once
+ *  the members are staged under a shared tmpdir. A member that *is* the common
+ *  ancestor (empty remainder) falls back to its basename.
+ *  @param members   Member array whose `path` fields are set; `relpath` filled.
+ *  @param nmembers  Number of entries in @p members.
+ *  @return 1 on success, 0 on allocation failure (relpaths left unset). */
+static int assign_member_relpaths(member *members, int nmembers) {
+    char **paths = malloc((size_t)nmembers * sizeof(char *));
+    if (!paths) return 0;
+    for (int i = 0; i < nmembers; i++) paths[i] = members[i].path;
+    size_t common_len = common_dir_len(paths, nmembers);
+    free(paths);
+
+    for (int i = 0; i < nmembers; i++) {
+        char *rel = members[i].path + common_len;
+        if (*rel == '\0') {
+            char *slash = strrchr(members[i].path, '/');
+            rel = slash ? slash + 1 : members[i].path;
+        }
+        members[i].relpath = rel;
+    }
+    return 1;
+}
+
+/** Write each member's text into @p tmpdir at its relpath, creating parent
+ *  directories as needed, so tj3 can run over a faithful on-disk copy of the
+ *  project's source.
+ *  @param tmpdir    Staging directory (already created).
+ *  @param members   Member array with relpath and text set.
+ *  @param nmembers  Number of entries in @p members. */
+static void stage_members_to_tmpdir(const char *tmpdir, const member *members,
+                                    int nmembers) {
+    for (int i = 0; i < nmembers; i++) {
+        char *dest = path_join(tmpdir, members[i].relpath);
+        char *slash = strrchr(dest, '/');
+        if (slash) {
+            *slash = '\0';
+            make_dirs(dest);
+            *slash = '/';
+        }
+        write_text_file(dest, members[i].text);
+        free(dest);
+    }
+}
 
 void tj3_collect_project(const workspace_snapshot *ws, const ws_project *proj,
                          tj3_mode mode, diag_set *out) {
@@ -407,41 +527,12 @@ void tj3_collect_project(const workspace_snapshot *ws, const ws_project *proj,
     if (pindex < 0) return;
 
     /* Collect the project's member documents. */
-    member *members = NULL;
-    int     nmembers = 0, cap = 0;
-    for (int i = 0; i < ws->num_docs; i++) {
-        const ws_doc *wd = &ws->docs[i];
-        if (wd->project_index != pindex || !wd->snap) continue;
-        char *path = uri_to_path(wd->snap->uri);
-        if (!path) continue;
-        if (nmembers >= cap) {
-            cap = cap ? cap * 2 : 4;
-            member *t = realloc(members, (size_t)cap * sizeof(member));
-            if (!t) { free(path); break; }
-            members = t;
-        }
-        members[nmembers].path    = path;
-        members[nmembers].relpath = NULL;
-        members[nmembers].uri     = wd->snap->uri;
-        members[nmembers].text    = wd->snap->text;
-        nmembers++;
-    }
+    int nmembers = 0;
+    member *members = collect_project_members(ws, pindex, &nmembers);
     if (nmembers == 0) { free(members); return; }
 
     /* Paths relative to the members' common ancestor, so includes resolve. */
-    char **paths = malloc((size_t)nmembers * sizeof(char *));
-    if (!paths) { goto cleanup; }
-    for (int i = 0; i < nmembers; i++) paths[i] = members[i].path;
-    size_t cl = common_dir_len(paths, nmembers);
-    free(paths);
-    for (int i = 0; i < nmembers; i++) {
-        char *rel = members[i].path + cl;
-        if (*rel == '\0') {
-            char *slash = strrchr(members[i].path, '/');
-            rel = slash ? slash + 1 : members[i].path;
-        }
-        members[i].relpath = rel;
-    }
+    if (!assign_member_relpaths(members, nmembers)) goto cleanup;
 
     /* The project's root document = the member whose URI is the project id. */
     char *root_rel = NULL;
@@ -457,17 +548,7 @@ void tj3_collect_project(const workspace_snapshot *ws, const ws_project *proj,
     if (!tmpdir) goto cleanup;
     char *real_tmp = realpath(tmpdir, NULL);
 
-    for (int i = 0; i < nmembers; i++) {
-        char *dest = path_join(tmpdir, members[i].relpath);
-        char *slash = strrchr(dest, '/');
-        if (slash) {
-            *slash = '\0';
-            make_dirs(dest);
-            *slash = '/';
-        }
-        write_text_file(dest, members[i].text);
-        free(dest);
-    }
+    stage_members_to_tmpdir(tmpdir, members, nmembers);
 
     char *argv[4];
     int ai = 0;

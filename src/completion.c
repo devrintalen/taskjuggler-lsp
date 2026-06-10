@@ -53,8 +53,8 @@
  */
 static int istarts(const char *s, const char *prefix) {
     if (!s || !prefix) return 0;
-    size_t pn = strlen(prefix);
-    for (size_t i = 0; i < pn; i++) {
+    size_t prefix_len = strlen(prefix);
+    for (size_t i = 0; i < prefix_len; i++) {
         if (tolower((unsigned char)s[i]) != tolower((unsigned char)prefix[i]))
             return 0;
     }
@@ -237,13 +237,13 @@ static int at_statement_start(const TokenSpan *tokens, int num_tokens, LspPos cu
  *         free.
  */
 static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
-    TokenSpan t = tok_span_at(tokens, num_tokens, cursor);
-    if (t.token_kind == TK_IDENT) {
-        char *txt = t.text; /* take ownership */
-        t.text = NULL;
-        return txt;
+    TokenSpan span = tok_span_at(tokens, num_tokens, cursor);
+    if (span.token_kind == TK_IDENT) {
+        char *text = span.text; /* take ownership */
+        span.text = NULL;
+        return text;
     }
-    free(t.text);
+    free(span.text);
     return strdup("");
 }
 
@@ -494,21 +494,21 @@ static void collect_ids(tj_node *const *syms, int n, int kind,
                          const char *prefix, IdList *out) {
     for (int i = 0; i < n; i++) {
         if (syms[i]->keyword == kind && syms[i]->id && syms[i]->id[0]) {
-            size_t plen = prefix ? strlen(prefix) : 0;
-            size_t dlen = strlen(syms[i]->id);
-            size_t qlen = plen ? plen + 1 + dlen : dlen;
-            char *qid = malloc(qlen + 1);
-            if (!qid) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+            size_t prefix_len = prefix ? strlen(prefix) : 0;
+            size_t id_len = strlen(syms[i]->id);
+            size_t qualified_len = prefix_len ? prefix_len + 1 + id_len : id_len;
+            char *qualified_id = malloc(qualified_len + 1);
+            if (!qualified_id) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
             if (!prefix || !prefix[0]) {
-                memcpy(qid, syms[i]->id, dlen + 1);
+                memcpy(qualified_id, syms[i]->id, id_len + 1);
             } else {
-                memcpy(qid, prefix, plen);
-                qid[plen] = '.';
-                memcpy(qid + plen + 1, syms[i]->id, dlen + 1);
+                memcpy(qualified_id, prefix, prefix_len);
+                qualified_id[prefix_len] = '.';
+                memcpy(qualified_id + prefix_len + 1, syms[i]->id, id_len + 1);
             }
-            idlist_push(out, qid, syms[i]->name ? syms[i]->name : "");
-            collect_ids(syms[i]->children, syms[i]->num_children, kind, qid, out);
-            free(qid);
+            idlist_push(out, qualified_id, syms[i]->name ? syms[i]->name : "");
+            collect_ids(syms[i]->children, syms[i]->num_children, kind, qualified_id, out);
+            free(qualified_id);
         } else {
             collect_ids(syms[i]->children, syms[i]->num_children, kind, prefix, out);
         }
@@ -981,6 +981,30 @@ done:
     return list;
 }
 
+/** Gather the cross-file completion sources for a query: every non-primary
+ *  sibling document's top-level symbol pool. Every non-primary doc in the
+ *  context is a sibling in the requester's project (the clone step already
+ *  restricted membership); an orphan has no siblings, so it yields no extras.
+ *  @param qc            Query context to scan.
+ *  @param extra_pools   Receives up to MAX_DOCS sibling symbol pools.
+ *  @param extra_counts  Receives each pool's length, parallel to @p extra_pools.
+ *  @param out_num_extra Receives the number of pools collected. */
+static void collect_sibling_pools(const query_context *qc,
+                                  tj_node *const **extra_pools,
+                                  int *extra_counts, int *out_num_extra) {
+    int num_extra = 0;
+    for (int i = 0; i < qc->num_docs && num_extra < MAX_DOCS; i++) {
+        if (qc->docs[i].is_primary) continue;
+        tj_node *const *top; int n;
+        doc_symbol_pool(&qc->docs[i], &top, &n);
+        if (!top) continue;
+        extra_pools[num_extra]  = top;
+        extra_counts[num_extra] = n;
+        num_extra++;
+    }
+    *out_num_extra = num_extra;
+}
+
 yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
                                   yyjson_val *params, const query_context *qc,
                                   const query_doc *d) {
@@ -992,22 +1016,10 @@ yyjson_mut_val *handle_completion(yyjson_mut_doc *doc, yyjson_val *id,
     if (!pos_obj) pos_obj = yyjson_obj_get(params, "position");
     if (!pos_obj || !d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 
-    /* Every non-primary doc in the context is a sibling in the requester's
-     * project (the clone step already restricted membership), so each one's
-     * top-level pool is an extra cross-file completion source.  Orphans
-     * have no siblings, so the loop naturally yields no extras for them. */
     tj_node *const *extra_pools[MAX_DOCS];
     int             extra_counts[MAX_DOCS];
     int             num_extra = 0;
-    for (int i = 0; i < qc->num_docs && num_extra < MAX_DOCS; i++) {
-        if (qc->docs[i].is_primary) continue;
-        tj_node *const *top; int n;
-        doc_symbol_pool(&qc->docs[i], &top, &n);
-        if (!top) continue;
-        extra_pools[num_extra]  = top;
-        extra_counts[num_extra] = n;
-        num_extra++;
-    }
+    collect_sibling_pools(qc, extra_pools, extra_counts, &num_extra);
 
     tj_node *const *self_top; int self_n;
     doc_symbol_pool(d, &self_top, &self_n);

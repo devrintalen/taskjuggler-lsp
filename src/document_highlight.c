@@ -139,6 +139,29 @@ yyjson_mut_val *build_document_highlight_json(
     return arr;
 }
 
+/** Resolve the cursor to the single task it highlights: directly from a task
+ *  declaration, or from a dependency reference to its target task (the
+ *  highlight target is the same in both directions). Resolution runs against
+ *  the pinned snapshot's ProjectNode tree, exactly as definition/references
+ *  do.
+ *  @return The target ProjectNode, or NULL when the cursor is on neither a
+ *          task declaration nor a resolvable dependency. */
+static ProjectNode *resolve_highlight_target(const query_context *qc,
+                                             const query_doc *d, LspPos pos) {
+    tj_node *decl = task_decl_at_cursor(d->tok_spans, d->tok_owners,
+                                        d->num_tok_spans, pos);
+    if (decl)
+        return project_node_for_doc_task(qc->project_root, d->task_prefix, decl);
+
+    tj_node          *owner = NULL;
+    const Dependency *dep   = NULL;
+    if (!dependency_at_cursor(d->tok_spans, d->tok_owners, d->num_tok_spans, pos,
+                              &owner, &dep))
+        return NULL;
+
+    return project_resolve_dep_ref(qc->project_root, d->task_prefix, owner, dep);
+}
+
 yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc, yyjson_val *id,
                                           yyjson_val *params,
                                           const query_context *qc,
@@ -149,30 +172,7 @@ yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc, yyjson_val *id,
         return make_response(doc, id, yyjson_mut_null(doc));
 
     LspPos pos = json_to_pos(pos_obj);
-
-    /* Resolve the cursor to a single target task, triggering from either a
-     * task declaration or a dependency reference (the target is the same in
-     * both directions).  Resolution runs against the pinned snapshot's
-     * ProjectNode tree, exactly as definition/references do. */
-    ProjectNode *wanted = NULL;
-    tj_node *decl = task_decl_at_cursor(d->tok_spans, d->tok_owners, d->num_tok_spans, pos);
-    if (decl) {
-        wanted = project_node_for_doc_task(qc->project_root, d->task_prefix, decl);
-    } else {
-        tj_node          *owner = NULL;
-        const Dependency *dep   = NULL;
-        if (dependency_at_cursor(d->tok_spans, d->tok_owners, d->num_tok_spans, pos,
-                                 &owner, &dep)) {
-            ProjectNode *merged_owner =
-                project_node_for_doc_task(qc->project_root, d->task_prefix, owner);
-            if (merged_owner) {
-                int ordinal = (int)(dep - owner->dependencies);
-                if (ordinal >= 0 && ordinal < merged_owner->num_dependencies)
-                    wanted = project_dep_resolve(merged_owner, ordinal,
-                                                 qc->project_root);
-            }
-        }
-    }
+    ProjectNode *wanted = resolve_highlight_target(qc, d, pos);
 
     yyjson_mut_val *result =
         build_document_highlight_json(doc, qc->project_root, wanted,
