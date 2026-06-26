@@ -55,14 +55,30 @@ int g_pending_newline = 0;
  * yycolumn is managed manually: advanced by yyleng in YY_USER_ACTION and
  * reset to 0 in newline-consuming rules.
  *
- * NOTE: yycolumn counts *bytes*, not Unicode codepoints or UTF-16 code units.
- * For ASCII-only files this is correct.  Multi-byte UTF-8 characters will
- * produce wrong character positions.
- *
- * TODO: Replace byte counting with codepoint counting (iterate yytext with
- * utf8_char_len) to match LSP character semantics.
+ * yycolumn counts UTF-16 code units, matching the LSP default position
+ * encoding (the server does not negotiate `positionEncoding`, so per the
+ * spec character offsets are UTF-16 code units; see parser.h LspPos).  It is
+ * advanced in YY_USER_ACTION by utf16_units(yytext, yyleng) rather than by the
+ * raw byte length yyleng, so multi-byte UTF-8 characters map to the right
+ * character positions: a BMP codepoint (1-3 UTF-8 bytes) is one code unit, and
+ * an astral codepoint (4 UTF-8 bytes) is a surrogate pair of two code units.
  */
 int yycolumn = 0;
+
+/* utf16_units: number of UTF-16 code units represented by the first `len`
+ * bytes of a UTF-8 buffer.  Continuation bytes (10xxxxxx) are skipped; each
+ * lead byte contributes one code unit, plus an extra one for 4-byte sequences
+ * (codepoints >= U+10000, which encode as a surrogate pair).  Malformed input
+ * degrades gracefully — stray continuation bytes simply add nothing. */
+static uint32_t utf16_units(const char *s, int len) {
+    uint32_t units = 0;
+    for (int i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if ((c & 0xC0) == 0x80) continue;   /* continuation byte */
+        units += (c >= 0xF0) ? 2 : 1;       /* 4-byte lead → surrogate pair */
+    }
+    return units;
+}
 
 /* Start position of the current token, saved before each rule executes. */
 static uint32_t tok_sl = 0, tok_sc = 0;
@@ -89,7 +105,7 @@ static int   str_len = 0;
 #define YY_USER_ACTION                          \
     tok_sl   = (uint32_t)(yylineno - 1);        \
     tok_sc   = (uint32_t)yycolumn;              \
-    yycolumn += yyleng;
+    yycolumn += utf16_units(yytext, yyleng);
 
 /* ── Token emission helpers ──────────────────────────────────────────────── *
  *
