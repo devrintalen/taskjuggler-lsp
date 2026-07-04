@@ -154,7 +154,7 @@ static ProjectNode *resolve_highlight_target(const query_context *qc,
     tj_node *decl = task_decl_at_cursor(d->tok_spans, d->tok_owners,
                                         d->num_tok_spans, pos);
     if (decl)
-        return project_node_for_doc_task(qc->project_root, d->task_prefix, decl);
+        return project_node_for_doc_task(qc->project_root, prefix_get(d->prefixes, PREFIX_TASK), decl);
 
     tj_node          *owner = NULL;
     const Dependency *dep   = NULL;
@@ -162,7 +162,7 @@ static ProjectNode *resolve_highlight_target(const query_context *qc,
                               &owner, &dep))
         return NULL;
 
-    return project_resolve_dep_ref(qc->project_root, d->task_prefix, owner, dep);
+    return project_resolve_dep_ref(qc->project_root, prefix_get(d->prefixes, PREFIX_TASK), owner, dep);
 }
 
 yyjson_mut_val *handle_document_highlight(yyjson_mut_doc *doc, yyjson_val *id,

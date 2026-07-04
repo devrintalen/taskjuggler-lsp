@@ -46,10 +46,9 @@ fixed array of ``Document`` slots, each owning:
 * the authoritative source text — the editor's working copy while
   the document is open, or the on-disk text otherwise
   (``disk_only = 1`` marks the latter);
-* the include prefixes (``task_prefix`` / ``resource_prefix`` /
-  ``account_prefix`` / ``report_prefix``) applied to this document
-  by the ``include`` directive that pulled it in, or ``NULL`` for a
-  top-level project root;
+* the include prefixes (a per-kind ``prefix_set``) applied to this
+  document by the ``include`` directive that pulled it in, all-``NULL``
+  for a top-level project root;
 * the resolved ``included_uris[]`` of every ``include`` directive
   inside this document;
 * its current ``snap`` and (one revision back) ``prev_snap``

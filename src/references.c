@@ -86,7 +86,7 @@ yyjson_mut_val *handle_references(yyjson_mut_doc *doc, yyjson_val *id,
 
     tj_node *task = task_decl_at_cursor(d->tok_spans, d->tok_owners, d->num_tok_spans, pos);
     ProjectNode *wanted =
-        project_node_for_doc_task(qc->project_root, d->task_prefix, task);
+        project_node_for_doc_task(qc->project_root, prefix_get(d->prefixes, PREFIX_TASK), task);
     yyjson_mut_val *result = build_references_json(doc,
                                                    qc->project_root,
                                                    wanted);

@@ -58,15 +58,12 @@ typedef struct Document {
     doc_snapshot *snap;             /**< current parse output; see comment above */
     doc_snapshot *prev_snap;        /**< previous parse output retained for delta; see above */
 
-    /* Prefixes applied to this Document by the includer's `include` block,
-     * one per kind.  Populated by follow_includes() from the includer's
-     * captured IncludeRef when this file is pulled in; stay NULL on a
-     * canonical .tjp or on orphan .tji files in a .tji-only workspace.
-     * Captured into each workspace_snapshot's ws_doc at build time. */
-    char        *task_prefix;       /**< owned task-namespace prefix; may be NULL */
-    char        *account_prefix;    /**< owned account-namespace prefix; may be NULL */
-    char        *report_prefix;     /**< owned report-namespace prefix; may be NULL */
-    char        *resource_prefix;   /**< owned resource-namespace prefix; may be NULL */
+    /* Prefixes applied to this Document by the includer's `include` block.
+     * Populated by follow_includes() from the includer's captured IncludeRef
+     * when this file is pulled in; all-NULL on a canonical .tjp or on orphan
+     * .tji files in a .tji-only workspace.  Captured into each
+     * workspace_snapshot's ws_doc at build time. */
+    prefix_set   prefixes;          /**< owned per-kind include prefixes */
 
     /* Resolved file:// URIs of every `include` directive in this doc,
      * recorded by follow_includes() at parse time.  Owned by the

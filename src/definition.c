@@ -49,7 +49,7 @@ yyjson_mut_val *handle_definition(yyjson_mut_doc *doc, yyjson_val *id,
     if (dependency_at_cursor(d->tok_spans, d->tok_owners, d->num_tok_spans, pos,
                              &owner, &dep)) {
         ProjectNode *target =
-            project_resolve_dep_ref(qc->project_root, d->task_prefix, owner, dep);
+            project_resolve_dep_ref(qc->project_root, prefix_get(d->prefixes, PREFIX_TASK), owner, dep);
         result = build_definition_json(doc, target);
     }
     if (!result) return make_response(doc, id, yyjson_mut_null(doc));

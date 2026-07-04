@@ -105,10 +105,7 @@ void doc_free(Document *d) {
     free(d->uri);
     free(d->text);
     doc_clear_parse_state(d);
-    free(d->task_prefix);
-    free(d->account_prefix);
-    free(d->report_prefix);
-    free(d->resource_prefix);
+    prefix_set_clear(&d->prefixes);
     for (int i = 0; i < d->num_included_uris; i++)
         free(d->included_uris[i]);
     free(d->included_uris);

@@ -573,7 +573,7 @@ static yyjson_mut_val *try_dependency_hover(yyjson_mut_doc *doc, yyjson_val *id,
         return NULL;
 
     ProjectNode *target =
-        project_resolve_dep_ref(qc->project_root, d->task_prefix, owner, dep);
+        project_resolve_dep_ref(qc->project_root, prefix_get(d->prefixes, PREFIX_TASK), owner, dep);
     if (!target) return NULL;
 
     char *value = project_node_hover_markdown(target);

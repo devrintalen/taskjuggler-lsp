@@ -234,10 +234,7 @@ static query_doc make_query_doc(ws_doc *w, int is_primary) {
     return (query_doc){
         .uri             = s->uri,
         .text            = s->text,
-        .task_prefix     = w->task_prefix,
-        .account_prefix  = w->account_prefix,
-        .report_prefix   = w->report_prefix,
-        .resource_prefix = w->resource_prefix,
+        .prefixes        = &w->prefixes,
         .root            = s->root,
         .tok_spans       = s->tok_spans,
         .tok_owners      = s->tok_owners,

@@ -35,6 +35,15 @@
 #include <sys/stat.h>
 #include <time.h>
 
+/* copy_document_into_project() indexes a prefix_set directly with a
+ * NodeKind, which is only sound while the two enums list the four id
+ * namespaces in the same order. */
+_Static_assert((int)PREFIX_TASK     == (int)NODE_KIND_TASK &&
+               (int)PREFIX_ACCOUNT  == (int)NODE_KIND_ACCOUNT &&
+               (int)PREFIX_RESOURCE == (int)NODE_KIND_RESOURCE &&
+               (int)PREFIX_REPORT   == (int)NODE_KIND_REPORT,
+               "prefix_kind must mirror NodeKind order");
+
 /* ═══════════════════════════════════════════════════════════════════════════
    Workspace root & compile_commands.json cache
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -138,17 +147,6 @@ void install_disk_text(Document *document, char *text, const char *path) {
     doc_install_parse(document, po);
 }
 
-/** Replace @p *slot with a fresh strdup of @p value, or set it to NULL
- *  when @p value is NULL.  Used to copy IncludeRef prefix strings onto
- *  the includee.
- *  @param slot   Pointer to an existing heap string (may be NULL); freed
- *                before replacement.
- *  @param value  New string to duplicate into @p *slot; may be NULL. */
-static void replace_string(char **slot, const char *value) {
-    free(*slot);
-    *slot = value ? strdup(value) : NULL;
-}
-
 /** Resolve an include directive's filename to an absolute filesystem path.
  *  Absolute filenames are copied as-is; relative ones are joined against the
  *  directory containing @p includer_path (or copied as-is when the includer
@@ -237,12 +235,8 @@ void follow_includes(const char *file_path, const ParseOutput *po) {
         if (!target)
             DLOG(DEBUG_INCLUDES, LOG_INFO, "include unresolved: %s (from %s)",
                  full_path, file_path);
-        if (target) {
-            replace_string(&target->task_prefix,     inc->task_prefix);
-            replace_string(&target->resource_prefix, inc->resource_prefix);
-            replace_string(&target->account_prefix,  inc->account_prefix);
-            replace_string(&target->report_prefix,   inc->report_prefix);
-        }
+        if (target)
+            prefix_set_copy(&target->prefixes, &inc->prefixes);
 
         /* Record this resolved URI on the includer so
          * build_workspace_snapshot() can BFS the include graph.  Ownership
@@ -443,21 +437,10 @@ static void copy_document_into_project(workspace_snapshot *ws, int pidx, Documen
         : NULL;
     for (int i = 0; i < root->num_children; i++) {
         tj_node    *child = root->children[i];
-        const char *prefix;
         NodeKind    kind = node_kind_of(child->keyword);
-        switch (child->keyword) {
-        case KW_TASK:
-            prefix = d->task_prefix;     break;
-        case KW_ACCOUNT:
-            prefix = d->account_prefix;  break;
-        case KW_RESOURCE:
-        case KW_SHIFT:
-            prefix = d->resource_prefix; break;
-        case KW_PROJECT:
+        if (kind == NODE_KIND_OTHER)
             continue;   /* project block stays document-local */
-        default:
-            prefix = d->report_prefix;   break;
-        }
+        const char *prefix = prefix_get(&d->prefixes, (prefix_kind)kind);
         ProjectNode *target = find_node_by_dotted_path(proot, prefix, kind);
         if (!target) continue;
         project_node_append_child(
@@ -552,12 +535,9 @@ cleanup:
  *  @param w  Destination ws_doc in the snapshot under construction.
  *  @param d  Source document whose snapshot and prefixes are captured. */
 static void populate_ws_doc(ws_doc *w, Document *d) {
-    w->snap            = docsnap_acquire(d->snap);
-    w->task_prefix     = d->task_prefix     ? strdup(d->task_prefix)     : NULL;
-    w->account_prefix  = d->account_prefix  ? strdup(d->account_prefix)  : NULL;
-    w->report_prefix   = d->report_prefix   ? strdup(d->report_prefix)   : NULL;
-    w->resource_prefix = d->resource_prefix ? strdup(d->resource_prefix) : NULL;
-    w->disk_only       = d->disk_only;
+    w->snap      = docsnap_acquire(d->snap);
+    prefix_set_copy(&w->prefixes, &d->prefixes);
+    w->disk_only = d->disk_only;
 }
 
 /** Build an immutable workspace_snapshot from the current docs[]: one ws_doc

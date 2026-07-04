@@ -54,9 +54,8 @@ Every open document is stored as a ``Document`` slot in the static
 
 * the URI and authoritative source text;
 * a monotonic ``doc_version`` counter;
-* the include prefixes (``task_prefix`` / ``resource_prefix`` /
-  ``account_prefix`` / ``report_prefix``) applied to this document
-  by its includer (if any);
+* the include prefixes (a per-kind ``prefix_set``) applied to this
+  document by its includer (if any);
 * the resolved ``included_uris[]`` of any ``include`` directives in
   the document;
 * pointers to its current ``snap`` and immediately previous

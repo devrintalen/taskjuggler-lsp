@@ -271,21 +271,29 @@ void parse_output_free(ParseOutput *po) {
 
     for (int i = 0; i < po->num_includes; i++) {
         free(po->includes[i].filename);
-        free(po->includes[i].task_prefix);
-        free(po->includes[i].resource_prefix);
-        free(po->includes[i].account_prefix);
-        free(po->includes[i].report_prefix);
+        prefix_set_clear(&po->includes[i].prefixes);
     }
     free(po->includes);
 
     free(po);
 }
 
+void prefix_set_clear(prefix_set *ps) {
+    for (int k = 0; k < PREFIX_KIND_COUNT; k++) {
+        free(ps->by_kind[k]);
+        ps->by_kind[k] = NULL;
+    }
+}
+
+void prefix_set_copy(prefix_set *dst, const prefix_set *src) {
+    for (int k = 0; k < PREFIX_KIND_COUNT; k++) {
+        free(dst->by_kind[k]);
+        dst->by_kind[k] = (src && src->by_kind[k]) ? strdup(src->by_kind[k]) : NULL;
+    }
+}
+
 void push_include(ParseOutput *po, const char *quoted_text,
-                  const char *task_prefix,
-                  const char *resource_prefix,
-                  const char *account_prefix,
-                  const char *report_prefix) {
+                  const prefix_set *prefixes) {
     if (!quoted_text) return;
     size_t len = strlen(quoted_text);
     const char *inner = quoted_text;
@@ -307,11 +315,9 @@ void push_include(ParseOutput *po, const char *quoted_text,
         po->includes_cap = nc;
     }
     IncludeRef *e = &po->includes[po->num_includes++];
-    e->filename        = filename;
-    e->task_prefix     = task_prefix     ? strdup(task_prefix)     : NULL;
-    e->resource_prefix = resource_prefix ? strdup(resource_prefix) : NULL;
-    e->account_prefix  = account_prefix  ? strdup(account_prefix)  : NULL;
-    e->report_prefix   = report_prefix   ? strdup(report_prefix)   : NULL;
+    e->filename = filename;
+    memset(&e->prefixes, 0, sizeof(e->prefixes));
+    prefix_set_copy(&e->prefixes, prefixes);
 }
 
 /* ── tj_node tree linkage ────────────────────────────────────────────────── *

@@ -62,35 +62,28 @@ void yyerror(const char *msg);
 /* ── Helpers (declared/defined in parser.c) ─────────────────────────────── */
 
 extern void push_include(ParseOutput *po, const char *quoted_text,
-                         const char *task_prefix,
-                         const char *resource_prefix,
-                         const char *account_prefix,
-                         const char *report_prefix);
+                         const prefix_set *prefixes);
 
 /* ── Include-statement prefix capture ────────────────────────────────────
  *
  * Bumped while parsing the body of an `include` statement so that the
  * KW_TASKPREFIX / KW_RESOURCEPREFIX / KW_ACCOUNTPREFIX / KW_REPORTPREFIX
- * attribute actions know to stash their argument into one of the
- * g_pending_*_prefix globals.  When the enclosing include_stmt action
- * fires, it consumes the pending values (taking ownership of the
- * strings) and resets them for the next include.
+ * attribute actions know to stash their argument into the matching slot
+ * of g_pending_prefixes.  When the enclosing include_stmt action fires,
+ * it consumes the pending set and resets it for the next include.
  *
  * The depth counter handles only the direct body — nested include
  * statements are not legal inside an include body, so the counter
  * never legitimately exceeds 1.  We still use a counter rather than a
  * boolean so an accidentally-nested include doesn't corrupt the outer
  * include's pending state. */
-static int   g_in_include_depth        = 0;
-static char *g_pending_task_prefix     = NULL;
-static char *g_pending_resource_prefix = NULL;
-static char *g_pending_account_prefix  = NULL;
-static char *g_pending_report_prefix   = NULL;
+static int        g_in_include_depth = 0;
+static prefix_set g_pending_prefixes;
 
-static void set_pending_prefix(char **slot, char *value) {
+static void set_pending_prefix(prefix_kind kind, char *value) {
     if (g_in_include_depth > 0) {
-        free(*slot);
-        *slot = value;     /* take ownership */
+        free(g_pending_prefixes.by_kind[kind]);
+        g_pending_prefixes.by_kind[kind] = value;  /* take ownership */
     } else {
         free(value);       /* dropped: appearing outside an include body */
     }
@@ -100,10 +93,7 @@ static void set_pending_prefix(char **slot, char *value) {
  * include-body parse from a previous run cannot leak pending state. */
 void reset_pending_include_state(void) {
     g_in_include_depth = 0;
-    free(g_pending_task_prefix);     g_pending_task_prefix     = NULL;
-    free(g_pending_resource_prefix); g_pending_resource_prefix = NULL;
-    free(g_pending_account_prefix);  g_pending_account_prefix  = NULL;
-    free(g_pending_report_prefix);   g_pending_report_prefix   = NULL;
+    prefix_set_clear(&g_pending_prefixes);
 }
 
 /* ── Top-level declaration routing ──────────────────────────────────────── *
@@ -588,16 +578,16 @@ plain_stmt
     | ident_kw TK_IDENT
     /* Syntax: taskprefix <task ID> — captured for the enclosing include    */
     | KW_TASKPREFIX prefix_path_id
-        { set_pending_prefix(&g_pending_task_prefix, $2); }
+        { set_pending_prefix(PREFIX_TASK, $2); }
     /* Syntax: resourceprefix <resource ID>                                 */
     | KW_RESOURCEPREFIX prefix_path_id
-        { set_pending_prefix(&g_pending_resource_prefix, $2); }
+        { set_pending_prefix(PREFIX_RESOURCE, $2); }
     /* Syntax: accountprefix <account ID>                                   */
     | KW_ACCOUNTPREFIX prefix_path_id
-        { set_pending_prefix(&g_pending_account_prefix, $2); }
+        { set_pending_prefix(PREFIX_ACCOUNT, $2); }
     /* Syntax: reportprefix <report ID>                                     */
     | KW_REPORTPREFIX prefix_path_id
-        { set_pending_prefix(&g_pending_report_prefix, $2); }
+        { set_pending_prefix(PREFIX_REPORT, $2); }
     /* Syntax: taskroot (<ABSOLUTE_ID> | <ID>)                              */
     | KW_TASKROOT dotted_id
     /* Syntax: balance (<cost account> <ID> | -)                            */
@@ -1054,23 +1044,16 @@ macro_stmt
  * The mid-rule action bumps g_in_include_depth before opt_body fires so
  * that any KW_TASKPREFIX / KW_RESOURCEPREFIX / KW_ACCOUNTPREFIX /
  * KW_REPORTPREFIX attribute inside the body stashes its value into the
- * matching g_pending_*_prefix global.  The trailing action then consumes
- * those globals into an IncludeRef and resets them. */
+ * matching slot of g_pending_prefixes.  The trailing action then
+ * consumes the set into an IncludeRef and resets it. */
 include_stmt
     : KW_INCLUDE string_val
         { g_in_include_depth++; }
       opt_body
         {
             g_in_include_depth--;
-            push_include(g_output, $2.text,
-                         g_pending_task_prefix,
-                         g_pending_resource_prefix,
-                         g_pending_account_prefix,
-                         g_pending_report_prefix);
-            free(g_pending_task_prefix);     g_pending_task_prefix     = NULL;
-            free(g_pending_resource_prefix); g_pending_resource_prefix = NULL;
-            free(g_pending_account_prefix);  g_pending_account_prefix  = NULL;
-            free(g_pending_report_prefix);   g_pending_report_prefix   = NULL;
+            push_include(g_output, $2.text, &g_pending_prefixes);
+            prefix_set_clear(&g_pending_prefixes);
             discard_body(&$4);
         }
     ;

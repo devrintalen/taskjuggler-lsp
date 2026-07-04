@@ -160,10 +160,7 @@ void docsnap_sem_tokens(doc_snapshot *s, const uint32_t **out_data, size_t *out_
  *  of the project it belongs to. */
 typedef struct ws_doc {
     doc_snapshot *snap;            /**< ref'd; +1 held by the owning workspace_snapshot */
-    char        *task_prefix;     /**< owned; may be NULL */
-    char        *account_prefix;  /**< owned; may be NULL */
-    char        *report_prefix;   /**< owned; may be NULL */
-    char        *resource_prefix; /**< owned; may be NULL */
+    prefix_set   prefixes;        /**< owned per-kind include prefixes */
     int          project_index;   /**< index into workspace_snapshot.projects, or -1 */
     int          disk_only;       /**< 1 for a background (non-editor) document */
 } ws_doc;
@@ -242,10 +239,7 @@ void ws_release(workspace_snapshot *ws);
 typedef struct query_doc {
     const char  *uri;             /**< borrowed canonical file:// URI */
     const char  *text;            /**< borrowed source text */
-    const char  *task_prefix;     /**< borrowed; may be NULL */
-    const char  *account_prefix;  /**< borrowed; may be NULL */
-    const char  *report_prefix;   /**< borrowed; may be NULL */
-    const char  *resource_prefix; /**< borrowed; may be NULL */
+    const prefix_set *prefixes;   /**< borrowed from the ws_doc; may be NULL */
 
     tj_node     *root;            /**< borrowed from snap */
     TokenSpan   *tok_spans;       /**< borrowed from snap */

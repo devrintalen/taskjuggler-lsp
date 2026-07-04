@@ -160,10 +160,7 @@ void ws_release(workspace_snapshot *ws) {
 
     for (int i = 0; i < ws->num_docs; i++) {
         docsnap_release(ws->docs[i].snap);
-        free(ws->docs[i].task_prefix);
-        free(ws->docs[i].account_prefix);
-        free(ws->docs[i].report_prefix);
-        free(ws->docs[i].resource_prefix);
+        prefix_set_clear(&ws->docs[i].prefixes);
     }
     free(ws->docs);
 
