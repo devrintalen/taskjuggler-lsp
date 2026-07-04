@@ -396,7 +396,9 @@ yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
 }
 
 yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
-                                 yyjson_val *params, const query_doc *d) {
+                                 yyjson_val *params, const query_context *qc,
+                                 const query_doc *d) {
+    (void)qc;
     (void)params;
     if (!d || !d->root) return make_response(doc, id, yyjson_mut_null(doc));
 

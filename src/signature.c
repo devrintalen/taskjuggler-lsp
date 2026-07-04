@@ -352,7 +352,9 @@ yyjson_mut_val *build_signature_help_json(yyjson_mut_doc *doc, const char *kw,
 }
 
 yyjson_mut_val *handle_signature_help(yyjson_mut_doc *doc, yyjson_val *id,
-                                      yyjson_val *params, const query_doc *d) {
+                                      yyjson_val *params, const query_context *qc,
+                                      const query_doc *d) {
+    (void)qc;
     if (!params) return make_response(doc, id, yyjson_mut_null(doc));
 
     yyjson_val *tdp = yyjson_obj_get(params, "textDocumentPosition");

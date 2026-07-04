@@ -61,22 +61,104 @@
 #include <string.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   Notification dispatch
+   Method table
+
+   One row per JSON-RPC method the server understands.  A method is either a
+   state-mutating notification (runs on the coordinator under docs_mutex), an
+   inline request (answered on the coordinator under docs_mutex), or a query
+   (served by a worker from a pinned snapshot).  Adding an LSP feature means
+   adding one row here plus the feature's handler module.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/** Return non-zero when @p method is a JSON-RPC notification (i.e. a
- *  state-mutating lifecycle method that carries no id).
- *  @param method  JSON-RPC method string from the incoming message.
- *  @return        Non-zero if @p method is a notification, zero otherwise. */
-static int is_notification_method(const char *method) {
-    if (!method) return 0;
-    return strcmp(method, "initialized") == 0
-        || strcmp(method, "textDocument/didOpen") == 0
-        || strcmp(method, "textDocument/didChange") == 0
-        || strcmp(method, "textDocument/didClose") == 0
-        || strcmp(method, "workspace/didChangeWatchedFiles") == 0
-        || strcmp(method, "workspace/didRenameFiles") == 0;
+/** How a method is executed; see the method-table comment above. */
+typedef enum {
+    METHOD_NOTIFICATION,  /**< no id; mutates the live store on the coordinator */
+    METHOD_INLINE,        /**< request answered inline on the coordinator */
+    METHOD_QUERY,         /**< request served by a worker from a pinned snapshot */
+} method_kind;
+
+/** Uniform query/inline handler signature.  Inline handlers receive
+ *  qc == NULL and d == NULL (they run against the live store instead). */
+typedef yyjson_mut_val *(*query_handler_fn)(yyjson_mut_doc *doc, yyjson_val *id,
+                                            yyjson_val *params,
+                                            const query_context *qc,
+                                            const query_doc *d);
+
+/** Notification handler signature. */
+typedef void (*notification_handler_fn)(yyjson_val *params);
+
+/** One JSON-RPC method the server understands. */
+typedef struct {
+    const char             *method;        /**< JSON-RPC method string */
+    method_kind             kind;          /**< execution class */
+    query_handler_fn        query;         /**< METHOD_INLINE / METHOD_QUERY handler */
+    notification_handler_fn notify;        /**< METHOD_NOTIFICATION handler */
+    int                     want_all_docs; /**< METHOD_QUERY: context spans every doc */
+} method_entry;
+
+/* handle_initialized takes no params; adapt it to the table signature. */
+static void notify_initialized(yyjson_val *params) {
+    (void)params;
+    handle_initialized();
 }
+
+/* initialize / shutdown have lifecycle-shaped signatures (no query context);
+ * adapt them to the uniform handler signature for the table. */
+static yyjson_mut_val *inline_initialize(yyjson_mut_doc *doc, yyjson_val *id,
+                                         yyjson_val *params,
+                                         const query_context *qc,
+                                         const query_doc *d) {
+    (void)qc; (void)d;
+    return handle_initialize(doc, id, params);
+}
+
+static yyjson_mut_val *inline_shutdown(yyjson_mut_doc *doc, yyjson_val *id,
+                                       yyjson_val *params,
+                                       const query_context *qc,
+                                       const query_doc *d) {
+    (void)params; (void)qc; (void)d;
+    return handle_shutdown(doc, id);
+}
+
+static const method_entry methods[] = {
+    { "initialized",                     METHOD_NOTIFICATION, .notify = notify_initialized },
+    { "textDocument/didOpen",            METHOD_NOTIFICATION, .notify = handle_didopen },
+    { "textDocument/didChange",          METHOD_NOTIFICATION, .notify = handle_didchange },
+    { "textDocument/didClose",           METHOD_NOTIFICATION, .notify = handle_didclose },
+    { "workspace/didChangeWatchedFiles", METHOD_NOTIFICATION, .notify = handle_did_change_watched_files },
+    { "workspace/didRenameFiles",        METHOD_NOTIFICATION, .notify = handle_did_rename_files },
+
+    { "initialize", METHOD_INLINE, .query = inline_initialize },
+    { "shutdown",   METHOD_INLINE, .query = inline_shutdown },
+
+    { "textDocument/documentSymbol",              METHOD_QUERY, .query = handle_document_symbol },
+    { "textDocument/foldingRange",                METHOD_QUERY, .query = handle_folding_range },
+    { "textDocument/codeLens",                    METHOD_QUERY, .query = handle_code_lens },
+    { "textDocument/hover",                       METHOD_QUERY, .query = handle_hover },
+    { "textDocument/signatureHelp",               METHOD_QUERY, .query = handle_signature_help },
+    { "textDocument/references",                  METHOD_QUERY, .query = handle_references },
+    { "textDocument/documentHighlight",           METHOD_QUERY, .query = handle_document_highlight },
+    { "textDocument/definition",                  METHOD_QUERY, .query = handle_definition },
+    { "textDocument/completion",                  METHOD_QUERY, .query = handle_completion },
+    { "textDocument/semanticTokens/full",         METHOD_QUERY, .query = handle_semantic_tokens_full },
+    { "textDocument/semanticTokens/full/delta",   METHOD_QUERY, .query = handle_semantic_tokens_full_delta },
+    { "workspace/symbol",                         METHOD_QUERY, .query = handle_workspace_symbol,
+                                                  .want_all_docs = 1 },
+};
+
+/** Look up @p m in the method table.
+ *  @param m  JSON-RPC method string; may be empty.
+ *  @return   The matching entry, or NULL for unknown methods. */
+static const method_entry *method_lookup(const char *m) {
+    for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); i++)
+        if (strcmp(methods[i].method, m) == 0)
+            return &methods[i];
+    return NULL;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Notification dispatch
+   ═══════════════════════════════════════════════════════════════════════════ */
 
 /** Serialize @p resp as the root of @p out_doc and send it to the client
  *  via lsp_send_message().
@@ -97,22 +179,11 @@ void server_dispatch_notification(Job *job) {
     yyjson_val *params  = yyjson_obj_get(root, "params");
     const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
 
+    const method_entry *entry = method_lookup(m);
+
     pthread_mutex_lock(&docs_mutex);
-
-    if (strcmp(m, "initialized") == 0) {
-        handle_initialized();
-    } else if (strcmp(m, "textDocument/didOpen") == 0) {
-        handle_didopen(params);
-    } else if (strcmp(m, "textDocument/didChange") == 0) {
-        handle_didchange(params);
-    } else if (strcmp(m, "textDocument/didClose") == 0) {
-        handle_didclose(params);
-    } else if (strcmp(m, "workspace/didChangeWatchedFiles") == 0) {
-        handle_did_change_watched_files(params);
-    } else if (strcmp(m, "workspace/didRenameFiles") == 0) {
-        handle_did_rename_files(params);
-    }
-
+    if (entry && entry->kind == METHOD_NOTIFICATION)
+        entry->notify(params);
     pthread_mutex_unlock(&docs_mutex);
 }
 
@@ -245,16 +316,6 @@ static query_context *build_query_context_locked(const char *primary_uri,
     return qc;
 }
 
-/** Return non-zero when @p m is a method that must be handled inline on the
- *  coordinator thread rather than dispatched to a worker.  Currently only
- *  "initialize" and "shutdown" qualify.
- *  @param m  JSON-RPC method string.
- *  @return   Non-zero for inline methods, zero for worker-dispatched ones. */
-static int is_inline_query_method(const char *m) {
-    return strcmp(m, "initialize") == 0
-        || strcmp(m, "shutdown") == 0;
-}
-
 int server_coordinate_query(Job *job) {
     yyjson_val *root    = yyjson_doc_get_root(job->request_doc);
     yyjson_val *id_item = yyjson_obj_get(root, "id");
@@ -262,16 +323,13 @@ int server_coordinate_query(Job *job) {
     yyjson_val *params  = yyjson_obj_get(root, "params");
     const char *m = (method && yyjson_is_str(method)) ? yyjson_get_str(method) : "";
 
-    if (is_inline_query_method(m)) {
+    const method_entry *entry = method_lookup(m);
+
+    if (entry && entry->kind == METHOD_INLINE) {
         yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
-        yyjson_mut_val *resp = NULL;
 
         pthread_mutex_lock(&docs_mutex);
-        if (strcmp(m, "initialize") == 0) {
-            resp = handle_initialize(out_doc, id_item, params);
-        } else {
-            resp = handle_shutdown(out_doc, id_item);
-        }
+        yyjson_mut_val *resp = entry->query(out_doc, id_item, params, NULL, NULL);
         pthread_mutex_unlock(&docs_mutex);
 
         if (resp) send_response(out_doc, resp);
@@ -281,11 +339,10 @@ int server_coordinate_query(Job *job) {
 
     /* Every other query is served from a pinned snapshot.  Build the context
      * under the lock and let the coordinator hand the Job to the worker pool. */
-    int want_all_docs = (strcmp(m, "workspace/symbol") == 0);
-
     pthread_mutex_lock(&docs_mutex);
     const char *primary_uri = request_primary_uri(params);
-    job->context = build_query_context_locked(primary_uri, want_all_docs);
+    job->context = build_query_context_locked(primary_uri,
+                                              entry && entry->want_all_docs);
     pthread_mutex_unlock(&docs_mutex);
 
     return 0;   /* ownership transferred to the worker pool */
@@ -304,31 +361,11 @@ void server_run_query(Job *job) {
     yyjson_mut_doc *out_doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *resp = NULL;
 
-    if (strcmp(m, "textDocument/documentSymbol") == 0) {
-        resp = handle_document_symbol(out_doc, id_item, params, d);
-    } else if (strcmp(m, "textDocument/foldingRange") == 0) {
-        resp = handle_folding_range(out_doc, id_item, params, d);
-    } else if (strcmp(m, "textDocument/codeLens") == 0) {
-        resp = handle_code_lens(out_doc, id_item, params, d);
-    } else if (strcmp(m, "textDocument/hover") == 0) {
-        resp = handle_hover(out_doc, id_item, params, qc, d);
-    } else if (strcmp(m, "textDocument/signatureHelp") == 0) {
-        resp = handle_signature_help(out_doc, id_item, params, d);
-    } else if (strcmp(m, "textDocument/references") == 0) {
-        resp = handle_references(out_doc, id_item, params, qc, d);
-    } else if (strcmp(m, "textDocument/documentHighlight") == 0) {
-        resp = handle_document_highlight(out_doc, id_item, params, qc, d);
-    } else if (strcmp(m, "textDocument/definition") == 0) {
-        resp = handle_definition(out_doc, id_item, params, qc, d);
-    } else if (strcmp(m, "textDocument/completion") == 0) {
-        resp = handle_completion(out_doc, id_item, params, qc, d);
-    } else if (strcmp(m, "textDocument/semanticTokens/full") == 0) {
-        resp = handle_semantic_tokens_full(out_doc, id_item, params, d);
-    } else if (strcmp(m, "textDocument/semanticTokens/full/delta") == 0) {
-        resp = handle_semantic_tokens_full_delta(out_doc, id_item, params, qc, d);
-    } else if (strcmp(m, "workspace/symbol") == 0) {
-        resp = handle_workspace_symbol(out_doc, id_item, params, qc);
+    const method_entry *entry = method_lookup(m);
+    if (entry && entry->kind == METHOD_QUERY) {
+        resp = entry->query(out_doc, id_item, params, qc, d);
     } else if (id_item) {
+        /* Unknown request method: reply with a null result. */
         resp = make_response(out_doc, id_item, yyjson_mut_null(out_doc));
     }
 
@@ -377,7 +414,8 @@ void server_process(const char *json_text) {
         job->id     = yyjson_get_sint(id_item);
     }
 
-    job->is_notification = is_notification_method(m);
+    const method_entry *entry = method_lookup(m);
+    job->is_notification = entry && entry->kind == METHOD_NOTIFICATION;
     threadpool_enqueue_job(job);
 }
 

@@ -241,7 +241,10 @@ dispatch"). When adding a feature,
 follow the same pattern: a header declaring a `build_*_json()` entry
 point that returns a `yyjson_mut_val *`, a corresponding `.c` with the
 implementation, a new entry in `Makefile.am`'s `server_sources` list, and a
-`handle_*` dispatch arm in `server.c`.
+row in the `methods[]` table in `server.c`. All query handlers share
+one signature (`doc, id, params, qc, d`); handlers that don't need the
+query context or primary document take the parameter anyway and ignore
+it.
 
 ## Test harness
 

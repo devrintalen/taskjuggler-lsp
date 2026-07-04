@@ -67,8 +67,10 @@ yyjson_mut_val *build_code_lens_json(yyjson_mut_doc *doc,
  * @param doc     Mutable document for building the response.
  * @param id      Request id from the incoming JSON-RPC message.
  * @param params  Request params (unused).
+ * @param qc      Query context (unused; present for dispatch symmetry).
  * @param d       Primary query document; may be NULL.
  * @return JSON-RPC response containing the code-lens array.
  */
 yyjson_mut_val *handle_code_lens(yyjson_mut_doc *doc, yyjson_val *id,
-                                 yyjson_val *params, const query_doc *d);
+                                 yyjson_val *params, const query_context *qc,
+                                 const query_doc *d);

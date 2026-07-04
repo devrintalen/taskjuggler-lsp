@@ -91,8 +91,10 @@ char *build_document_symbols_json(tj_node *const *syms, int n, size_t *out_len);
  * @param doc     Mutable document for building the response.
  * @param id      Request id from the incoming JSON-RPC message.
  * @param params  Request params (unused; present for dispatch symmetry).
+ * @param qc      Query context (unused; present for dispatch symmetry).
  * @param d       Primary query document; may be NULL.
  * @return JSON-RPC response containing the symbol array.
  */
 yyjson_mut_val *handle_document_symbol(yyjson_mut_doc *doc, yyjson_val *id,
-                                       yyjson_val *params, const query_doc *d);
+                                       yyjson_val *params, const query_context *qc,
+                                       const query_doc *d);
