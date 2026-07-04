@@ -117,15 +117,14 @@ static int output_has_project(void) {
     return 0;
 }
 
-/* Append @p node to the document root, or free it when it cannot be
- * admitted (no output, or a duplicate project block). */
+/* Append @p node to the document root, or drop it when it cannot be
+ * admitted (no output, or a duplicate project block).  Dropped nodes are
+ * simply abandoned in the parse arena. */
 static void route_top_level(tj_node *node) {
     if (!node) return;
     if (!g_output || !g_output->root ||
-        (node->keyword == KW_PROJECT && output_has_project())) {
-        tj_node_free(node);
+        (node->keyword == KW_PROJECT && output_has_project()))
         return;
-    }
     tj_node_append_child(g_output->root, node);
 }
 
@@ -160,12 +159,16 @@ static tj_node *sym_stack_top(void) {
 
 /* ── tj_node array helper ──────────────────────────────────────────────── */
 
+/* Body child arrays live in the parse's token arena like the nodes they
+ * hold: growth allocates a doubled arena copy and abandons the old block,
+ * so a discarded body needs no cleanup at all. */
 static void symarr_push(SymArr *a, tj_node *s) {
     if (a->n >= a->cap) {
         a->cap = a->cap ? a->cap * 2 : 4;
-        tj_node **tmp = realloc(a->arr, (size_t)a->cap * sizeof(tj_node *));
-        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        a->arr = tmp;
+        tj_node **grown = arena_alloc(g_tok_arena,
+                                      (size_t)a->cap * sizeof(tj_node *));
+        memcpy(grown, a->arr, (size_t)a->n * sizeof(tj_node *));
+        a->arr = grown;
     }
     a->arr[a->n++] = s;
 }
@@ -176,15 +179,14 @@ static void symarr_push(SymArr *a, tj_node *s) {
  * selection_range).  Body fields (range.end, children) are filled in
  * later by finish_tj_node().                                              */
 static tj_node *alloc_tj_node(Token kw, Token id, Token name) {
-    tj_node *s = calloc(1, sizeof(tj_node));
-    if (!s) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
+    tj_node *s = tj_node_new();   /* arena-owned, like the whole tree */
     s->keyword = kw.kind;
 
     /* id / name borrow the token lexeme straight from the parse's token arena
      * (emit_* interned it there).  The arena travels with this tj_node tree
      * into the doc_snapshot and is freed in bulk only after the tree, so these
      * pointers stay valid for the node's whole life and are never freed
-     * individually (see tj_node_free).  The default name reuses the id pointer. */
+     * individually.  The default name reuses the id pointer. */
     if (id.text) {
         s->id              = id.text;
         s->selection_range = (LspRange){ id.start, id.end };
@@ -208,7 +210,7 @@ static void finish_tj_node(tj_node *s, Token kw, BodyResult body) {
         range_end = kw.end;
     s->range.end = range_end;
 
-    /* Take ownership of the body's children, wiring up parent pointers. */
+    /* Adopt the body's arena-backed children array, wiring up parents. */
     s->children     = body.syms.arr;
     s->num_children = body.syms.n;
     s->children_cap = body.syms.cap;
@@ -216,13 +218,6 @@ static void finish_tj_node(tj_node *s, Token kw, BodyResult body) {
         s->children[i]->parent_node = s;
 }
 
-/* Free a transient body's collected children.  Used by every rule whose
- * opt_body content is discarded (e.g. dailymax dur_val opt_body). */
-static void discard_body(BodyResult *b) {
-    for (int i = 0; i < b->syms.n; i++)
-        tj_node_free(b->syms.arr[i]);
-    free(b->syms.arr);
-}
 %}
 
 /* ── Value union ─────────────────────────────────────────────────────────── */
@@ -240,27 +235,12 @@ static void discard_body(BodyResult *b) {
 /* ── Discarded-symbol destructors ────────────────────────────────────────── *
  *
  * On a syntax error bison pops symbols off its stack during error
- * recovery; without destructors any heap-allocated value still on the
- * stack leaks.  These free a fully-reduced declaration node (or item
- * wrapper, or joined identifier string) that recovery discards before a
- * parent rule consumes it.  They run only on discarded symbols or those
- * left on the stack at parse end, never on values a successful reduction
- * already consumed, so they cannot double-free a node that reached the
- * tree.
- *
- * <tok> values need no destructor: a token's lexeme (.text) points into
- * the parse's token arena, interned once by g_push_tok_span and reclaimed
- * in bulk with the arena — the token never owns it.  Rules that must keep
- * a lexeme past the parse (a tj_node id/name, a prefix_path_id segment)
- * strdup it or let the tree borrow the arena pointer; everything else
- * simply drops it.
- *
- * Note: bison does NOT invoke these for mid-rule action values, so a
- * node allocated in a mid-rule action and then orphaned by a later parse
- * failure would still leak — which is why symbol_decl allocates the
- * project node in its final action rather than a mid-rule one. */
-%destructor { tj_node_free($$); }                       <sym>
-%destructor { if ($$.has_sym) tj_node_free($$.sym); }   <item>
+ * recovery; a destructor reclaims any heap-allocated value still on the
+ * stack.  Almost nothing here needs one: tj_nodes, their arrays, and
+ * every token lexeme live in the parse's token arena and are reclaimed in
+ * bulk with it, so a discarded <sym> / <item> / <body> / <tok> value is
+ * simply abandoned.  The single exception is <text> (prefix_path_id),
+ * whose joined dotted string is heap-allocated for the include capture. */
 %destructor { free($$); }                               <text>
 
 /* ── Remaining conflicts ─────────────────────────────────────────────────── *
@@ -564,7 +544,6 @@ plain_stmt
      * The optional body accepts: resources <id> [, <id>...] and
      * scenario-specific attributes.                                        */
     | durlimit_kw dur_val opt_body
-        { discard_body(&$3); }
 
     /* ── String attributes ── */
     /* Syntax: (note | email | title | header | …) <STRING>                 */
@@ -620,7 +599,6 @@ plain_stmt
     | KW_ALLOCATE alloc_ref_list
     /* Syntax: booking <resource> <interval4> [, <interval4>...] [{ <attrs> }] */
     | KW_BOOKING TK_IDENT booking_interval_list opt_body
-        { discard_body(&$4); }
     /* Syntax: shift <shift> [<interval2>] [, <shift> [<interval2>] ...]
      * (attribute form inside resource/task; differs from the shift declaration) */
     | KW_SHIFT shift_attr_list
@@ -628,10 +606,8 @@ plain_stmt
     | KW_SHIFTS shift_attr_list
     /* Syntax: limits [{ <attributes> }]                                    */
     | KW_LIMITS opt_body
-        { discard_body(&$2); }
     /* Syntax: projection [{ <attributes> }]                                */
     | KW_PROJECTION opt_body
-        { discard_body(&$2); }
 
     /* ── Account/charge attributes ── */
     /* Syntax: chargeset <account> <share%> [, <account> <share%> ...]      */
@@ -659,7 +635,6 @@ plain_stmt
      * status/newtask (timesheet bodies) and the extend-field declarations
      * (date/number/reference/richtext/text) all share this shape.          */
     | ident_string_body_kw TK_IDENT string_val opt_body
-        { discard_body(&$4); }
 
     /* ── Format specifiers ── */
     /* Syntax: (numberformat | currencyformat)
@@ -685,7 +660,6 @@ plain_stmt
      * due to ':' being allowed in identifier characters).
      * Also handles any future keywords not yet in the KW_* token set.      */
     | TK_IDENT opt_args opt_body
-        { discard_body(&$3); }
     ;
 
 /* ── Attribute keyword classes ───────────────────────────────────────────── *
@@ -827,13 +801,12 @@ symbol_decl
                 tj_node *child = $6.syms.arr[i];
                 if (child->keyword == KW_PROJECT) {
                     /* Nested `project` inside a project block is malformed;
-                     * drop it rather than corrupt the tree. */
-                    tj_node_free(child);
+                     * drop it (abandoned in the arena) rather than corrupt
+                     * the tree. */
                     continue;
                 }
                 route_top_level(child);
             }
-            free($6.syms.arr);
             /* TODO: store interval $5 as the project time range */
         }
     | sym_kw opt_id string_val
@@ -1001,7 +974,6 @@ journalentry_decl
  *   richtext.extend, text.extend                                            */
 extend_stmt
     : KW_EXTEND extend_target opt_body
-        { discard_body(&$3); }
     ;
 
 extend_target
@@ -1017,7 +989,6 @@ extend_target
  * Note: 'report' is not a keyword token, so it is handled as TK_IDENT.    */
 supplement_stmt
     : KW_SUPPLEMENT supplement_target dotted_id opt_body
-        { discard_body(&$4); }
     ;
 
 supplement_target
@@ -1054,7 +1025,6 @@ include_stmt
             g_in_include_depth--;
             push_include(g_output, $2.text, &g_pending_prefixes);
             prefix_set_clear(&g_pending_prefixes);
-            discard_body(&$4);
         }
     ;
 
@@ -1205,8 +1175,8 @@ dep_path
     : dep_path_seg
         /* A single segment's lexeme already lives in the token arena, so the
          * path just borrows it — no copy.  Multi-segment paths (below) are
-         * built into the same arena.  Either way tj_node_free never frees a
-         * dep path; the arena reclaims it with the rest of the tree. */
+         * built into the same arena, which reclaims every dep path with the
+         * rest of the tree. */
         { $$.bang_count = 0; $$.path = $1.text;
           $$.start = $1.start; $$.end = $1.end; }
     | dep_path TK_DOT dep_path_seg
@@ -1234,10 +1204,8 @@ task_ref
 dep_ref
     : task_ref opt_body
         {
-            /* Body attributes (gaplength / gapduration) are still
-             * discarded — captured only when a consumer needs them. */
-            discard_body(&$2);
-
+            /* Body attributes (gaplength / gapduration) are not captured —
+             * the body's nodes are simply left behind in the arena. */
             tj_node *task = sym_stack_top();
             if (task) {
                 Dependency dep = {
@@ -1267,7 +1235,6 @@ dep_ref_list
  *   shift.allocate, shifts.allocate                                        */
 alloc_ref
     : TK_IDENT opt_body
-        { discard_body(&$2); }
     ;
 
 /* ── alloc_ref_list: comma-separated allocation references ─────────────── */
@@ -1342,7 +1309,6 @@ column_id
  *   tooltip, width                                                          */
 column_entry
     : column_id opt_body
-        { discard_body(&$2); }
     ;
 
 /* ── column_list: comma-separated column specifications ─────────────────── */

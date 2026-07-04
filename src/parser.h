@@ -86,11 +86,13 @@ typedef struct {
  * declarations), or project.  The node kind is encoded by the `keyword`
  * field — a raw KW_* / TK_* constant from grammar.tab.h.
  *
- * Memory ownership: Documents own every tj_node they parse.  When this
- * Document is freed, the entire owned subtree is freed.  Per-Document
- * tj_node trees are immutable after parse — cross-Document hoisting
- * lives in a wholly separate global tree built by server.c, not on
- * these nodes.
+ * Memory ownership: every tj_node, its children / dependencies arrays,
+ * and the strings they borrow all live in the parse's token arena, which
+ * travels into the owning doc_snapshot.  Nothing is freed per node — the
+ * whole tree is reclaimed when the snapshot releases the arena.
+ * Per-document tj_node trees are immutable after parse — cross-document
+ * hoisting lives in a wholly separate per-project tree (project_tree.h),
+ * not on these nodes.
  */
 typedef struct tj_node tj_node;
 
@@ -108,9 +110,10 @@ typedef enum {
  * resolution runs against the assembled per-Project ProjectNode tree
  * and is memoized there (ProjectDep.resolved, see project_tree.h).
  *
- * Memory ownership: the enclosing tj_node owns the `dependencies` array;
- * `path` borrows the parse's token arena (built by the dep_path rule) and
- * is reclaimed in bulk with it, never freed per dependency.
+ * Memory ownership: the `dependencies` array and `path` both live in the
+ * parse's token arena (the array via tj_node_push_dependency, the path via
+ * the dep_path rule) and are reclaimed in bulk with it, never freed per
+ * dependency.
  */
 typedef struct Dependency {
     DepKind   kind;             /**< whether this dep is `depends` or `precedes` */
@@ -128,11 +131,11 @@ typedef struct Dependency {
  * folding, and dependency resolution — handlers branch on `keyword`
  * when they need to distinguish kinds.
  *
- * Memory: `dependencies`, `children`, and every transitively reachable
- * child node are owned by the tj_node and freed by tj_node_free().
- * `id` and `name` instead borrow the parse's token arena (which outlives
- * the tree within the same doc_snapshot), so they are not freed per node.
- * The cross-tree `parent_node` pointer is borrowed and never freed here.
+ * Memory: the node itself, `dependencies`, `children`, every reachable
+ * child node, and the `id` / `name` lexemes all live in the parse's token
+ * arena and are reclaimed with it when the owning doc_snapshot is
+ * released; nothing is freed per node.  The cross-tree `parent_node`
+ * pointer is borrowed.
  */
 struct tj_node {
     /* ── Identity ── */
@@ -154,8 +157,8 @@ struct tj_node {
      *
      * Captured at parse time from `depends` / `precedes` attributes,
      * one entry per dep_ref in source order.  Empty on tasks that
-     * declare no dependencies and on every non-task node.  Owned by
-     * this node; freed by tj_node_free(). */
+     * declare no dependencies and on every non-task node.  Arena-owned,
+     * reclaimed with the parse's token arena. */
     Dependency *dependencies;     /**< owned array; @see num_dependencies */
     int         num_dependencies; /**< number of valid entries in `dependencies` */
     int         dependencies_cap; /**< allocated capacity of `dependencies` */
@@ -171,7 +174,7 @@ struct tj_node {
      *                  NULL on the document's synthetic root.
      *
      * children       — locally declared children in source order.
-     *                  Owned by this node; freed by tj_node_free().
+     *                  Arena-owned, reclaimed with the token arena.
      */
     tj_node   *parent_node;  /**< borrowed; see comment above */
     tj_node  **children;     /**< owned array; @see num_children */
@@ -180,27 +183,28 @@ struct tj_node {
 };
 
 /**
- * Recursively free a tj_node subtree.  Frees the node's own strings, its
- * children (recursively, via the owned `children` array), and the node
- * itself.  Does NOT walk `parent_node` upward.
+ * Allocate a zeroed tj_node from the current parse's token arena.  Only
+ * valid during a parse (the arena exists between install and harvest of
+ * the parser globals); the node is reclaimed with the arena.
  *
- * @param n  Root of the subtree to free.  Safe to call with NULL.
+ * @return Arena-owned zeroed node; never NULL (aborts on OOM).
  */
-void tj_node_free(tj_node *n);
+tj_node *tj_node_new(void);
 
 /**
  * Append @p child as a locally declared child of @p parent (growing the
- * `children` array as needed) and set @p child's `parent_node` to @p parent.
+ * arena-backed `children` array as needed) and set @p child's
+ * `parent_node` to @p parent.
  *
  * @param parent  Owning node.
- * @param child   Child to attach (transfer of ownership).
+ * @param child   Child to attach.
  */
 void tj_node_append_child(tj_node *parent, tj_node *child);
 
 /**
- * Append a captured dependency reference onto @p task's `dependencies`
- * array, growing it as needed.  Takes ownership of @p dep.path.
- * `resolved_target` is initialized to NULL.
+ * Append a captured dependency reference onto @p task's arena-backed
+ * `dependencies` array, growing it as needed.  @p dep.path is arena-owned
+ * and simply recorded.
  *
  * @param task  Task tj_node (caller guarantees keyword == KW_TASK).
  * @param dep   Source-position-bearing Dependency whose `path` is heap-owned.

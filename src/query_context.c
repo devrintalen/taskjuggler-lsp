@@ -67,10 +67,10 @@ void docsnap_release(doc_snapshot *s) {
     if (atomic_fetch_sub_explicit(&s->refcount, 1, memory_order_acq_rel) != 1)
         return;
 
-    tj_node_free(s->root);
-    /* Token lexemes live in tok_arena, freed as a few blocks rather than one
-     * free() per captured token.  The span buffer is recycled (its pages stay
-     * mapped for the next parse) rather than free()'d. */
+    /* The tj_node tree and every token lexeme live in tok_arena, freed as a
+     * few blocks below rather than one free() per node or token.  The span
+     * buffer is recycled (its pages stay mapped for the next parse) rather
+     * than free()'d. */
     tok_spans_release(s->tok_spans);
     free(s->tok_owners);
     arena_free(s->tok_arena);

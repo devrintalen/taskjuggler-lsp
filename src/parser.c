@@ -206,27 +206,30 @@ int parse_tjp_date(const char *text, time_t *out) {
     return 1;
 }
 
-/* ── tj_node helpers ─────────────────────────────────────────────────────── */
+/* ── tj_node helpers ─────────────────────────────────────────────────────── *
+ *
+ * Every tj_node — and its children / dependencies arrays — lives in the
+ * parse's token arena (g_tok_arena), alongside the lexemes its id / name /
+ * dep paths borrow.  Nothing here is ever freed individually: the whole
+ * tree is reclaimed when the owning doc_snapshot releases the arena.
+ * Growing an array allocates a doubled copy in the arena and abandons the
+ * old block — bounded waste traded for zero per-node free() calls and no
+ * discard bookkeeping on grammar error-recovery paths. */
 
-void tj_node_free(tj_node *n) {
-    if (!n) return;
-    /* id / name and every dependency path are borrowed pointers into the
-     * parse's token arena (set by alloc_tj_node / the dep_path rule), reclaimed
-     * in bulk when that arena is freed — never here.  Only the arrays and the
-     * node struct are individually owned. */
-    free(n->dependencies);
-    for (int i = 0; i < n->num_children; i++)
-        tj_node_free(n->children[i]);
-    free(n->children);
-    free(n);
+tj_node *tj_node_new(void) {
+    tj_node *n = arena_alloc(g_tok_arena, sizeof(tj_node));
+    memset(n, 0, sizeof(*n));
+    return n;
 }
 
 void tj_node_append_child(tj_node *parent, tj_node *child) {
     if (parent->num_children >= parent->children_cap) {
         int nc = parent->children_cap ? parent->children_cap * 2 : 4;
-        tj_node **tmp = realloc(parent->children, (size_t)nc * sizeof(tj_node *));
-        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        parent->children     = tmp;
+        tj_node **grown = arena_alloc(g_tok_arena,
+                                      (size_t)nc * sizeof(tj_node *));
+        memcpy(grown, parent->children,
+               (size_t)parent->num_children * sizeof(tj_node *));
+        parent->children     = grown;
         parent->children_cap = nc;
     }
     parent->children[parent->num_children++] = child;
@@ -236,10 +239,11 @@ void tj_node_append_child(tj_node *parent, tj_node *child) {
 void tj_node_push_dependency(tj_node *task, Dependency dep) {
     if (task->num_dependencies >= task->dependencies_cap) {
         int nc = task->dependencies_cap ? task->dependencies_cap * 2 : 4;
-        Dependency *tmp = realloc(task->dependencies,
-                                  (size_t)nc * sizeof(Dependency));
-        if (!tmp) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-        task->dependencies     = tmp;
+        Dependency *grown = arena_alloc(g_tok_arena,
+                                        (size_t)nc * sizeof(Dependency));
+        memcpy(grown, task->dependencies,
+               (size_t)task->num_dependencies * sizeof(Dependency));
+        task->dependencies     = grown;
         task->dependencies_cap = nc;
     }
     task->dependencies[task->num_dependencies++] = dep;
@@ -247,24 +251,12 @@ void tj_node_push_dependency(tj_node *task, Dependency dep) {
 
 /* ── ParseOutput helpers ─────────────────────────────────────────────────── */
 
-/**
- * Allocate and zero-initialize a synthetic root tj_node used as the
- * invisible container for all top-level declarations produced by a parse.
- *
- * @return Pointer to the newly allocated root node; aborts on allocation failure.
- */
-static tj_node *alloc_synthetic_root(void) {
-    tj_node *n = calloc(1, sizeof(tj_node));
-    if (!n) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    return n;
-}
-
 void parse_output_free(ParseOutput *po) {
     if (!po) return;
-    tj_node_free(po->root);
 
-    /* Token lexemes live in tok_arena, not in individual allocations.  The
-     * span buffer goes back to the recycle slot for the next parse to reuse. */
+    /* The tj_node tree and token lexemes live in tok_arena, not in individual
+     * allocations, so freeing the arena below reclaims both.  The span buffer
+     * goes back to the recycle slot for the next parse to reuse. */
     tok_spans_release(po->tok_spans);
     free(po->tok_owners);
     arena_free(po->tok_arena);
@@ -569,9 +561,11 @@ static void harvest_parse_globals(ParseOutput *po) {
 ParseOutput *parse(const char *src) {
     ParseOutput *po = calloc(1, sizeof(ParseOutput));
     if (!po) { fprintf(stderr, "taskjuggler-lsp: out of memory\n"); exit(1); }
-    po->root = alloc_synthetic_root();
 
     install_parse_globals(po);
+    /* The synthetic root lives in the arena install_parse_globals() just
+     * created, like every node the grammar will hang under it. */
+    po->root = tj_node_new();
 
 #if DEBUG_PARSER >= LOG_VERBOSE
     struct timespec parse_t0, parse_t1, parse_t2;
