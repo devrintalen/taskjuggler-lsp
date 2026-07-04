@@ -20,6 +20,7 @@
 
 #include "tj3.h"
 #include "pathutil.h"
+#include "sandbox.h"
 #include "debug.h"
 
 #include <dirent.h>
@@ -231,14 +232,17 @@ static char *read_fd_to_string(int fd, size_t *out_len) {
  * Fork and exec tj3 with cwd set to @p tmpdir, capturing its stderr
  * output into a heap-allocated string.
  *
- * @param tmpdir Working directory for the tj3 child process.
- * @param argv   NULL-terminated argument vector passed to execvp;
- *               argv[0] must be "tj3".
+ * @param tmpdir  Working directory for the tj3 child process.
+ * @param argv    NULL-terminated argument vector passed to execvp;
+ *                argv[0] must be "tj3".
+ * @param confine When non-zero, restrict the child so it may only write
+ *                beneath @p tmpdir (Landlock); the child aborts rather than
+ *                exec unconfined if the restriction cannot be applied.
  * @return Heap-allocated NUL-terminated string containing the full
  *         stderr output of tj3, owned by the caller; NULL on fork,
  *         pipe, or allocation failure.
  */
-static char *run_tj3(const char *tmpdir, char *const argv[]) {
+static char *run_tj3(const char *tmpdir, char *const argv[], int confine) {
     int errpipe[2];
     if (pipe(errpipe) != 0) return NULL;
 
@@ -266,6 +270,12 @@ static char *run_tj3(const char *tmpdir, char *const argv[]) {
         dup2(errpipe[1], STDERR_FILENO);
         close(errpipe[0]);
         close(errpipe[1]);
+        /* Confine writes to tmpdir before handing control to tj3, so a
+         * malicious report path cannot escape the staging directory.  If the
+         * restriction cannot be applied we abort rather than run unconfined;
+         * the caller only sets confine when it staged a full (report-
+         * generating) run. */
+        if (confine && sandbox_confine_writes_to(tmpdir) != 0) _exit(127);
         execvp("tj3", argv);
         _exit(127);
     }
@@ -550,18 +560,33 @@ void tj3_collect_project(const workspace_snapshot *ws, const ws_project *proj,
 
     stage_members_to_tmpdir(tmpdir, members, nmembers);
 
+    /* Full runs generate reports, whose file paths come from the (untrusted)
+     * project source.  When the kernel can confine the child's writes to
+     * tmpdir we run the real report-generating pass inside that sandbox;
+     * otherwise we fall back to scheduling without reports so no report file
+     * can be written to an arbitrary path. */
+    int confine = 0;
+    const char *mode_label;
     char *argv[4];
     int ai = 0;
     argv[ai++] = "tj3";
-    if (mode == TJ3_SYNTAX_ONLY) argv[ai++] = "--check-syntax";
+    if (mode == TJ3_SYNTAX_ONLY) {
+        argv[ai++] = "--check-syntax";
+        mode_label = "syntax-only";
+    } else if (sandbox_available()) {
+        confine = 1;
+        mode_label = "full (sandboxed)";
+    } else {
+        argv[ai++] = "--no-reports";
+        mode_label = "full (no-reports fallback)";
+    }
     argv[ai++] = root_rel;
     argv[ai]   = NULL;
 
     DLOG(DEBUG_TJ3, LOG_INFO, "collect project '%s': %d members, mode=%s, root=%s",
-         proj->id ? proj->id : "(no-id)", nmembers,
-         mode == TJ3_SYNTAX_ONLY ? "syntax-only" : "full", root_rel);
+         proj->id ? proj->id : "(no-id)", nmembers, mode_label, root_rel);
 
-    char *errbuf = run_tj3(tmpdir, argv);
+    char *errbuf = run_tj3(tmpdir, argv, confine);
     parse_diagnostics(errbuf, tmpdir, real_tmp, members, nmembers, out);
     free(errbuf);
 

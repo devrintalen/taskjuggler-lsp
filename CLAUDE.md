@@ -21,6 +21,11 @@ Generated Doxygen API documentation is published at
 - Bison
 - Python 3 (test harness and benchmark tooling)
 - Valgrind (optional, for callgrind profiling)
+- Linux Landlock (optional, kernel 5.13+): when available, full `tj3`
+  report-generating runs are confined so they can only write beneath
+  their temporary staging directory (`src/sandbox.{c,h}`). Without it,
+  those runs fall back to `tj3 --no-reports`. Non-Linux builds compile
+  the sandbox as a no-op.
 
 ## Common Commands
 

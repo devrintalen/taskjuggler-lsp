@@ -96,6 +96,7 @@ server_sources = \
     src/project_tree.c src/project_tree.h \
     src/query_context.c src/query_context.h \
     src/tj3.c src/tj3.h \
+    src/sandbox.c src/sandbox.h \
     src/diag_worker.c src/diag_worker.h \
     src/version.h
 
