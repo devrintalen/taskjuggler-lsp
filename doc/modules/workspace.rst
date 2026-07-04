@@ -39,8 +39,8 @@ per-file warning so the user sees the problem inline in any
 Document slots
 --------------
 
-The live document store (``docs[]`` in ``server.c``) holds a fixed
-array of ``Document`` slots, each owning:
+The live document store (``docs[]`` in ``document_store.c``) holds a
+fixed array of ``Document`` slots, each owning:
 
 * the canonical ``file://`` URI;
 * the authoritative source text — the editor's working copy while
@@ -119,5 +119,7 @@ its mtime or content changes.
 API reference
 -------------
 
+.. doxygenfile:: workspace.h
+.. doxygenfile:: document_store.h
 .. doxygenfile:: compile_commands.h
 .. doxygenfile:: pathutil.h

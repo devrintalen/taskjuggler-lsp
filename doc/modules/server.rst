@@ -3,9 +3,11 @@ Server core
 
 ``server.c`` is the request-routing layer that sits between the
 JSON-RPC transport in ``main.c`` and the per-feature handlers under
-``src/``. It owns the document store, drives parsing and cross-file
-revalidation, and dispatches every LSP request to the right
-``handle_*`` function.
+``src/``. It dispatches every LSP request to the right ``handle_*``
+function.  Its collaborators each own one concern: the live document
+store lives in ``document_store.c``, the lifecycle / document-sync
+notification handlers in ``lifecycle.c``, and workspace loading plus
+cross-file revalidation in ``workspace.c``.
 
 The threading architecture — the coordinator / worker split, the
 mutable live store versus the immutable refcounted snapshots, and
@@ -179,5 +181,6 @@ API reference
 -------------
 
 .. doxygenfile:: server.h
+.. doxygenfile:: lifecycle.h
 .. doxygenfile:: job_queue.h
 .. doxygenfile:: threadpool.h

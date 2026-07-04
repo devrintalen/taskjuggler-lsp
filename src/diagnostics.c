@@ -19,7 +19,7 @@
 /** @file */
 
 #include "diagnostics.h"
-#include "server.h"
+#include "rpc.h"
 #include "query_context.h"
 #include "grammar.tab.h"   /* KW_INCLUDE */
 

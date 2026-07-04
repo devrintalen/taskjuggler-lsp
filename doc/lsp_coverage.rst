@@ -262,7 +262,7 @@ Language features
    * - ``textDocument/semanticTokens/range``
      - No
      - Requires filtering the token spans to the requested range
-       before encoding.  Tracked as a TODO in ``src/server.c``.
+       before encoding.  Not yet implemented.
    * - ``textDocument/linkedEditingRange``
      - No
      - Not implemented.

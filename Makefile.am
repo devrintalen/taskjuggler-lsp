@@ -71,6 +71,9 @@ libtjlsp_gen_debug_a_CFLAGS = $(DEBUG_CFLAGS) -Wno-unused-function
 server_sources = \
     src/main.c \
     src/server.c src/server.h \
+    src/document_store.c src/document_store.h \
+    src/workspace.c src/workspace.h \
+    src/lifecycle.c src/lifecycle.h \
     src/parser.c src/parser.h \
     src/diagnostics.c src/diagnostics.h \
     src/debug.c src/debug.h \

@@ -19,8 +19,13 @@
 /** @file */
 
 #include "rpc.h"
+#include "debug.h"
 
+#include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 LspPos json_to_pos(yyjson_val *obj) {
     LspPos p = {0};
@@ -72,4 +77,35 @@ yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
     yyjson_mut_obj_add_str(doc, err, "message", message);
     yyjson_mut_obj_add_val(doc, resp, "error", err);
     return resp;
+}
+
+/* ── Outbound wire I/O ───────────────────────────────────────────────────── */
+
+/** Guards stdout so concurrent worker threads cannot interleave LSP messages. */
+static pthread_mutex_t stdout_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void lsp_send_message(const char *msg) {
+    DLOG(DEBUG_RPC, LOG_TRACE, "-> %zu byte message", strlen(msg));
+    pthread_mutex_lock(&stdout_mutex);
+    printf("Content-Length: %zu\r\n\r\n%s", strlen(msg), msg);
+    fflush(stdout);
+    pthread_mutex_unlock(&stdout_mutex);
+}
+
+void show_message(int type, const char *message) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *params = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_int(doc, params, "type", type);
+    yyjson_mut_obj_add_str(doc, params, "message", message);
+    yyjson_mut_val *note = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc, note, "jsonrpc", "2.0");
+    yyjson_mut_obj_add_str(doc, note, "method",  "window/showMessage");
+    yyjson_mut_obj_add_val(doc, note, "params",  params);
+    yyjson_mut_doc_set_root(doc, note);
+    char *text = yyjson_mut_write(doc, 0, NULL);
+    yyjson_mut_doc_free(doc);
+    if (text) {
+        lsp_send_message(text);
+        free(text);
+    }
 }

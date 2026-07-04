@@ -66,3 +66,22 @@ yyjson_mut_val *make_response(yyjson_mut_doc *doc, yyjson_val *id,
  */
 yyjson_mut_val *make_error_response(yyjson_mut_doc *doc, yyjson_val *id,
                                     int code, const char *message);
+
+/**
+ * Write one LSP-framed message to stdout, prepending the required
+ * `Content-Length` header.  Safe to call from any thread; serialized
+ * internally by a mutex.
+ *
+ * @param msg  NUL-terminated JSON message body.
+ */
+void lsp_send_message(const char *msg);
+
+/**
+ * Send a window/showMessage notification to the client.  Used to
+ * surface non-fatal load/configuration errors (e.g. a removed
+ * compile_commands.json) without crashing the session.
+ *
+ * @param type     LSP MessageType: 1=Error, 2=Warning, 3=Info, 4=Log.
+ * @param message  Human-readable message text to display.
+ */
+void show_message(int type, const char *message);

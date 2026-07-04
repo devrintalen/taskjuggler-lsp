@@ -145,10 +145,13 @@ lock-free against the pinned snapshot and write responses via
 
 ### Document store
 
-`src/server.c` owns a static array of `Document` slots (URI + raw text
-+ `ParseResult`). Editor content is authoritative while a file is
-open; `didClose` re-reads the file from disk and keeps it as a
-"background" entry so cross-file references stay valid.
+`src/document_store.c` owns a static array of `Document` slots (URI +
+raw text + parse snapshots); the lifecycle notification handlers that
+mutate it (`didOpen` / `didChange` / `didClose` / watched-files /
+rename, plus `initialize`) live in `src/lifecycle.c`. Editor content
+is authoritative while a file is open; `didClose` re-reads the file
+from disk and keeps it as a "background" entry so cross-file
+references stay valid.
 
 `compile_commands.json` at the workspace root is the sole startup
 populator of `docs[]`: every listed `.tjp` is loaded as `disk_only`,
@@ -190,8 +193,9 @@ cross-file edge.
 
 ### Cross-file revalidation
 
-After any document-changing notification, `server.c` runs
-`revalidate_all_docs()`: it polls `compile_commands.json` for on-disk
+After any document-changing notification, `src/workspace.c` (which
+also owns workspace loading, include-following, and the
+`compile_commands.json` cache) runs `revalidate_all_docs()`: it polls `compile_commands.json` for on-disk
 changes, calls `build_workspace_snapshot()` to assemble a fresh
 immutable `workspace_snapshot` from the current `docs[]`, atomically
 swaps it in as the published `g_ws` (releasing the previous one), then
@@ -231,9 +235,9 @@ back-to-back queries on one revision warm the memo. `handle_definition`,
 
 `server_process()` in `src/server.c` parses the JSON-RPC envelope and
 dispatches to a per-method `handle_*` function. Each LSP feature lives
-in its own `.c` / `.h` pair under `src/`, and the mapping from
-`ParseResult` field to consumer is documented in the comment block at
-the top of `src/server.c` ("QUERY DISPATCH"). When adding a feature,
+in its own `.c` / `.h` pair under `src/`, and the mapping from parse
+output to consumer is documented in `doc/modules/server.rst` ("Query
+dispatch"). When adding a feature,
 follow the same pattern: a header declaring a `build_*_json()` entry
 point that returns a `yyjson_mut_val *`, a corresponding `.c` with the
 implementation, a new entry in `Makefile.am`'s `server_sources` list, and a
