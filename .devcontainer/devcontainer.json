@@ -11,5 +11,5 @@
             ]
         }
     },
-    "postCreateCommand": "make"
+    "postCreateCommand": "autoreconf -i && ./configure && make"
 }

@@ -2,6 +2,7 @@ FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
 # Build/runtime dependencies for taskjuggler-lsp:
 #   - build-essential: gcc + make
+#   - autoconf / automake: build system bootstrap (autoreconf)
 #   - flex / bison:    lexer and grammar generation
 #   - cmake:           used to build yyjson from source
 #   - valgrind:        callgrind profiling and leak checks
@@ -10,6 +11,8 @@ FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     && apt-get install -y --no-install-recommends \
         build-essential \
+        autoconf \
+        automake \
         flex \
         bison \
         cmake \
