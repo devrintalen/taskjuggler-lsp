@@ -226,8 +226,8 @@ static void finish_tj_node(tj_node *s, Token kw, BodyResult body) {
         s->children[i]->parent_node = s;
 }
 
-/* Free a transient body's collected children.  Used by attribute rules
- * whose opt_body content is discarded (e.g. dailymax dur_val opt_body). */
+/* Free a transient body's collected children.  Used by every rule whose
+ * opt_body content is discarded (e.g. dailymax dur_val opt_body). */
 static void discard_body(BodyResult *b) {
     for (int i = 0; i < b->syms.n; i++)
         tj_node_free(b->syms.arr[i]);
@@ -258,6 +258,13 @@ static void discard_body(BodyResult *b) {
  * already consumed, so they cannot double-free a node that reached the
  * tree.
  *
+ * <tok> values need no destructor: a token's lexeme (.text) points into
+ * the parse's token arena, interned once by g_push_tok_span and reclaimed
+ * in bulk with the arena — the token never owns it.  Rules that must keep
+ * a lexeme past the parse (a tj_node id/name, a prefix_path_id segment)
+ * strdup it or let the tree borrow the arena pointer; everything else
+ * simply drops it.
+ *
  * Note: bison does NOT invoke these for mid-rule action values, so a
  * node allocated in a mid-rule action and then orphaned by a later parse
  * failure would still leak — which is why symbol_decl allocates the
@@ -265,15 +272,6 @@ static void discard_body(BodyResult *b) {
 %destructor { tj_node_free($$); }                       <sym>
 %destructor { if ($$.has_sym) tj_node_free($$.sym); }   <item>
 %destructor { free($$); }                               <text>
-/* A token's lexeme (.text) points into the parse's token arena, interned once
- * by g_push_tok_span and reclaimed in bulk with the arena — never owned by the
- * token itself.  token_free() therefore just drops the borrowed pointer; this
- * destructor runs it on tokens bison pops during error recovery or leaves on
- * the stack at parse end (e.g. a `${macro}` call whose braces gen_expr cannot
- * consume), purely for symmetry.  Rules that must keep a lexeme past the parse
- * (a tj_node id/name, a prefix_path_id segment) strdup it; everything else
- * borrows.  Since token_free() frees nothing, double-discard is harmless. */
-%destructor { token_free(&$$); }                        <tok>
 
 /* ── Remaining conflicts ─────────────────────────────────────────────────── *
  *
@@ -289,13 +287,13 @@ static void discard_body(BodyResult *b) {
  *          → removed by synthesising missing `}` at EOF (see lexer.l).
  *
  * TWO shift/reduce conflicts remain (no reduce/reduce), both in the unknown-
- * identifier fallback `item: TK_IDENT opt_args opt_body`: at `TK_IDENT opt_args •`
- * the parser may either extend opt_args with another argument token or reduce
- * the statement.  bison shifts (greedy), which is the intended behaviour — the
- * fallback absorbs its trailing arguments.  These are deliberately left as
- * plain warnings: terminating the rule with TK_EOL would resolve them but
- * reject same-line attributes such as `Phone "x100" rate 350`, which is valid
- * under TaskJuggler's terminator-free grammar.
+ * identifier fallback `plain_stmt: TK_IDENT opt_args opt_body`: at
+ * `TK_IDENT opt_args •` the parser may either extend opt_args with another
+ * argument token or reduce the statement.  bison shifts (greedy), which is the
+ * intended behaviour — the fallback absorbs its trailing arguments.  These are
+ * deliberately left as plain warnings: terminating the rule with TK_EOL would
+ * resolve them but reject same-line attributes such as `Phone "x100" rate 350`,
+ * which is valid under TaskJuggler's terminator-free grammar.
  *
  * TODO(grammar): context-sensitive refactor (deferred — large, only do this if
  * we want "attribute not valid in this scope" diagnostics as a feature).
@@ -462,7 +460,7 @@ static void discard_body(BodyResult *b) {
 %type <sym>  symbol_decl report_decl navigator_decl scenario_decl
 %type <sym>  timesheet_decl statussheet_decl tagfile_decl journalentry_decl
 %type <tok>  sym_kw report_kw opt_id opt_name opt_version dep_path_seg
-%type <tok>  num_val dur_unit string_val extend_target supplement_target
+%type <tok>  string_val
 %type <body> opt_body body_items
 %type <tref> dep_path task_ref
 %type <ival> bang_seq
@@ -496,46 +494,45 @@ items
  * if some (e.g. 'scenario' inside project body) are semantically restricted.
  * Semantic context is validated by downstream passes.
  *
+ * An item is either a tj_node-introducing declaration or a plain_stmt (an
+ * attribute or structural statement that produces no symbol).
+ *
  * NOTE: gen_expr statements (hidetask, cellcolor, sorttasks, etc.) use a
  * greedy expression rule that consumes all non-brace tokens including most
  * KW_* tokens.  The declaration keywords listed in sym_kw and report_kw are
  * excluded from gen_expr to preserve correct symbol extraction.  All other
  * KW_* keywords included in gen_expr may be accidentally consumed as part
  * of the preceding expression if they appear on the very next line.
- *
- * TODO: Fix the gen_expr greedy-consumption issue by either:
- *   (a) Adding a newline token from the lexer to act as a statement terminator
- *   (b) Switching to a GLR parser
- *   (c) Hand-writing a recursive-descent parser
- *
  * ────────────────────────────────────────────────────────────────────────── */
 item
-    /* ── tj_node-introducing declarations ── */
-    : symbol_decl
-        { $$.sym = $1; $$.has_sym = 1; }
-    | report_decl
-        { $$.sym = $1; $$.has_sym = 1; }
-    | navigator_decl
-        { $$.sym = $1; $$.has_sym = 1; }
-    | scenario_decl
-        { $$.sym = $1; $$.has_sym = 1; }
-    | timesheet_decl
-        { $$.sym = $1; $$.has_sym = 1; }
-    | statussheet_decl
-        { $$.sym = $1; $$.has_sym = 1; }
-    | tagfile_decl
-        { $$.sym = $1; $$.has_sym = 1; }
-    | journalentry_decl
-        { $$.sym = $1; $$.has_sym = 1; }
+    : symbol_decl       { $$.sym = $1; $$.has_sym = 1; }
+    | report_decl       { $$.sym = $1; $$.has_sym = 1; }
+    | navigator_decl    { $$.sym = $1; $$.has_sym = 1; }
+    | scenario_decl     { $$.sym = $1; $$.has_sym = 1; }
+    | timesheet_decl    { $$.sym = $1; $$.has_sym = 1; }
+    | statussheet_decl  { $$.sym = $1; $$.has_sym = 1; }
+    | tagfile_decl      { $$.sym = $1; $$.has_sym = 1; }
+    | journalentry_decl { $$.sym = $1; $$.has_sym = 1; }
+    | plain_stmt        { $$.has_sym = 0; }
+    | error             { $$.has_sym = 0; }
+    ;
 
+/* ── plain_stmt: every statement that produces no tj_node ────────────────── *
+ *
+ * Attribute statements are grouped by shape: all keywords sharing an
+ * argument pattern are collected into one *_kw class rule below and share
+ * a single alternative here.  Only statements with real semantic actions
+ * (date capture, prefix capture, dependency capture) keep their own
+ * alternative.                                                              */
+plain_stmt
     /* ── Structural statements ── */
-    | extend_stmt        { $$.has_sym = 0; }
-    | supplement_stmt    { $$.has_sym = 0; }
-    | macro_stmt         { $$.has_sym = 0; }
-    | include_stmt       { $$.has_sym = 0; }
+    : extend_stmt
+    | supplement_stmt
+    | macro_stmt
+    | include_stmt
 
     /* ── Date attributes ── */
-    /* Syntax: start <date>                                                   */
+    /* Syntax: start <date> — captured onto the enclosing task              */
     | KW_START TK_DATE
         {
             tj_node *task = sym_stack_top();
@@ -546,9 +543,8 @@ item
                     task->has_start  = 1;
                 }
             }
-            token_free(&$1); token_free(&$2); $$.has_sym = 0;
         }
-    /* Syntax: end <date>                                                     */
+    /* Syntax: end <date> — captured onto the enclosing task                */
     | KW_END TK_DATE
         {
             tj_node *task = sym_stack_top();
@@ -559,631 +555,138 @@ item
                     task->has_end  = 1;
                 }
             }
-            token_free(&$1); token_free(&$2); $$.has_sym = 0;
         }
-    /* Syntax: now <date>                                                     */
-    | KW_NOW TK_DATE
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: maxend <date>                                                  */
-    | KW_MAXEND TK_DATE
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: minend <date>                                                  */
-    | KW_MINEND TK_DATE
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: maxstart <date>                                                */
-    | KW_MAXSTART TK_DATE
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: minstart <date>                                                */
-    | KW_MINSTART TK_DATE
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: markdate <date>                                                */
-    | KW_MARKDATE TK_DATE
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
+    /* Syntax: (now | maxend | minend | maxstart | minstart | markdate) <date> */
+    | date_kw TK_DATE
 
-    /* ── Duration attributes ── */
-    /* Syntax: effort <value> (min | h | d | w | m | y)                      */
-    | KW_EFFORT dur_val
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: duration <value> (min | h | d | w | m | y)                   */
-    | KW_DURATION dur_val
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: length <value> (min | h | d | w | m | y)                     */
-    | KW_LENGTH dur_val
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: effortdone <value> (min | h | d | w | m | y)                 */
-    | KW_EFFORTDONE dur_val
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: effortleft <value> (min | h | d | w | m | y)                 */
-    | KW_EFFORTLEFT dur_val
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: remaining <value> (min | h | d | w | m | y)                  */
-    | KW_REMAINING dur_val
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: work <value> (% | min | h | d)                                */
+    /* ── Duration / numeric attributes ── */
+    /* Syntax: (effort | duration | length | …) <value> (min|h|d|w|m|y)     */
+    | durval_kw dur_val
+    /* Syntax: work <value> (% | min | h | d)                               */
     | KW_WORK num_val dur_unit
-        { token_free(&$1); token_free(&$2); token_free(&$3); $$.has_sym = 0; }
-    /* Syntax: gaplength <value> (min | h | d | w | m | y)                  */
-    | KW_GAPLENGTH dur_val
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: gapduration <value> (min | h | d | w | m | y)                */
-    | KW_GAPDURATION dur_val
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: overtime <value>                                               */
-    | KW_OVERTIME num_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: sloppy <sloppyness>                                            */
-    | KW_SLOPPY num_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-
-    /* ── Duration attributes with optional sub-body ──
-     *
-     * Syntax: dailymax <value> (min | h | d | w | m | y) [{ <attributes> }]
-     * The optional body accepts: resources <id> [, <id>...]
-     * (and scenario-specific attributes for dailymax/dailymin/etc.)
-     */
-    | KW_DAILYMAX dur_val opt_body
-        { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
-          free($3.syms.arr); $$.has_sym = 0; }
-    /* Syntax: dailymin <value> (min | h | d | w | m | y) [{ <attributes> }] */
-    | KW_DAILYMIN dur_val opt_body
-        { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
-          free($3.syms.arr); $$.has_sym = 0; }
-    /* Syntax: weeklymax <value> (min | h | d | w | m | y) [{ <attributes> }] */
-    | KW_WEEKLYMAX dur_val opt_body
-        { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
-          free($3.syms.arr); $$.has_sym = 0; }
-    /* Syntax: weeklymin <value> (min | h | d | w | m | y) [{ <attributes> }] */
-    | KW_WEEKLYMIN dur_val opt_body
-        { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
-          free($3.syms.arr); $$.has_sym = 0; }
-    /* Syntax: monthlymax <value> (min | h | d | w | m | y) [{ <attributes> }] */
-    | KW_MONTHLYMAX dur_val opt_body
-        { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
-          free($3.syms.arr); $$.has_sym = 0; }
-    /* Syntax: monthlymin <value> (min | h | d | w | m | y) [{ <attributes> }] */
-    | KW_MONTHLYMIN dur_val opt_body
-        { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
-          free($3.syms.arr); $$.has_sym = 0; }
-    /* Syntax: maximum <value> (min | h | d | w | m | y) [{ <attributes> }]  */
-    | KW_MAXIMUM dur_val opt_body
-        { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
-          free($3.syms.arr); $$.has_sym = 0; }
-    /* Syntax: minimum <value> (min | h | d | w | m | y) [{ <attributes> }]  */
-    | KW_MINIMUM dur_val opt_body
-        { token_free(&$1);
-          for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
-          free($3.syms.arr); $$.has_sym = 0; }
-
-    /* ── Numeric attributes ── */
-    /* Syntax: complete <percent>                                             */
-    | KW_COMPLETE num_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: priority <value>                                               */
-    | KW_PRIORITY TK_INTEGER
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: height <INTEGER>                                               */
-    | KW_HEIGHT TK_INTEGER
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: width <INTEGER>                                                */
-    | KW_WIDTH TK_INTEGER
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: dailyworkinghours <hours>                                      */
-    | KW_DAILYWORKINGHOURS num_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: yearlyworkingdays <days>                                       */
-    | KW_YEARLYWORKINGDAYS num_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: efficiency (<INTEGER> | <FLOAT>)                               */
-    | KW_EFFICIENCY num_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: rate (<INTEGER> | <FLOAT>)                                     */
-    | KW_RATE num_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: startcredit (<INTEGER> | <FLOAT>)                              */
-    | KW_STARTCREDIT num_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: endcredit (<INTEGER> | <FLOAT>)                                */
-    | KW_ENDCREDIT num_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: timingresolution <INTEGER> min                                 */
+    /* Syntax: (complete | rate | efficiency | …) (<INTEGER> | <FLOAT>)     */
+    | numval_kw num_val
+    /* Syntax: (priority | height | width) <INTEGER>                        */
+    | int_kw TK_INTEGER
+    /* Syntax: timingresolution <INTEGER> min                               */
     | KW_TIMINGRESOLUTION TK_INTEGER TK_IDENT
-        { token_free(&$1); token_free(&$2); token_free(&$3); $$.has_sym = 0; }
+    /* Syntax: (dailymax | weeklymin | maximum | …) <value> <unit> [{ … }]
+     * The optional body accepts: resources <id> [, <id>...] and
+     * scenario-specific attributes.                                        */
+    | durlimit_kw dur_val opt_body
+        { discard_body(&$3); }
 
     /* ── String attributes ── */
-    /* Syntax: note <STRING>                                                  */
-    | KW_NOTE string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: email <STRING>                                                 */
-    | KW_EMAIL string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: headline <text>  (text may be a string literal)               */
-    | KW_HEADLINE string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: title <STRING>                                                 */
-    | KW_TITLE string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: caption <text>                                                 */
-    | KW_CAPTION string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: epilog <STRING>                                                */
-    | KW_EPILOG string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: prolog <STRING>                                                */
-    | KW_PROLOG string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: left <STRING>                                                  */
-    | KW_LEFT string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: right <STRING>                                                 */
-    | KW_RIGHT string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: center <text>                                                  */
-    | KW_CENTER string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: footer <STRING>                                                */
-    | KW_FOOTER string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: header <STRING>                                                */
-    | KW_HEADER string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: rawhtmlhead <STRING>                                           */
-    | KW_RAWHTMLHEAD string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: listitem <STRING>                                              */
-    | KW_LISTITEM string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: currency <symbol>                                              */
-    | KW_CURRENCY string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: timezone <zone>  (a string or identifier)                     */
+    /* Syntax: (note | email | title | header | …) <STRING>                 */
+    | string_kw string_val
+    /* Syntax: timezone <zone>  (a string or identifier)                    */
     | KW_TIMEZONE string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
     | KW_TIMEZONE TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: timeformat <format>                                            */
-    | KW_TIMEFORMAT string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: shorttimeformat <format>                                       */
-    | KW_SHORTTIMEFORMAT string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: timeformat1 <format>                                           */
-    | KW_TIMEFORMAT1 string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: timeformat2 <format>                                           */
-    | KW_TIMEFORMAT2 string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: outputdir <directory>                                          */
-    | KW_OUTPUTDIR string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: auxdir <STRING>                                                */
-    | KW_AUXDIR string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: copyright <STRING>                                             */
-    | KW_COPYRIGHT string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: details <text>  (journalentry attribute)                      */
-    | KW_DETAILS string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: summary <text>  (journalentry attribute)                      */
-    | KW_SUMMARY string_val
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
 
     /* ── ID/identifier attributes ── */
-    /* Syntax: projectid <ID>                                                 */
-    | KW_PROJECTID TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: trackingscenario <scenario>                                    */
-    | KW_TRACKINGSCENARIO TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: alert <alert level>  (journalentry / report column attribute)  */
-    | KW_ALERT TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: author <resource>  (journalentry attribute)                    */
-    | KW_AUTHOR TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: taskprefix <task ID>                                           */
+    /* Syntax: (projectid | author | scheduling | loadunit | …) <ID>        */
+    | ident_kw TK_IDENT
+    /* Syntax: taskprefix <task ID> — captured for the enclosing include    */
     | KW_TASKPREFIX prefix_path_id
-        { set_pending_prefix(&g_pending_task_prefix, $2);
-          token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: resourceprefix <resource ID>                                   */
+        { set_pending_prefix(&g_pending_task_prefix, $2); }
+    /* Syntax: resourceprefix <resource ID>                                 */
     | KW_RESOURCEPREFIX prefix_path_id
-        { set_pending_prefix(&g_pending_resource_prefix, $2);
-          token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: accountprefix <account ID>                                     */
+        { set_pending_prefix(&g_pending_resource_prefix, $2); }
+    /* Syntax: accountprefix <account ID>                                   */
     | KW_ACCOUNTPREFIX prefix_path_id
-        { set_pending_prefix(&g_pending_account_prefix, $2);
-          token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: reportprefix <report ID>                                       */
+        { set_pending_prefix(&g_pending_account_prefix, $2); }
+    /* Syntax: reportprefix <report ID>                                     */
     | KW_REPORTPREFIX prefix_path_id
-        { set_pending_prefix(&g_pending_report_prefix, $2);
-          token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: taskroot (<ABSOLUTE_ID> | <ID>)                               */
+        { set_pending_prefix(&g_pending_report_prefix, $2); }
+    /* Syntax: taskroot (<ABSOLUTE_ID> | <ID>)                              */
     | KW_TASKROOT dotted_id
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: resourceroot <resource>                                        */
-    | KW_RESOURCEROOT TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: accountroot <ID>                                               */
-    | KW_ACCOUNTROOT TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: purge <attribute> <ID>                                         */
-    | KW_PURGE TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-
-    /* ── balance ──
-     * Syntax: balance (<cost account> <ID> | -)
-     */
+    /* Syntax: balance (<cost account> <ID> | -)                            */
     | KW_BALANCE TK_IDENT TK_IDENT
-        { token_free(&$1); token_free(&$2); token_free(&$3); $$.has_sym = 0; }
     | KW_BALANCE TK_MINUS
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
 
     /* ── ID-list attributes ── */
-    /* Syntax: responsible <resource> [, <resource>...]                       */
-    | KW_RESPONSIBLE id_list
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: managers <resource> [, <resource>...]                          */
-    | KW_MANAGERS id_list
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: scenarios <ID> [, <ID>...]                                     */
-    | KW_SCENARIOS id_list
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: flags <ID> [, <ID>...]                                         */
-    | KW_FLAGS id_list
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: adopt (<ABSOLUTE_ID> | <ID>) [, ...]                           */
+    /* Syntax: (responsible | flags | scenarios | …) <ID> [, <ID>...]       */
+    | idlist_kw id_list
+    /* Syntax: adopt (<ABSOLUTE_ID> | <ID>) [, ...]                         */
     | KW_ADOPT dotted_id_list
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: alternative <resource> [, <resource>...]                       */
-    | KW_ALTERNATIVE id_list
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: projectids <ID> [, <ID>...]                                    */
-    | KW_PROJECTIDS id_list
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: resources <resource> [, <resource>...]
-     * (inside dailymax/dailymin/etc. body)                                   */
-    | KW_RESOURCES id_list
-        { token_free(&$1); $$.has_sym = 0; }
 
     /* ── No-argument keyword statements ── */
-    /* Syntax: milestone                                                      */
-    | KW_MILESTONE
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: scheduled                                                      */
-    | KW_SCHEDULED
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: mandatory                                                      */
-    | KW_MANDATORY
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: persistent                                                     */
-    | KW_PERSISTENT
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: weekstartsmonday                                               */
-    | KW_WEEKSTARTSMONDAY
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: weekstartssunday                                               */
-    | KW_WEEKSTARTSSUNDAY
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: disabled                                                       */
-    | KW_DISABLED
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: enabled                                                        */
-    | KW_ENABLED
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: replace  (shift attribute: clear inherited shifts)             */
-    | KW_REPLACE
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: novevents  (navigation events)                                 */
-    | KW_NOVEVENTS
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: onstart  (charge timing)                                       */
-    | KW_ONSTART
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: onend    (charge timing)                                       */
-    | KW_ONEND
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: strict   (scheduling strictness)                               */
-    | KW_STRICT
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: timeoff  (used in workinghours to indicate no work)
-     * TODO: verify exact tj3man syntax for timeoff                          */
-    | KW_TIMEOFF
-        { token_free(&$1); $$.has_sym = 0; }
-
-    /* ── Enum-keyword attributes ── */
-    /* Syntax: scheduling (alap | asap)                                       */
-    | KW_SCHEDULING TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: schedulingmode (planning | projection)                         */
-    | KW_SCHEDULINGMODE TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: aggregate (resources | tasks)                                  */
-    | KW_AGGREGATE TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: selfcontained (yes | no)                                       */
-    | KW_SELFCONTAINED TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: active (yes | no)                                              */
-    | KW_ACTIVE TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: journalmode (journal | journal_sub | status_dep | ...)         */
-    | KW_JOURNALMODE TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: loadunit (days | hours | longauto | minutes | ...)             */
-    | KW_LOADUNIT TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: select (maxloaded | minloaded | minallocated | order | random) */
-    | KW_SELECT TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: scale (hour | day | week | month | quarter | year)
-     * (column attribute)                                                      */
-    | KW_SCALE TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
-    /* Syntax: listtype (bullets | comma | numbered)
-     * (column attribute)                                                      */
-    | KW_LISTTYPE TK_IDENT
-        { token_free(&$1); token_free(&$2); $$.has_sym = 0; }
+    /* Syntax: milestone | scheduled | mandatory | strict | …               */
+    | noarg_kw
 
     /* ── Interval attributes ── */
-    /* Syntax: period <interval1>  (date - date | date + N unit)             */
+    /* Syntax: period <interval1>  (date - date | date + N unit)            */
     | KW_PERIOD interval2
-        { token_free(&$1); $$.has_sym = 0; }
 
     /* ── Dependency and allocation statements ── */
     /* Syntax: depends (<ABSOLUTE ID> | <ID> | <RELATIVE ID>) [{ <attrs> }]
      *                 [, ... ]
-     * The optional body accepts: gaplength, gapduration                     */
+     * The optional body accepts: gaplength, gapduration                    */
     | KW_DEPENDS { g_pending_dep_kind = DEP_KIND_DEPENDS; } dep_ref_list
-        { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: precedes (<ABSOLUTE ID> | <ID> | <RELATIVE ID>) [{ <attrs> }]
-     *                  [, ... ]                                              */
+     *                  [, ... ]                                            */
     | KW_PRECEDES { g_pending_dep_kind = DEP_KIND_PRECEDES; } dep_ref_list
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: allocate <resource> [{ <attributes> }] [, <resource> ...]
-     * Body attributes: alternative, mandatory, persistent, select,
-     *   shift.allocate, shifts.allocate, limits.allocate                    */
+    /* Syntax: allocate <resource> [{ <attributes> }] [, <resource> ...]    */
     | KW_ALLOCATE alloc_ref_list
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: booking <resource> <interval4> [, <interval4>...] [{ <attrs> }]
-     * Body attributes: overtime.booking, sloppy.booking                     */
+    /* Syntax: booking <resource> <interval4> [, <interval4>...] [{ <attrs> }] */
     | KW_BOOKING TK_IDENT booking_interval_list opt_body
-        { token_free(&$1); token_free(&$2);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
-          free($4.syms.arr); $$.has_sym = 0; }
+        { discard_body(&$4); }
     /* Syntax: shift <shift> [<interval2>] [, <shift> [<interval2>] ...]
      * (attribute form inside resource/task; differs from the shift declaration) */
     | KW_SHIFT shift_attr_list
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: shifts <shift> [<interval2>] [, <shift> [<interval2>] ...]
-     * (same semantics as shift attribute but explicit plural form)          */
+    /* Syntax: shifts <shift> [<interval2>] [, ...] (explicit plural form)  */
     | KW_SHIFTS shift_attr_list
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: limits [{ <attributes> }]                                     */
+    /* Syntax: limits [{ <attributes> }]                                    */
     | KW_LIMITS opt_body
-        { token_free(&$1);
-          for (int i = 0; i < $2.syms.n; i++) tj_node_free($2.syms.arr[i]);
-          free($2.syms.arr); $$.has_sym = 0; }
-    /* Syntax: projection [{ <attributes> }]                                  */
+        { discard_body(&$2); }
+    /* Syntax: projection [{ <attributes> }]                                */
     | KW_PROJECTION opt_body
-        { token_free(&$1);
-          for (int i = 0; i < $2.syms.n; i++) tj_node_free($2.syms.arr[i]);
-          free($2.syms.arr); $$.has_sym = 0; }
+        { discard_body(&$2); }
 
     /* ── Account/charge attributes ── */
-    /* Syntax: chargeset <account> <share> [, <account> <share> ...]
-     * where share is a percentage value (number followed by %)              */
+    /* Syntax: chargeset <account> <share%> [, <account> <share%> ...]      */
     | KW_CHARGESET chargeset_list
-        { token_free(&$1); $$.has_sym = 0; }
     /* Syntax: charge <amount> (onstart | onend | perhour | perday | perweek) */
     | KW_CHARGE num_val TK_IDENT
-        { token_free(&$1); token_free(&$2); token_free(&$3); $$.has_sym = 0; }
-    /* Syntax: credits <date> <description> <amount> [, ...]                 */
+    /* Syntax: credits <date> <description> <amount> [, ...]                */
     | KW_CREDITS credits_list
-        { token_free(&$1); $$.has_sym = 0; }
 
-    /* ── Leave management ── */
-    /* Syntax: leaveallowances annual <date> [-] <value> (min | h | d | w | m | y)
-     *         [, annual <date> [-] <value> ...]                             */
-    | KW_LEAVEALLOWANCES gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: leaves (project | annual | special | sick | unpaid | holiday |
-     *          unemployed) [<name>] <interval3> [, ...]                     */
-    | KW_LEAVES gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: vacation [<name>] <interval3> [, <interval3>...]              */
-    | KW_VACATION gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: workinghours <weekday> [-<end weekday>] [, ...] (off | TIME-TIME ...)
-     * TODO: write precise rule; using gen_expr as approximation             */
-    | KW_WORKINGHOURS gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
+    /* ── Free-form expression statements ── *
+     * Logical expressions (hidetask, fail, warn, cellcolor, sorttasks, …)
+     * and complex list arguments (leaves, workinghours, alertlevels, …).
+     * gen_expr accepts any sequence of non-brace tokens; the synthetic
+     * TK_EOL terminates the statement.  See NOTE in the item rule about
+     * greedy consumption.                                                   */
+    | genexpr_kw gen_expr TK_EOL
 
     /* ── Report layout ── */
-    /* Syntax: columns <columnid> [{ <attributes> }] [, <columnid> ...]      */
+    /* Syntax: columns <columnid> [{ <attributes> }] [, <columnid> ...]     */
     | KW_COLUMNS column_list
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: formats (csv | html | niku) [, ...]                           */
+    /* Syntax: formats (csv | html | niku) [, ...]                          */
     | KW_FORMATS formats_list
-        { token_free(&$1); $$.has_sym = 0; }
 
-    /* ── Logical-expression statements ─────────────────────────────────────
-     * These all take a logical expression argument (operands + operators).
-     * gen_expr accepts any sequence of non-brace tokens including most KW_*
-     * (e.g. plan.effort, delayed.end, ~isleaf()).
-     * See NOTE in item rule about greedy consumption.                       */
-    /* Syntax: hidetask (<operand> [...] | @ (all | none))                   */
-    | KW_HIDETASK gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: hideresource (<operand> [...] | @ (all | none))               */
-    | KW_HIDERESOURCE gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: hideaccount (<operand> [...] | @ (all | none))                */
-    | KW_HIDEACCOUNT gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: hidereport (<operand> [...] | @ (all | none))                 */
-    | KW_HIDEREPORT gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: hidejournalentry <logicalflagexpression>                      */
-    | KW_HIDEJOURNALENTRY gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: rolluptask (<operand> [...] | @ (all | none))                 */
-    | KW_ROLLUPTASK gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: rollupresource (<operand> [...] | @ (all | none))             */
-    | KW_ROLLUPRESOURCE gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: rollupaccount (<operand> [...] | @ (all | none))              */
-    | KW_ROLLUPACCOUNT gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: warn (<operand> [...])                                         */
-    | KW_WARN gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: fail (<operand> [...])                                         */
-    | KW_FAIL gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: cellcolor (<operand> [...])  (column attribute)               */
-    | KW_CELLCOLOR gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: celltext (<operand> [...])   (column attribute)               */
-    | KW_CELLTEXT gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: tooltip (<operand> [...])    (column attribute)               */
-    | KW_TOOLTIP gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: fontcolor (<operand> [...])  (column attribute)               */
-    | KW_FONTCOLOR gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: halign (<operand> [...])     (column attribute)               */
-    | KW_HALIGN gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: sorttasks (<tree> | <criteria>) [, <criteria>...]             */
-    | KW_SORTTASKS gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: sortresources (<tree> | <criteria>) [, <criteria>...]         */
-    | KW_SORTRESOURCES gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: sortaccounts (<tree> | <criteria>) [, <criteria>...]          */
-    | KW_SORTACCOUNTS gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: sortjournalentries <ABSOLUTE_ID> [, <ABSOLUTE_ID>...]         */
-    | KW_SORTJOURNALENTRIES gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: journalattributes (* | - | (alert | author | date | ...) [...]) */
-    | KW_JOURNALATTRIBUTES gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: taskattributes (* | - | (booking | complete | ...) [...])     */
-    | KW_TASKATTRIBUTES gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: resourceattributes (* | - | (booking | leaves | ...) [...])   */
-    | KW_RESOURCEATTRIBUTES gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: definitions (* | - | (flags | project | ...) [...])           */
-    | KW_DEFINITIONS gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-    /* Syntax: opennodes ((<ID> | <ABSOLUTE_ID>) [: ...] [, ...])            */
-    | KW_OPENNODES gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
-
-    /* ── Status / timesheet body attributes ── */
-    /* Syntax: status <alert level> <STRING> [{ <attributes> }]
-     * (inside timesheet task or statussheet)                                */
-    | KW_STATUS TK_IDENT string_val opt_body
-        { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
-          free($4.syms.arr); $$.has_sym = 0; }
-    /* Syntax: newtask <task> <STRING> { <attributes> }
-     * (inside timesheet)                                                    */
-    | KW_NEWTASK TK_IDENT string_val opt_body
-        { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
-          free($4.syms.arr); $$.has_sym = 0; }
+    /* ── <keyword> <id> <string> [{ … }] statements ── *
+     * status/newtask (timesheet bodies) and the extend-field declarations
+     * (date/number/reference/richtext/text) all share this shape.          */
+    | ident_string_body_kw TK_IDENT string_val opt_body
+        { discard_body(&$4); }
 
     /* ── Format specifiers ── */
-    /* Syntax: numberformat <negpfx> <negsfx> <thousandsep> <decimsep> <fracdigits>
-     * All five arguments are strings.                                        */
-    | KW_NUMBERFORMAT string_val string_val string_val string_val num_val
-        { token_free(&$1); token_free(&$2); token_free(&$3);
-          token_free(&$4); token_free(&$5); token_free(&$6);
-          $$.has_sym = 0; }
-    /* Syntax: currencyformat <negpfx> <negsfx> <thousandsep> <decimsep> <fracdigits>
-     * All five arguments are strings.                                        */
-    | KW_CURRENCYFORMAT string_val string_val string_val string_val num_val
-        { token_free(&$1); token_free(&$2); token_free(&$3);
-          token_free(&$4); token_free(&$5); token_free(&$6);
-          $$.has_sym = 0; }
-    /* Syntax: alertlevels <ID> <color name> <color> [, <ID> <color name> <color>...]
-     * TODO: write precise rule; using gen_expr as approximation             */
-    | KW_ALERTLEVELS gen_expr TK_EOL
-        { token_free(&$1); $$.has_sym = 0; }
+    /* Syntax: (numberformat | currencyformat)
+     *         <negpfx> <negsfx> <thousandsep> <decimsep> <fracdigits>      */
+    | format_kw string_val string_val string_val string_val num_val
 
-    /* ── Extend sub-attributes ── */
-    /* Syntax: date <id> <name> [{ <attributes> }]
-     * (inside 'extend (task|resource) { }' body)                            */
-    | KW_DATE TK_IDENT string_val opt_body
-        { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
-          free($4.syms.arr); $$.has_sym = 0; }
-    /* Syntax: number <id> <name> [{ <attributes> }]                          */
-    | KW_NUMBER TK_IDENT string_val opt_body
-        { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
-          free($4.syms.arr); $$.has_sym = 0; }
-    /* Syntax: reference <id> <name> [{ <attributes> }]                       */
-    | KW_REFERENCE TK_IDENT string_val opt_body
-        { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
-          free($4.syms.arr); $$.has_sym = 0; }
-    /* Syntax: richtext <id> <name> [{ <attributes> }]                        */
-    | KW_RICHTEXT TK_IDENT string_val opt_body
-        { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
-          free($4.syms.arr); $$.has_sym = 0; }
-    /* Syntax: text <id> <name> [{ <attributes> }]                            */
-    | KW_TEXT TK_IDENT string_val opt_body
-        { token_free(&$1); token_free(&$2); token_free(&$3);
-          for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
-          free($4.syms.arr); $$.has_sym = 0; }
-
-    /* ── Tokens used only in logical expressions ─────────────────────────── *
-     * The isXxx/hasXxx keywords and treelevel appear ONLY in logical expression
-     * operands (never as standalone statements).  They are included here as
-     * item alternatives purely as error-recovery stubs; in normal parsing
-     * they will be consumed by gen_expr in their enclosing statement.       */
-    | KW_ISACTIVE opt_args TK_EOL    { token_free(&$1); $$.has_sym = 0; }
-    | KW_ISCHILDOF opt_args TK_EOL   { token_free(&$1); $$.has_sym = 0; }
-    | KW_ISDEPENDENCYOF opt_args TK_EOL { token_free(&$1); $$.has_sym = 0; }
-    | KW_ISDUTYOF opt_args TK_EOL    { token_free(&$1); $$.has_sym = 0; }
-    | KW_ISFEATUREOF opt_args TK_EOL { token_free(&$1); $$.has_sym = 0; }
-    | KW_ISLEAF opt_args TK_EOL      { token_free(&$1); $$.has_sym = 0; }
-    | KW_ISMILESTONE opt_args TK_EOL { token_free(&$1); $$.has_sym = 0; }
-    | KW_ISONGOING opt_args TK_EOL   { token_free(&$1); $$.has_sym = 0; }
-    | KW_ISRESOURCE opt_args TK_EOL  { token_free(&$1); $$.has_sym = 0; }
-    | KW_ISRESPONSIBILITYOF opt_args TK_EOL { token_free(&$1); $$.has_sym = 0; }
-    | KW_ISTASK opt_args TK_EOL      { token_free(&$1); $$.has_sym = 0; }
-    | KW_ISVALID opt_args TK_EOL     { token_free(&$1); $$.has_sym = 0; }
-    | KW_HASALERT opt_args TK_EOL    { token_free(&$1); $$.has_sym = 0; }
-    | KW_TREELEVEL opt_args TK_EOL   { token_free(&$1); $$.has_sym = 0; }
-
-    /* ── Tokens with unknown/unverified standalone syntax ────────────────── *
-     * TODO: verify exact syntax for these keywords with tj3man and write
-     *       precise rules.  Using opt_args as a safe fallback for now.      */
-    | KW_INHERIT opt_args TK_EOL     { token_free(&$1); $$.has_sym = 0; }
-    | KW_SCENARIOSPECIFIC opt_args TK_EOL { token_free(&$1); $$.has_sym = 0; }
+    /* ── Expression-only / unverified keywords ── *
+     * The isXxx/hasXxx keywords and treelevel appear only inside logical
+     * expressions and are normally consumed by gen_expr; these stubs keep
+     * them parseable standalone during error recovery.  inherit and
+     * scenariospecific have unverified standalone syntax (TODO: tj3man).   */
+    | stub_kw opt_args TK_EOL
 
     /* ── Macro invocation: ${macroname [args...]} ───────────────────────── *
-     * Macro invocations use ${...} which tokenises as TK_DOLLAR TK_LBRACE
-     * TK_IDENT opt_args TK_RBRACE.  Without this rule, TK_DOLLAR would
-     * cause an error, and the TK_RBRACE from the invocation would
-     * prematurely close the enclosing task/resource body.                  */
+     * Without this rule, TK_DOLLAR would cause an error, and the TK_RBRACE
+     * from the invocation would prematurely close the enclosing body.      */
     | TK_DOLLAR TK_LBRACE opt_args TK_RBRACE
-        { token_free(&$1); token_free(&$2); token_free(&$4); $$.has_sym = 0; }
 
     /* ── Fallback: unrecognised TK_IDENT statement ──
      *
@@ -1192,13 +695,106 @@ item
      * due to ':' being allowed in identifier characters).
      * Also handles any future keywords not yet in the KW_* token set.      */
     | TK_IDENT opt_args opt_body
-        {
-            discard_body(&$3);
-            token_free(&$1);
-            $$.has_sym = 0;
-        }
-    | error
-        { $$.has_sym = 0; }
+        { discard_body(&$3); }
+    ;
+
+/* ── Attribute keyword classes ───────────────────────────────────────────── *
+ *
+ * Each class collects the keywords sharing one argument shape; plain_stmt
+ * has a single alternative per class.  A keyword belongs to exactly one
+ * class (or to a dedicated plain_stmt alternative when it carries a
+ * semantic action).                                                         */
+
+/* <kw> <date> */
+date_kw
+    : KW_NOW | KW_MAXEND | KW_MINEND | KW_MAXSTART | KW_MINSTART | KW_MARKDATE
+    ;
+
+/* <kw> <value> <unit> */
+durval_kw
+    : KW_EFFORT | KW_DURATION | KW_LENGTH | KW_EFFORTDONE | KW_EFFORTLEFT
+    | KW_REMAINING | KW_GAPLENGTH | KW_GAPDURATION
+    ;
+
+/* <kw> <number> */
+numval_kw
+    : KW_COMPLETE | KW_OVERTIME | KW_SLOPPY | KW_DAILYWORKINGHOURS
+    | KW_YEARLYWORKINGDAYS | KW_EFFICIENCY | KW_RATE | KW_STARTCREDIT
+    | KW_ENDCREDIT
+    ;
+
+/* <kw> <integer> */
+int_kw
+    : KW_PRIORITY | KW_HEIGHT | KW_WIDTH
+    ;
+
+/* <kw> <value> <unit> [{ … }] — working-time limit attributes */
+durlimit_kw
+    : KW_DAILYMAX | KW_DAILYMIN | KW_WEEKLYMAX | KW_WEEKLYMIN
+    | KW_MONTHLYMAX | KW_MONTHLYMIN | KW_MAXIMUM | KW_MINIMUM
+    ;
+
+/* <kw> <string> */
+string_kw
+    : KW_NOTE | KW_EMAIL | KW_HEADLINE | KW_TITLE | KW_CAPTION | KW_EPILOG
+    | KW_PROLOG | KW_LEFT | KW_RIGHT | KW_CENTER | KW_FOOTER | KW_HEADER
+    | KW_RAWHTMLHEAD | KW_LISTITEM | KW_CURRENCY | KW_TIMEFORMAT
+    | KW_SHORTTIMEFORMAT | KW_TIMEFORMAT1 | KW_TIMEFORMAT2 | KW_OUTPUTDIR
+    | KW_AUXDIR | KW_COPYRIGHT | KW_DETAILS | KW_SUMMARY
+    ;
+
+/* <kw> <id> — single identifier argument (IDs and enum values alike) */
+ident_kw
+    : KW_PROJECTID | KW_TRACKINGSCENARIO | KW_ALERT | KW_AUTHOR
+    | KW_RESOURCEROOT | KW_ACCOUNTROOT | KW_PURGE
+    | KW_SCHEDULING | KW_SCHEDULINGMODE | KW_AGGREGATE | KW_SELFCONTAINED
+    | KW_ACTIVE | KW_JOURNALMODE | KW_LOADUNIT | KW_SELECT | KW_SCALE
+    | KW_LISTTYPE
+    ;
+
+/* <kw> <id> [, <id>...] */
+idlist_kw
+    : KW_RESPONSIBLE | KW_MANAGERS | KW_SCENARIOS | KW_FLAGS
+    | KW_ALTERNATIVE | KW_PROJECTIDS | KW_RESOURCES
+    ;
+
+/* <kw> — no arguments */
+noarg_kw
+    : KW_MILESTONE | KW_SCHEDULED | KW_MANDATORY | KW_PERSISTENT
+    | KW_WEEKSTARTSMONDAY | KW_WEEKSTARTSSUNDAY | KW_DISABLED | KW_ENABLED
+    | KW_REPLACE | KW_NOVEVENTS | KW_ONSTART | KW_ONEND | KW_STRICT
+    | KW_TIMEOFF
+    ;
+
+/* <kw> <gen_expr> — free-form logical-expression / list statements */
+genexpr_kw
+    : KW_HIDETASK | KW_HIDERESOURCE | KW_HIDEACCOUNT | KW_HIDEREPORT
+    | KW_HIDEJOURNALENTRY | KW_ROLLUPTASK | KW_ROLLUPRESOURCE
+    | KW_ROLLUPACCOUNT | KW_WARN | KW_FAIL | KW_CELLCOLOR | KW_CELLTEXT
+    | KW_TOOLTIP | KW_FONTCOLOR | KW_HALIGN | KW_SORTTASKS | KW_SORTRESOURCES
+    | KW_SORTACCOUNTS | KW_SORTJOURNALENTRIES | KW_JOURNALATTRIBUTES
+    | KW_TASKATTRIBUTES | KW_RESOURCEATTRIBUTES | KW_DEFINITIONS
+    | KW_OPENNODES | KW_LEAVEALLOWANCES | KW_LEAVES | KW_VACATION
+    | KW_WORKINGHOURS | KW_ALERTLEVELS
+    ;
+
+/* <kw> <id> <string> [{ … }] */
+ident_string_body_kw
+    : KW_STATUS | KW_NEWTASK
+    | KW_DATE | KW_NUMBER | KW_REFERENCE | KW_RICHTEXT | KW_TEXT
+    ;
+
+/* <kw> <string> ×4 <number> */
+format_kw
+    : KW_NUMBERFORMAT | KW_CURRENCYFORMAT
+    ;
+
+/* <kw> [args] — error-recovery / unverified-syntax stubs */
+stub_kw
+    : KW_ISACTIVE | KW_ISCHILDOF | KW_ISDEPENDENCYOF | KW_ISDUTYOF
+    | KW_ISFEATUREOF | KW_ISLEAF | KW_ISMILESTONE | KW_ISONGOING
+    | KW_ISRESOURCE | KW_ISRESPONSIBILITYOF | KW_ISTASK | KW_ISVALID
+    | KW_HASALERT | KW_TREELEVEL | KW_INHERIT | KW_SCENARIOSPECIFIC
     ;
 
 /* ══════════════════════════════════════════════════════════════════════════ *
@@ -1248,8 +844,6 @@ symbol_decl
                 route_top_level(child);
             }
             free($6.syms.arr);
-            token_free(&$1);
-            if ($4.text) token_free(&$4); /* discard version string */
             /* TODO: store interval $5 as the project time range */
         }
     | sym_kw opt_id string_val
@@ -1260,31 +854,29 @@ symbol_decl
             if ($1.kind == KW_TASK) sym_stack_pop();
             $$ = $<sym>4;
             finish_tj_node($$, $1, $5);
-            token_free(&$1);
         }
     /* ── shift declaration: `shift [id] <name> [{ … }]` ──
      *
      * KW_SHIFT is deliberately kept OUT of sym_kw and given its own
      * alternative.  Were it in sym_kw it would reduce to sym_kw the moment the
      * keyword is seen, which collides with the `shift` *attribute*
-     * (`item: KW_SHIFT shift_attr_list`, e.g. `shift early [interval], …`) and
-     * produces a shift/reduce conflict.  As a distinct alternative the decision
-     * defers one token: after `shift <id>` a following name string selects this
-     * declaration, while an interval / comma / `}` / end-of-line selects the
-     * attribute.  TaskJuggler distinguishes the two by scope; we stay
-     * context-free and let the trailing token decide.                        */
+     * (`plain_stmt: KW_SHIFT shift_attr_list`, e.g. `shift early [interval], …`)
+     * and produces a shift/reduce conflict.  As a distinct alternative the
+     * decision defers one token: after `shift <id>` a following name string
+     * selects this declaration, while an interval / comma / `}` / end-of-line
+     * selects the attribute.  TaskJuggler distinguishes the two by scope; we
+     * stay context-free and let the trailing token decide.                  */
     | KW_SHIFT opt_id string_val opt_body
         {
             $$ = alloc_tj_node($1, $2, $3);
             finish_tj_node($$, $1, $4);
-            token_free(&$1);
         }
     ;
 
 sym_kw
-    : KW_TASK     { $$ = $1; }
-    | KW_RESOURCE { $$ = $1; }
-    | KW_ACCOUNT  { $$ = $1; }
+    : KW_TASK
+    | KW_RESOURCE
+    | KW_ACCOUNT
     ;
 
 /* ── report_decl: all report types ─────────────────────────────────────── *
@@ -1310,35 +902,31 @@ report_decl
         {
             $$ = alloc_tj_node($1, $2, $3);
             finish_tj_node($$, $1, $4);
-            token_free(&$1);
         }
     | KW_ICALREPORT string_val opt_name opt_body
         {
             Token no_id = {0};
             $$ = alloc_tj_node($1, no_id, $2);
             finish_tj_node($$, $1, $4);
-            token_free(&$1);
-            if ($3.text) token_free(&$3); /* second string (unused as display name) */
+            /* $3: second string (unused as display name) */
         }
     | KW_NIKUREPORT string_val opt_name opt_body
         {
             Token no_id = {0};
             $$ = alloc_tj_node($1, no_id, $2);
             finish_tj_node($$, $1, $4);
-            token_free(&$1);
-            if ($3.text) token_free(&$3);
         }
     ;
 
 report_kw
-    : KW_TASKREPORT        { $$ = $1; }
-    | KW_RESOURCEREPORT    { $$ = $1; }
-    | KW_ACCOUNTREPORT     { $$ = $1; }
-    | KW_TEXTREPORT        { $$ = $1; }
-    | KW_TRACEREPORT       { $$ = $1; }
-    | KW_EXPORT            { $$ = $1; }
-    | KW_STATUSSHEETREPORT { $$ = $1; }
-    | KW_TIMESHEETREPORT   { $$ = $1; }
+    : KW_TASKREPORT
+    | KW_RESOURCEREPORT
+    | KW_ACCOUNTREPORT
+    | KW_TEXTREPORT
+    | KW_TRACEREPORT
+    | KW_EXPORT
+    | KW_STATUSSHEETREPORT
+    | KW_TIMESHEETREPORT
     ;
 
 /* ── navigator_decl ─────────────────────────────────────────────────────── *
@@ -1350,7 +938,6 @@ navigator_decl
             Token no_name = {0};
             $$ = alloc_tj_node($1, $2, no_name);
             finish_tj_node($$, $1, $3);
-            token_free(&$1);
         }
     ;
 
@@ -1363,7 +950,6 @@ scenario_decl
         {
             $$ = alloc_tj_node($1, $2, $3);
             finish_tj_node($$, $1, $4);
-            token_free(&$1);
         }
     ;
 
@@ -1377,7 +963,6 @@ timesheet_decl
             Token no_name = {0};
             $$ = alloc_tj_node($1, $2, no_name);
             finish_tj_node($$, $1, $4);
-            token_free(&$1);
         }
     ;
 
@@ -1390,7 +975,6 @@ statussheet_decl
             Token no_name = {0};
             $$ = alloc_tj_node($1, $2, no_name);
             finish_tj_node($$, $1, $4);
-            token_free(&$1);
         }
     ;
 
@@ -1402,7 +986,6 @@ tagfile_decl
         {
             $$ = alloc_tj_node($1, $2, $3);
             finish_tj_node($$, $1, $4);
-            token_free(&$1);
         }
     ;
 
@@ -1419,8 +1002,6 @@ journalentry_decl
             /* Use the date as the detail and the headline as the name */
             $$ = alloc_tj_node($1, no_id, $3);
             finish_tj_node($$, $1, $4);
-            token_free(&$1);
-            token_free(&$2); /* date token */
         }
     ;
 
@@ -1430,16 +1011,12 @@ journalentry_decl
  *   richtext.extend, text.extend                                            */
 extend_stmt
     : KW_EXTEND extend_target opt_body
-        {
-            token_free(&$1); token_free(&$2);
-            for (int i = 0; i < $3.syms.n; i++) tj_node_free($3.syms.arr[i]);
-            free($3.syms.arr);
-        }
+        { discard_body(&$3); }
     ;
 
 extend_target
-    : KW_TASK     { $$ = $1; }
-    | KW_RESOURCE { $$ = $1; }
+    : KW_TASK
+    | KW_RESOURCE
     ;
 
 /* ── supplement_stmt ────────────────────────────────────────────────────── *
@@ -1450,18 +1027,14 @@ extend_target
  * Note: 'report' is not a keyword token, so it is handled as TK_IDENT.    */
 supplement_stmt
     : KW_SUPPLEMENT supplement_target dotted_id opt_body
-        {
-            token_free(&$1); token_free(&$2);
-            for (int i = 0; i < $4.syms.n; i++) tj_node_free($4.syms.arr[i]);
-            free($4.syms.arr);
-        }
+        { discard_body(&$4); }
     ;
 
 supplement_target
-    : KW_ACCOUNT  { $$ = $1; }
-    | KW_TASK     { $$ = $1; }
-    | KW_RESOURCE { $$ = $1; }
-    | TK_IDENT    { $$ = $1; }  /* 'report' keyword (not in KW_* set) */
+    : KW_ACCOUNT
+    | KW_TASK
+    | KW_RESOURCE
+    | TK_IDENT     /* 'report' keyword (not in KW_* set) */
     ;
 
 /* ── macro_stmt ─────────────────────────────────────────────────────────── *
@@ -1471,8 +1044,6 @@ supplement_target
  * macro_body_tok (anything except TK_RBRACKET) wrapped in [ ].             */
 macro_stmt
     : KW_MACRO TK_IDENT TK_LBRACKET macro_body TK_RBRACKET
-        { token_free(&$1); token_free(&$2);
-          token_free(&$3); token_free(&$5); }
     ;
 
 /* ── include_stmt ───────────────────────────────────────────────────────── *
@@ -1500,7 +1071,6 @@ include_stmt
             free(g_pending_resource_prefix); g_pending_resource_prefix = NULL;
             free(g_pending_account_prefix);  g_pending_account_prefix  = NULL;
             free(g_pending_report_prefix);   g_pending_report_prefix   = NULL;
-            token_free(&$1); token_free(&$2);
             discard_body(&$4);
         }
     ;
@@ -1511,8 +1081,8 @@ include_stmt
 
 /* ── num_val: integer or floating-point number ──────────────────────────── */
 num_val
-    : TK_INTEGER { $$ = $1; }
-    | TK_FLOAT   { $$ = $1; }
+    : TK_INTEGER
+    | TK_FLOAT
     ;
 
 /* ── dur_unit: duration unit identifier (min h d w m y %) ──────────────── *
@@ -1520,8 +1090,8 @@ num_val
  * here.  Semantic validation (ensuring the unit is one of min/h/d/w/m/y)
  * is left to downstream passes.                                             */
 dur_unit
-    : TK_IDENT   { $$ = $1; }
-    | TK_PERCENT { $$ = $1; }  /* for 'work' which uses % as a unit */
+    : TK_IDENT
+    | TK_PERCENT   /* for 'work' which uses % as a unit */
     ;
 
 /* ── dur_val: duration value = number + unit ────────────────────────────── *
@@ -1531,15 +1101,13 @@ dur_unit
  * or -2h.  Both signed and unsigned compact forms are accepted here.       */
 dur_val
     : num_val dur_unit
-        { token_free(&$1); token_free(&$2); }
     | TK_DURATION
-        { token_free(&$1); }
     ;
 
 /* ── string_val: a quoted or multi-line string ──────────────────────────── */
 string_val
-    : TK_STR           { $$ = $1; }
-    | TK_MULTI_LINE_STR { $$ = $1; }
+    : TK_STR
+    | TK_MULTI_LINE_STR
     ;
 
 /* ── opt_id: optional identifier (the TJP property ID) ─────────────────── *
@@ -1549,21 +1117,21 @@ string_val
  * as an identifier in declaration position.                                 */
 opt_id
     : /* empty */  { $$ = (Token){0}; }
-    | TK_IDENT     { $$ = $1; }
-    | KW_START     { $$ = $1; }
+    | TK_IDENT
+    | KW_START
     ;
 
 /* ── opt_name: optional display-name string ─────────────────────────────── */
 opt_name
     : /* empty */       { $$ = (Token){0}; }
-    | TK_STR            { $$ = $1; }
-    | TK_MULTI_LINE_STR { $$ = $1; }
+    | TK_STR
+    | TK_MULTI_LINE_STR
     ;
 
 /* ── opt_version: optional version string (project declaration only) ─────── */
 opt_version
     : /* empty */  { $$ = (Token){0}; }
-    | TK_STR       { $$ = $1; }
+    | TK_STR
     ;
 
 /* ── interval2: required interval ──────────────────────────────────────── *
@@ -1572,11 +1140,8 @@ opt_version
  * The separate-token form (+ N unit) is also accepted.                     */
 interval2
     : TK_DATE TK_MINUS TK_DATE
-        { token_free(&$1); token_free(&$2); token_free(&$3); }
     | TK_DATE TK_DURATION
-        { token_free(&$1); token_free(&$2); }
     | TK_DATE TK_PLUS num_val dur_unit
-        { token_free(&$1); token_free(&$2); token_free(&$3); token_free(&$4); }
     ;
 
 /* ── interval3: optional interval ──────────────────────────────────────── *
@@ -1584,13 +1149,9 @@ interval2
  * Used in: vacation, leaves, statussheet, timesheet                        */
 interval3
     : TK_DATE
-        { token_free(&$1); }
     | TK_DATE TK_MINUS TK_DATE
-        { token_free(&$1); token_free(&$2); token_free(&$3); }
     | TK_DATE TK_DURATION
-        { token_free(&$1); token_free(&$2); }
     | TK_DATE TK_PLUS num_val dur_unit
-        { token_free(&$1); token_free(&$2); token_free(&$3); token_free(&$4); }
     ;
 
 /* ── dotted_id: dot-separated identifier path ───────────────────────────── *
@@ -1598,9 +1159,7 @@ interval3
  * Used for: taskroot, adopt targets, supplement target IDs                 */
 dotted_id
     : TK_IDENT
-        { token_free(&$1); }
     | dotted_id TK_DOT TK_IDENT
-        { token_free(&$2); token_free(&$3); }
     ;
 
 /* ── prefix_path_id: dotted identifier returned as a heap-allocated string
@@ -1623,7 +1182,6 @@ prefix_path_id
             memcpy(buf + plen + 1, $3.text, slen + 1);
             free($1);
             $$ = buf;
-            token_free(&$2); token_free(&$3);
         }
     ;
 
@@ -1631,15 +1189,12 @@ prefix_path_id
 dotted_id_list
     : dotted_id
     | dotted_id_list TK_COMMA dotted_id
-        { token_free(&$2); }
     ;
 
 /* ── id_list: comma-separated list of plain identifiers ─────────────────── */
 id_list
     : TK_IDENT
-        { token_free(&$1); }
     | id_list TK_COMMA TK_IDENT
-        { token_free(&$2); token_free(&$3); }
     ;
 
 /* ── bang_seq: zero or more leading ! tokens ────────────────────────────── *
@@ -1648,7 +1203,7 @@ bang_seq
     : /* empty */
         { $$ = 0; }
     | bang_seq TK_BANG
-        { token_free(&$2); $$ = $1 + 1; }
+        { $$ = $1 + 1; }
     ;
 
 /* ── dep_path_seg: one segment of a dotted task path ────────────────────── *
@@ -1657,8 +1212,8 @@ bang_seq
  * the lexer's keyword token does not prevent them from being recognised as
  * a path segment in dependency references.                                  */
 dep_path_seg
-    : TK_IDENT  { $$ = $1; }
-    | KW_START  { $$ = $1; }
+    : TK_IDENT
+    | KW_START
     ;
 
 /* ── dep_path: dotted identifier path for dep references ────────────────── *
@@ -1670,8 +1225,7 @@ dep_path
          * built into the same arena.  Either way tj_node_free never frees a
          * dep path; the arena reclaims it with the rest of the tree. */
         { $$.bang_count = 0; $$.path = $1.text;
-          $$.start = $1.start; $$.end = $1.end;
-          token_free(&$1); }
+          $$.start = $1.start; $$.end = $1.end; }
     | dep_path TK_DOT dep_path_seg
         { size_t plen = strlen($1.path);
           size_t slen = strlen($3.text);
@@ -1682,8 +1236,7 @@ dep_path
           $$.bang_count = 0;
           $$.path  = buf;
           $$.start = $1.start;
-          $$.end   = $3.end;
-          token_free(&$2); token_free(&$3); }
+          $$.end   = $3.end; }
     ;
 
 /* ── task_ref: [!...]dep_path  ──────────────────────────────────────────── */
@@ -1723,7 +1276,6 @@ dep_ref
 dep_ref_list
     : dep_ref
     | dep_ref_list TK_COMMA dep_ref
-        { token_free(&$2); }
     ;
 
 /* ── alloc_ref: resource ID with optional allocation body ───────────────── *
@@ -1732,18 +1284,13 @@ dep_ref_list
  *   shift.allocate, shifts.allocate                                        */
 alloc_ref
     : TK_IDENT opt_body
-        {
-            token_free(&$1);
-            for (int i = 0; i < $2.syms.n; i++) tj_node_free($2.syms.arr[i]);
-            free($2.syms.arr);
-        }
+        { discard_body(&$2); }
     ;
 
 /* ── alloc_ref_list: comma-separated allocation references ─────────────── */
 alloc_ref_list
     : alloc_ref
     | alloc_ref_list TK_COMMA alloc_ref
-        { token_free(&$2); }
     ;
 
 /* ── shift_attr_ref: shift ID with optional interval ────────────────────── *
@@ -1751,16 +1298,13 @@ alloc_ref_list
  * Used in shift/shifts attribute statements.                               */
 shift_attr_ref
     : TK_IDENT
-        { token_free(&$1); }
     | TK_IDENT interval2
-        { token_free(&$1); }
     ;
 
 /* ── shift_attr_list: comma-separated shift references ─────────────────── */
 shift_attr_list
     : shift_attr_ref
     | shift_attr_list TK_COMMA shift_attr_ref
-        { token_free(&$2); }
     ;
 
 /* ── booking_interval_list: one or more intervals for booking ───────────── *
@@ -1768,7 +1312,6 @@ shift_attr_list
 booking_interval_list
     : interval3
     | booking_interval_list TK_COMMA interval3
-        { token_free(&$2); }
     ;
 
 /* ── chargeset_list: account + percentage pairs ─────────────────────────── *
@@ -1777,9 +1320,7 @@ booking_interval_list
  * In the lexer, '50%' is tokenized as TK_INTEGER TK_PERCENT (two tokens).  */
 chargeset_list
     : TK_IDENT num_val TK_PERCENT
-        { token_free(&$1); token_free(&$2); token_free(&$3); }
     | chargeset_list TK_COMMA TK_IDENT num_val TK_PERCENT
-        { token_free(&$2); token_free(&$3); token_free(&$4); token_free(&$5); }
     ;
 
 /* ── credits_list: date + description + amount triples ──────────────────── *
@@ -1787,9 +1328,7 @@ chargeset_list
  */
 credits_list
     : TK_DATE string_val num_val
-        { token_free(&$1); token_free(&$2); token_free(&$3); }
     | credits_list TK_COMMA TK_DATE string_val num_val
-        { token_free(&$2); token_free(&$3); token_free(&$4); token_free(&$5); }
     ;
 
 /* ── column_id: a column name token ─────────────────────────────────────── *
@@ -1797,33 +1336,20 @@ credits_list
  * happen to share names with column IDs (e.g. start, end, effort, alert).
  * Rather than listing all ~60+ valid column IDs, we accept any single
  * gen_expr_tok here.  The columns_list rule uses commas as delimiters so
- * the column ID consumes only one token.                                    */
+ * the column ID consumes only one token.
+ *
+ * TODO: add all other column IDs as seen in tj3man columnid listing:
+ * activetasks, annualleave, annualleavebalance, annualleavelist, bsi,
+ * chart, children, closedtasks, competitorcount, competitors, cost,
+ * criticalness, daily, directreports, duties, effortdone, effortleft,
+ * followers, id, journal, managers, monthly, name, no, overtime, ...
+ * Most of these are plain TK_IDENT so they are already covered.            */
 column_id
-    : TK_IDENT { token_free(&$1); }
+    : TK_IDENT
     /* Column IDs that are also keyword tokens: */
-    | KW_ALERT    { token_free(&$1); }
-    | KW_COMPLETE { token_free(&$1); }
-    | KW_DATE     { token_free(&$1); }
-    | KW_DURATION { token_free(&$1); }
-    | KW_EFFORT   { token_free(&$1); }
-    | KW_EMAIL    { token_free(&$1); }
-    | KW_END      { token_free(&$1); }
-    | KW_FLAGS    { token_free(&$1); }
-    | KW_LEAVES   { token_free(&$1); }
-    | KW_LENGTH   { token_free(&$1); }
-    | KW_NOTE     { token_free(&$1); }
-    | KW_PRIORITY { token_free(&$1); }
-    | KW_RATE     { token_free(&$1); }
-    | KW_REMAINING { token_free(&$1); }
-    | KW_START    { token_free(&$1); }
-    | KW_STATUS   { token_free(&$1); }
-    | KW_WORK     { token_free(&$1); }
-    /* TODO: add all other column IDs as seen in tj3man columnid listing:
-     * activetasks, annualleave, annualleavebalance, annualleavelist, bsi,
-     * chart, children, closedtasks, competitorcount, competitors, cost,
-     * criticalness, daily, directreports, duties, effortdone, effortleft,
-     * followers, id, journal, managers, monthly, name, no, overtime, ...
-     * Most of these are plain TK_IDENT so they are already covered.        */
+    | KW_ALERT | KW_COMPLETE | KW_DATE | KW_DURATION | KW_EFFORT | KW_EMAIL
+    | KW_END | KW_FLAGS | KW_LEAVES | KW_LENGTH | KW_NOTE | KW_PRIORITY
+    | KW_RATE | KW_REMAINING | KW_START | KW_STATUS | KW_WORK
     ;
 
 /* ── column_entry: single column specification ──────────────────────────── *
@@ -1833,17 +1359,13 @@ column_id
  *   tooltip, width                                                          */
 column_entry
     : column_id opt_body
-        {
-            for (int i = 0; i < $2.syms.n; i++) tj_node_free($2.syms.arr[i]);
-            free($2.syms.arr);
-        }
+        { discard_body(&$2); }
     ;
 
 /* ── column_list: comma-separated column specifications ─────────────────── */
 column_list
     : column_entry
     | column_list TK_COMMA column_entry
-        { token_free(&$2); }
     ;
 
 /* ── formats_list: comma-separated format identifiers ───────────────────── *
@@ -1851,9 +1373,7 @@ column_list
  * These are TK_IDENT tokens (not keywords).                                */
 formats_list
     : TK_IDENT
-        { token_free(&$1); }
     | formats_list TK_COMMA TK_IDENT
-        { token_free(&$2); token_free(&$3); }
     ;
 
 /* ── gen_expr: general expression ───────────────────────────────────────── *
@@ -1882,204 +1402,53 @@ gen_expr
     ;
 
 gen_expr_tok
-    : TK_IDENT          { token_free(&$1); }
-    | TK_INTEGER        { token_free(&$1); }
-    | TK_FLOAT          { token_free(&$1); }
-    | TK_STR            { token_free(&$1); }
-    | TK_DATE           { token_free(&$1); }
-    | TK_DURATION       { token_free(&$1); }
-    | TK_BANG           { token_free(&$1); }
-    | TK_PLUS           { token_free(&$1); }
-    | TK_MINUS          { token_free(&$1); }
-    | TK_DOT            { token_free(&$1); }
-    | TK_COLON          { token_free(&$1); }
-    | TK_COMMA          { token_free(&$1); }
-    | TK_PERCENT        { token_free(&$1); }
-    | TK_DOLLAR         { token_free(&$1); }
-    | TK_LBRACKET       { token_free(&$1); }
-    | TK_RBRACKET       { token_free(&$1); }
-    | TK_MULTI_LINE_STR { token_free(&$1); }
-    | TK_ERROR          { token_free(&$1); }
+    : TK_IDENT | TK_INTEGER | TK_FLOAT | TK_STR | TK_DATE | TK_DURATION
+    | TK_BANG | TK_PLUS | TK_MINUS | TK_DOT | TK_COLON | TK_COMMA
+    | TK_PERCENT | TK_DOLLAR | TK_LBRACKET | TK_RBRACKET
+    | TK_MULTI_LINE_STR | TK_ERROR
     /* Attribute/expression keywords (included so gen_expr can parse
      * expressions like "plan.effort = 0" or "~isleaf()"):                  */
-    | KW_ACCOUNTPREFIX    { token_free(&$1); }
-    | KW_ACCOUNTROOT      { token_free(&$1); }
-    | KW_ACTIVE           { token_free(&$1); }
-    | KW_ADOPT            { token_free(&$1); }
-    | KW_AGGREGATE        { token_free(&$1); }
-    | KW_ALERT            { token_free(&$1); }
-    | KW_ALERTLEVELS      { token_free(&$1); }
-    | KW_ALLOCATE         { token_free(&$1); }
-    | KW_ALTERNATIVE      { token_free(&$1); }
-    | KW_AUTHOR           { token_free(&$1); }
-    | KW_AUXDIR           { token_free(&$1); }
-    | KW_BALANCE          { token_free(&$1); }
-    | KW_BOOKING          { token_free(&$1); }
-    | KW_CAPTION          { token_free(&$1); }
-    | KW_CELLCOLOR        { token_free(&$1); }
-    | KW_CELLTEXT         { token_free(&$1); }
-    | KW_CENTER           { token_free(&$1); }
-    | KW_CHARGE           { token_free(&$1); }
-    | KW_CHARGESET        { token_free(&$1); }
-    | KW_COLUMNS          { token_free(&$1); }
-    | KW_COMPLETE         { token_free(&$1); }
-    | KW_COPYRIGHT        { token_free(&$1); }
-    | KW_CREDITS          { token_free(&$1); }
-    | KW_CURRENCY         { token_free(&$1); }
-    | KW_CURRENCYFORMAT   { token_free(&$1); }
-    | KW_DAILYMAX         { token_free(&$1); }
-    | KW_DAILYMIN         { token_free(&$1); }
-    | KW_DAILYWORKINGHOURS { token_free(&$1); }
-    | KW_DATE             { token_free(&$1); }
-    | KW_DEFINITIONS      { token_free(&$1); }
-    | KW_DEPENDS          { token_free(&$1); }
-    | KW_DETAILS          { token_free(&$1); }
-    | KW_DISABLED         { token_free(&$1); }
-    | KW_DURATION         { token_free(&$1); }
-    | KW_EFFICIENCY       { token_free(&$1); }
-    | KW_EFFORT           { token_free(&$1); }
-    | KW_EFFORTDONE       { token_free(&$1); }
-    | KW_EFFORTLEFT       { token_free(&$1); }
-    | KW_EMAIL            { token_free(&$1); }
-    | KW_ENABLED          { token_free(&$1); }
-    | KW_END              { token_free(&$1); }
-    | KW_ENDCREDIT        { token_free(&$1); }
-    | KW_EPILOG           { token_free(&$1); }
-    | KW_FAIL             { token_free(&$1); }
-    | KW_FLAGS            { token_free(&$1); }
-    | KW_FONTCOLOR        { token_free(&$1); }
-    | KW_FOOTER           { token_free(&$1); }
-    | KW_FORMATS          { token_free(&$1); }
-    | KW_GAPDURATION      { token_free(&$1); }
-    | KW_GAPLENGTH        { token_free(&$1); }
-    | KW_HALIGN           { token_free(&$1); }
-    | KW_HASALERT         { token_free(&$1); }
-    | KW_HEADER           { token_free(&$1); }
-    | KW_HEADLINE         { token_free(&$1); }
-    | KW_HEIGHT           { token_free(&$1); }
-    | KW_HIDEACCOUNT      { token_free(&$1); }
-    | KW_HIDEJOURNALENTRY { token_free(&$1); }
-    | KW_HIDEREPORT       { token_free(&$1); }
-    | KW_HIDERESOURCE     { token_free(&$1); }
-    | KW_HIDETASK         { token_free(&$1); }
-    | KW_INHERIT          { token_free(&$1); }
-    | KW_ISACTIVE         { token_free(&$1); }
-    | KW_ISCHILDOF        { token_free(&$1); }
-    | KW_ISDEPENDENCYOF   { token_free(&$1); }
-    | KW_ISDUTYOF         { token_free(&$1); }
-    | KW_ISFEATUREOF      { token_free(&$1); }
-    | KW_ISLEAF           { token_free(&$1); }
-    | KW_ISMILESTONE      { token_free(&$1); }
-    | KW_ISONGOING        { token_free(&$1); }
-    | KW_ISRESOURCE       { token_free(&$1); }
-    | KW_ISRESPONSIBILITYOF { token_free(&$1); }
-    | KW_ISTASK           { token_free(&$1); }
-    | KW_ISVALID          { token_free(&$1); }
-    | KW_JOURNALATTRIBUTES { token_free(&$1); }
-    | KW_JOURNALMODE      { token_free(&$1); }
-    | KW_LEAVEALLOWANCES  { token_free(&$1); }
-    | KW_LEAVES           { token_free(&$1); }
-    | KW_LEFT             { token_free(&$1); }
-    | KW_LENGTH           { token_free(&$1); }
-    | KW_LIMITS           { token_free(&$1); }
-    | KW_LISTITEM         { token_free(&$1); }
-    | KW_LISTTYPE         { token_free(&$1); }
-    | KW_LOADUNIT         { token_free(&$1); }
-    | KW_MANAGERS         { token_free(&$1); }
-    | KW_MANDATORY        { token_free(&$1); }
-    | KW_MARKDATE         { token_free(&$1); }
-    | KW_MAXEND           { token_free(&$1); }
-    | KW_MAXIMUM          { token_free(&$1); }
-    | KW_MAXSTART         { token_free(&$1); }
-    | KW_MILESTONE        { token_free(&$1); }
-    | KW_MINEND           { token_free(&$1); }
-    | KW_MINIMUM          { token_free(&$1); }
-    | KW_MINSTART         { token_free(&$1); }
-    | KW_MONTHLYMAX       { token_free(&$1); }
-    | KW_MONTHLYMIN       { token_free(&$1); }
-    | KW_NEWTASK          { token_free(&$1); }
-    | KW_NOTE             { token_free(&$1); }
-    | KW_NOVEVENTS        { token_free(&$1); }
-    | KW_NOW              { token_free(&$1); }
-    | KW_NUMBER           { token_free(&$1); }
-    | KW_NUMBERFORMAT     { token_free(&$1); }
-    | KW_ONEND            { token_free(&$1); }
-    | KW_ONSTART          { token_free(&$1); }
-    | KW_OPENNODES        { token_free(&$1); }
-    | KW_OUTPUTDIR        { token_free(&$1); }
-    | KW_OVERTIME         { token_free(&$1); }
-    | KW_PERIOD           { token_free(&$1); }
-    | KW_PERSISTENT       { token_free(&$1); }
-    | KW_PRECEDES         { token_free(&$1); }
-    | KW_PRIORITY         { token_free(&$1); }
-    | KW_PROJECTID        { token_free(&$1); }
-    | KW_PROJECTIDS       { token_free(&$1); }
-    | KW_PROJECTION       { token_free(&$1); }
-    | KW_PROLOG           { token_free(&$1); }
-    | KW_PURGE            { token_free(&$1); }
-    | KW_RATE             { token_free(&$1); }
-    | KW_RAWHTMLHEAD      { token_free(&$1); }
-    | KW_REFERENCE        { token_free(&$1); }
-    | KW_REMAINING        { token_free(&$1); }
-    | KW_REPLACE          { token_free(&$1); }
-    | KW_REPORTPREFIX     { token_free(&$1); }
-    | KW_RESOURCEATTRIBUTES { token_free(&$1); }
-    | KW_RESOURCEPREFIX   { token_free(&$1); }
-    | KW_RESOURCEROOT     { token_free(&$1); }
-    | KW_RESOURCES        { token_free(&$1); }
-    | KW_RESPONSIBLE      { token_free(&$1); }
-    | KW_RICHTEXT         { token_free(&$1); }
-    | KW_RIGHT            { token_free(&$1); }
-    | KW_ROLLUPACCOUNT    { token_free(&$1); }
-    | KW_ROLLUPRESOURCE   { token_free(&$1); }
-    | KW_ROLLUPTASK       { token_free(&$1); }
-    | KW_SCALE            { token_free(&$1); }
-    | KW_SCENARIOS        { token_free(&$1); }
-    | KW_SCENARIOSPECIFIC { token_free(&$1); }
-    | KW_SCHEDULED        { token_free(&$1); }
-    | KW_SCHEDULING       { token_free(&$1); }
-    | KW_SCHEDULINGMODE   { token_free(&$1); }
-    | KW_SELECT           { token_free(&$1); }
-    | KW_SELFCONTAINED    { token_free(&$1); }
-    | KW_SHIFTS           { token_free(&$1); }
-    | KW_SHORTTIMEFORMAT  { token_free(&$1); }
-    | KW_SLOPPY           { token_free(&$1); }
-    | KW_SORTACCOUNTS     { token_free(&$1); }
-    | KW_SORTJOURNALENTRIES { token_free(&$1); }
-    | KW_SORTRESOURCES    { token_free(&$1); }
-    | KW_SORTTASKS        { token_free(&$1); }
-    | KW_START            { token_free(&$1); }
-    | KW_STARTCREDIT      { token_free(&$1); }
-    | KW_STATUS           { token_free(&$1); }
-    | KW_STRICT           { token_free(&$1); }
-    | KW_SUMMARY          { token_free(&$1); }
-    | KW_TAGFILE          { token_free(&$1); }
-    | KW_TASKATTRIBUTES   { token_free(&$1); }
-    | KW_TASKPREFIX       { token_free(&$1); }
-    | KW_TASKROOT         { token_free(&$1); }
-    | KW_TEXT             { token_free(&$1); }
-    | KW_TIMEFORMAT       { token_free(&$1); }
-    | KW_TIMEFORMAT1      { token_free(&$1); }
-    | KW_TIMEFORMAT2      { token_free(&$1); }
-    | KW_TIMEOFF          { token_free(&$1); }
-    | KW_TIMEZONE         { token_free(&$1); }
-    | KW_TIMINGRESOLUTION { token_free(&$1); }
-    | KW_TITLE            { token_free(&$1); }
-    | KW_TOOLTIP          { token_free(&$1); }
-    | KW_TRACKINGSCENARIO { token_free(&$1); }
-    | KW_TREELEVEL        { token_free(&$1); }
-    | KW_VACATION         { token_free(&$1); }
-    | KW_WARN             { token_free(&$1); }
-    | KW_WEEKLYMAX        { token_free(&$1); }
-    | KW_WEEKLYMIN        { token_free(&$1); }
-    | KW_WEEKSTARTSMONDAY { token_free(&$1); }
-    | KW_WEEKSTARTSSUNDAY { token_free(&$1); }
-    | KW_WIDTH            { token_free(&$1); }
-    | KW_WORK             { token_free(&$1); }
-    | KW_WORKINGHOURS     { token_free(&$1); }
-    | KW_YEARLYWORKINGDAYS { token_free(&$1); }
-    /* is* / has* / treelevel: expression-only functions                     */
-    /* (already listed above under KW_IS* and KW_HASALERT/KW_TREELEVEL)     */
+    | KW_ACCOUNTPREFIX | KW_ACCOUNTROOT | KW_ACTIVE | KW_ADOPT
+    | KW_AGGREGATE | KW_ALERT | KW_ALERTLEVELS | KW_ALLOCATE
+    | KW_ALTERNATIVE | KW_AUTHOR | KW_AUXDIR | KW_BALANCE | KW_BOOKING
+    | KW_CAPTION | KW_CELLCOLOR | KW_CELLTEXT | KW_CENTER | KW_CHARGE
+    | KW_CHARGESET | KW_COLUMNS | KW_COMPLETE | KW_COPYRIGHT | KW_CREDITS
+    | KW_CURRENCY | KW_CURRENCYFORMAT | KW_DAILYMAX | KW_DAILYMIN
+    | KW_DAILYWORKINGHOURS | KW_DATE | KW_DEFINITIONS | KW_DEPENDS
+    | KW_DETAILS | KW_DISABLED | KW_DURATION | KW_EFFICIENCY | KW_EFFORT
+    | KW_EFFORTDONE | KW_EFFORTLEFT | KW_EMAIL | KW_ENABLED | KW_END
+    | KW_ENDCREDIT | KW_EPILOG | KW_FAIL | KW_FLAGS | KW_FONTCOLOR
+    | KW_FOOTER | KW_FORMATS | KW_GAPDURATION | KW_GAPLENGTH | KW_HALIGN
+    | KW_HASALERT | KW_HEADER | KW_HEADLINE | KW_HEIGHT | KW_HIDEACCOUNT
+    | KW_HIDEJOURNALENTRY | KW_HIDEREPORT | KW_HIDERESOURCE | KW_HIDETASK
+    | KW_INHERIT | KW_ISACTIVE | KW_ISCHILDOF | KW_ISDEPENDENCYOF
+    | KW_ISDUTYOF | KW_ISFEATUREOF | KW_ISLEAF | KW_ISMILESTONE
+    | KW_ISONGOING | KW_ISRESOURCE | KW_ISRESPONSIBILITYOF | KW_ISTASK
+    | KW_ISVALID | KW_JOURNALATTRIBUTES | KW_JOURNALMODE
+    | KW_LEAVEALLOWANCES | KW_LEAVES | KW_LEFT | KW_LENGTH | KW_LIMITS
+    | KW_LISTITEM | KW_LISTTYPE | KW_LOADUNIT | KW_MANAGERS | KW_MANDATORY
+    | KW_MARKDATE | KW_MAXEND | KW_MAXIMUM | KW_MAXSTART | KW_MILESTONE
+    | KW_MINEND | KW_MINIMUM | KW_MINSTART | KW_MONTHLYMAX | KW_MONTHLYMIN
+    | KW_NEWTASK | KW_NOTE | KW_NOVEVENTS | KW_NOW | KW_NUMBER
+    | KW_NUMBERFORMAT | KW_ONEND | KW_ONSTART | KW_OPENNODES | KW_OUTPUTDIR
+    | KW_OVERTIME | KW_PERIOD | KW_PERSISTENT | KW_PRECEDES | KW_PRIORITY
+    | KW_PROJECTID | KW_PROJECTIDS | KW_PROJECTION | KW_PROLOG | KW_PURGE
+    | KW_RATE | KW_RAWHTMLHEAD | KW_REFERENCE | KW_REMAINING | KW_REPLACE
+    | KW_REPORTPREFIX | KW_RESOURCEATTRIBUTES | KW_RESOURCEPREFIX
+    | KW_RESOURCEROOT | KW_RESOURCES | KW_RESPONSIBLE | KW_RICHTEXT
+    | KW_RIGHT | KW_ROLLUPACCOUNT | KW_ROLLUPRESOURCE | KW_ROLLUPTASK
+    | KW_SCALE | KW_SCENARIOS | KW_SCENARIOSPECIFIC | KW_SCHEDULED
+    | KW_SCHEDULING | KW_SCHEDULINGMODE | KW_SELECT | KW_SELFCONTAINED
+    | KW_SHIFTS | KW_SHORTTIMEFORMAT | KW_SLOPPY | KW_SORTACCOUNTS
+    | KW_SORTJOURNALENTRIES | KW_SORTRESOURCES | KW_SORTTASKS | KW_START
+    | KW_STARTCREDIT | KW_STATUS | KW_STRICT | KW_SUMMARY | KW_TAGFILE
+    | KW_TASKATTRIBUTES | KW_TASKPREFIX | KW_TASKROOT | KW_TEXT
+    | KW_TIMEFORMAT | KW_TIMEFORMAT1 | KW_TIMEFORMAT2 | KW_TIMEOFF
+    | KW_TIMEZONE | KW_TIMINGRESOLUTION | KW_TITLE | KW_TOOLTIP
+    | KW_TRACKINGSCENARIO | KW_TREELEVEL | KW_VACATION | KW_WARN
+    | KW_WEEKLYMAX | KW_WEEKLYMIN | KW_WEEKSTARTSMONDAY
+    | KW_WEEKSTARTSSUNDAY | KW_WIDTH | KW_WORK | KW_WORKINGHOURS
+    | KW_YEARLYWORKINGDAYS
     ;
 
 /* ── macro_body: tokens inside a macro definition ───────────────────────── *
@@ -2092,105 +1461,43 @@ macro_body
     ;
 
 macro_body_tok
-    : TK_IDENT          { token_free(&$1); }
-    | TK_INTEGER        { token_free(&$1); }
-    | TK_FLOAT          { token_free(&$1); }
-    | TK_STR            { token_free(&$1); }
-    | TK_DATE           { token_free(&$1); }
-    | TK_DURATION       { token_free(&$1); }
-    | TK_LBRACE         { token_free(&$1); }
-    | TK_RBRACE         { token_free(&$1); }
-    | TK_LBRACKET       { token_free(&$1); }
-    | TK_BANG           { token_free(&$1); }
-    | TK_PLUS           { token_free(&$1); }
-    | TK_MINUS          { token_free(&$1); }
-    | TK_DOT            { token_free(&$1); }
-    | TK_COLON          { token_free(&$1); }
-    | TK_COMMA          { token_free(&$1); }
-    | TK_PERCENT        { token_free(&$1); }
-    | TK_DOLLAR         { token_free(&$1); }
-    | TK_MULTI_LINE_STR { token_free(&$1); }
-    | TK_ERROR          { token_free(&$1); }
-    | TK_EOL            { /* synthetic terminator inside the macro body */ }
+    : TK_IDENT | TK_INTEGER | TK_FLOAT | TK_STR | TK_DATE | TK_DURATION
+    | TK_LBRACE | TK_RBRACE | TK_LBRACKET | TK_BANG | TK_PLUS | TK_MINUS
+    | TK_DOT | TK_COLON | TK_COMMA | TK_PERCENT | TK_DOLLAR
+    | TK_MULTI_LINE_STR | TK_ERROR
+    | TK_EOL   /* synthetic terminator inside the macro body */
     /* All KW_* tokens (a macro body can contain any keywords):             */
-    | KW_PROJECT        { token_free(&$1); }
-    | KW_TASK           { token_free(&$1); }
-    | KW_RESOURCE       { token_free(&$1); }
-    | KW_ACCOUNT        { token_free(&$1); }
-    | KW_SHIFT          { token_free(&$1); }
-    | KW_TASKREPORT     { token_free(&$1); }
-    | KW_RESOURCEREPORT { token_free(&$1); }
-    | KW_ACCOUNTREPORT  { token_free(&$1); }
-    | KW_TEXTREPORT     { token_free(&$1); }
-    | KW_TRACEREPORT    { token_free(&$1); }
-    | KW_ICALREPORT     { token_free(&$1); }
-    | KW_NIKUREPORT     { token_free(&$1); }
-    | KW_EXPORT         { token_free(&$1); }
-    | KW_STATUSSHEETREPORT { token_free(&$1); }
-    | KW_TIMESHEETREPORT { token_free(&$1); }
-    | KW_NAVIGATOR      { token_free(&$1); }
-    | KW_TAGFILE        { token_free(&$1); }
-    | KW_MACRO          { token_free(&$1); }
-    | KW_INCLUDE        { token_free(&$1); }
-    | KW_SUPPLEMENT     { token_free(&$1); }
-    | KW_SCENARIO       { token_free(&$1); }
-    | KW_EXTEND         { token_free(&$1); }
-    | KW_TIMESHEET      { token_free(&$1); }
-    | KW_STATUSSHEET    { token_free(&$1); }
-    | KW_JOURNALENTRY   { token_free(&$1); }
+    | KW_PROJECT | KW_TASK | KW_RESOURCE | KW_ACCOUNT | KW_SHIFT
+    | KW_TASKREPORT | KW_RESOURCEREPORT | KW_ACCOUNTREPORT | KW_TEXTREPORT
+    | KW_TRACEREPORT | KW_ICALREPORT | KW_NIKUREPORT | KW_EXPORT
+    | KW_STATUSSHEETREPORT | KW_TIMESHEETREPORT | KW_NAVIGATOR | KW_TAGFILE
+    | KW_MACRO | KW_INCLUDE | KW_SUPPLEMENT | KW_SCENARIO | KW_EXTEND
+    | KW_TIMESHEET | KW_STATUSSHEET | KW_JOURNALENTRY
     /* Plus all attribute keywords via gen_expr_tok re-use (or list them):  */
-    | KW_ALLOCATE       { token_free(&$1); }
-    | KW_DEPENDS        { token_free(&$1); }
-    | KW_EFFORT         { token_free(&$1); }
-    | KW_START          { token_free(&$1); }
-    | KW_END            { token_free(&$1); }
-    | KW_COMPLETE       { token_free(&$1); }
-    | KW_NOTE           { token_free(&$1); }
-    | KW_TOOLTIP        { token_free(&$1); }
-    | KW_CELLCOLOR      { token_free(&$1); }
-    | KW_HIDETASK       { token_free(&$1); }
-    | KW_HIDERESOURCE   { token_free(&$1); }
-    | KW_FORMATS        { token_free(&$1); }
-    | KW_COLUMNS        { token_free(&$1); }
-    | KW_LOADUNIT       { token_free(&$1); }
-    | KW_HEADLINE       { token_free(&$1); }
-    | KW_SORTTASKS      { token_free(&$1); }
-    | KW_SORTRESOURCES  { token_free(&$1); }
-    | KW_TITLE          { token_free(&$1); }
+    | KW_ALLOCATE | KW_DEPENDS | KW_EFFORT | KW_START | KW_END
+    | KW_COMPLETE | KW_NOTE | KW_TOOLTIP | KW_CELLCOLOR | KW_HIDETASK
+    | KW_HIDERESOURCE | KW_FORMATS | KW_COLUMNS | KW_LOADUNIT
+    | KW_HEADLINE | KW_SORTTASKS | KW_SORTRESOURCES | KW_TITLE
     /* TODO: list all remaining KW_* here, or factor into a shared rule.    */
     ;
 
 /* ── opt_args: zero or more argument tokens (fallback rule only) ─────────── *
  *
- * Used ONLY in the TK_IDENT fallback alternative and the isXxx/hasXxx/unknown
- * keyword stubs in the item rule.  KW_* tokens are intentionally excluded
- * so that statement boundaries are clean: when a KW_* token appears while
- * consuming opt_args, bison will reduce and the outer items loop will start
- * a new item with that keyword.                                             */
+ * Used ONLY in the TK_IDENT fallback alternative and the stub_kw
+ * alternatives in the plain_stmt rule.  KW_* tokens are intentionally
+ * excluded so that statement boundaries are clean: when a KW_* token
+ * appears while consuming opt_args, bison will reduce and the outer items
+ * loop will start a new item with that keyword.                             */
 opt_args
     : /* empty */
     | opt_args arg_token
     ;
 
 arg_token
-    : TK_IDENT     { token_free(&$1); }
-    | TK_STR       { token_free(&$1); }
-    | TK_INTEGER   { token_free(&$1); }
-    | TK_FLOAT     { token_free(&$1); }
-    | TK_DATE      { token_free(&$1); }
-    | TK_DURATION  { token_free(&$1); }
-    | TK_BANG      { token_free(&$1); }
-    | TK_PLUS      { token_free(&$1); }
-    | TK_MINUS     { token_free(&$1); }
-    | TK_DOT       { token_free(&$1); }
-    | TK_COLON     { token_free(&$1); }
-    | TK_COMMA     { token_free(&$1); }
-    | TK_PERCENT   { token_free(&$1); }
-    | TK_DOLLAR    { token_free(&$1); }
-    | TK_LBRACKET  { token_free(&$1); }
-    | TK_RBRACKET  { token_free(&$1); }
-    | TK_MULTI_LINE_STR { token_free(&$1); }
-    | TK_ERROR     { token_free(&$1); }
+    : TK_IDENT | TK_STR | TK_INTEGER | TK_FLOAT | TK_DATE | TK_DURATION
+    | TK_BANG | TK_PLUS | TK_MINUS | TK_DOT | TK_COLON | TK_COMMA
+    | TK_PERCENT | TK_DOLLAR | TK_LBRACKET | TK_RBRACKET
+    | TK_MULTI_LINE_STR | TK_ERROR
     ;
 
 /* ── opt_body: optional { items } block ─────────────────────────────────── *
@@ -2210,8 +1517,6 @@ opt_body
         {
             $$.syms = $2.syms;
             $$.end  = $3.end;
-            token_free(&$1);
-            token_free(&$3);
         }
     ;
 

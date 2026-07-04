@@ -78,15 +78,6 @@ typedef struct {
                           *   freed via the token; strdup it to keep it. */
 } Token;
 
-/**
- * Drop a Token's borrowed lexeme pointer (sets `text` to NULL).  The text is
- * arena-owned (see Token.text), so nothing is freed here; this only exists so
- * grammar discard paths and the bison destructor have a uniform call.
- *
- * @param t  Token whose `text` field should be nulled out.
- */
-void token_free(Token *t);
-
 
 /* ── tj_node ─────────────────────────────────────────────────────────────── *
  *

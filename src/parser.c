@@ -192,17 +192,6 @@ char *g_push_tok_span(int kind,
     return interned;
 }
 
-/* ── Token helpers ───────────────────────────────────────────────────────── */
-
-void token_free(Token *t) {
-    /* A Token's text points into the parse's token arena (interned once by
-     * g_push_tok_span); it is reclaimed in bulk when the arena is freed, never
-     * individually.  Grammar rules that need to retain a lexeme past the parse
-     * (a tj_node id/name, a prefix_path_id segment) strdup it at that point, so
-     * discarding a token here is just dropping the borrowed arena pointer. */
-    t->text = NULL;
-}
-
 int parse_tjp_date(const char *text, time_t *out) {
     if (!text) return 0;
     int year, month, day;

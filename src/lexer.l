@@ -95,8 +95,8 @@ static int   str_len = 0;
  *
  * Every yylex() return goes through one of these helpers so that yylval.tok
  * is always populated with the correct kind, text, and position before bison
- * receives the token.  Grammar actions can then freely access $n.text and
- * call token_free(&$n) without checking for NULL.
+ * receives the token.  Grammar actions can then freely access $n.text (the
+ * lexeme is arena-owned, so discarded tokens need no cleanup).
  *
  * emit_kw    — semantic token (keyword, date, duration): records in sem-token
  *              array AND populates yylval.tok.
@@ -124,7 +124,7 @@ static void store_semantic_token(int token) {
 
 /* emit_kw: keyword / date / duration — recorded in sem-tokens AND returned.
  * The value-stack Token.text reuses the arena copy g_push_tok_span interns
- * (no separate strdup); token_free() treats it as a borrowed pointer.
+ * (no separate strdup); the grammar treats it as a borrowed pointer.
  *
  * always_inline: every call site passes a compile-time-constant `code`, so
  * inlining into raw_yylex lets the compiler fold this per token rather than
