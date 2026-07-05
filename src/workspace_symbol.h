@@ -48,8 +48,10 @@ void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
  * @param id      Request id from the incoming JSON-RPC message.
  * @param params  Request params with a "query" string (empty matches all).
  * @param qc      Query context containing all workspace documents.
+ * @param d       Primary query document (unused; present for dispatch symmetry).
  * @return JSON-RPC response containing the SymbolInformation array.
  */
 yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
                                         yyjson_val *params,
-                                        const query_context *qc);
+                                        const query_context *qc,
+                                        const query_doc *d);

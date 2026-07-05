@@ -158,8 +158,10 @@ void sem_tokens_result_id(doc_snapshot *s, char *buf, size_t buflen);
  * @param doc     Mutable document for building the response.
  * @param id      Request id from the incoming JSON-RPC message.
  * @param params  Request params (unused; present for dispatch symmetry).
+ * @param qc      Query context (unused; present for dispatch symmetry).
  * @param d       Primary query document; may be NULL.
  * @return JSON-RPC response with a SemanticTokens object.
  */
 yyjson_mut_val *handle_semantic_tokens_full(yyjson_mut_doc *doc, yyjson_val *id,
-                                            yyjson_val *params, const query_doc *d);
+                                            yyjson_val *params, const query_context *qc,
+                                            const query_doc *d);

@@ -101,10 +101,8 @@ static const char *find_line_start(const char *text, uint32_t target_line) {
 static int cursor_in_dquote(const char *text, LspPos cursor,
                             const TokenSpan *tokens, int num_tokens) {
     /* Fast path: token spans already cover terminated strings. */
-    TokenSpan ts = tok_span_at(tokens, num_tokens, cursor);
-    int kind = ts.token_kind;
-    free(ts.text);
-    if (kind == TK_STR)
+    const TokenSpan *ts = tok_span_at(tokens, num_tokens, cursor);
+    if (ts && ts->token_kind == TK_STR)
         return 1;
 
     /* Slow path for unterminated strings: scan just the cursor's line. */
@@ -139,7 +137,7 @@ static int cursor_in_dquote(const char *text, LspPos cursor,
  * consumes everything from `-8<-` to EOF, so no tokens would exist at
  * the cursor position if it were inside one).
  *
- * Only when tok_span_at() returns TK_EOF (cursor is in a tokenless
+ * Only when tok_span_at() returns NULL (cursor is in a tokenless
  * region) do we fall back to a backward scan through the raw text.
  * Because the unterminated scissors block has already consumed every
  * character from its opener to EOF, the `-8<-` delimiter is necessarily
@@ -154,12 +152,10 @@ static int cursor_in_dquote(const char *text, LspPos cursor,
 static int cursor_in_scissors(const char *text, LspPos cursor,
                               const TokenSpan *tokens, int num_tokens) {
     /* Fast path: check token spans. */
-    TokenSpan ts = tok_span_at(tokens, num_tokens, cursor);
-    int kind = ts.token_kind;
-    free(ts.text);
-    if (kind == TK_MULTI_LINE_STR)
+    const TokenSpan *ts = tok_span_at(tokens, num_tokens, cursor);
+    if (ts && ts->token_kind == TK_MULTI_LINE_STR)
         return 1;
-    if (kind != TK_EOF)
+    if (ts)
         return 0;   /* cursor is on a real token — not inside scissors */
 
     /* Slow path: cursor is in a tokenless gap.  Scan backwards through
@@ -237,13 +233,9 @@ static int at_statement_start(const TokenSpan *tokens, int num_tokens, LspPos cu
  *         free.
  */
 static char *partial_word(const TokenSpan *tokens, int num_tokens, LspPos cursor) {
-    TokenSpan span = tok_span_at(tokens, num_tokens, cursor);
-    if (span.token_kind == TK_IDENT) {
-        char *text = span.text; /* take ownership */
-        span.text = NULL;
-        return text;
-    }
-    free(span.text);
+    const TokenSpan *span = tok_span_at(tokens, num_tokens, cursor);
+    if (span && span->token_kind == TK_IDENT && span->text)
+        return strdup(span->text);
     return strdup("");
 }
 

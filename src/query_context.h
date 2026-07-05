@@ -97,7 +97,7 @@ typedef struct doc_snapshot {
     tj_node    **tok_owners;      /**< owned array[num_tok_spans]; innermost enclosing node per token (parallel to tok_spans) */
     int          num_tok_spans;   /**< number of valid entries in `tok_spans` / `tok_owners` */
     int          num_sem_entries; /**< upper bound on semantic-token entries (one per source line covered) */
-    str_arena   *tok_arena;       /**< owned backing store for every `tok_spans[i].text` */
+    str_arena   *tok_arena;       /**< owned backing store for the `root` tree and every `tok_spans[i].text` */
 
     _Atomic(sem_token_data *) sem_memo;  /**< NULL until first request; CAS-published */
 } doc_snapshot;
@@ -114,8 +114,8 @@ typedef struct doc_snapshot {
  * @param tok_owners       Owned per-token owner array, parallel to @p tok_spans
  *                         (transfer of ownership); may be NULL when no tokens.
  * @param num_tok_spans    Number of entries in @p tok_spans / @p tok_owners.
- * @param tok_arena        Owned arena backing the token texts (transfer of
- *                         ownership); may be NULL when there are no tokens.
+ * @param tok_arena        Owned arena backing the token texts AND the whole
+ *                         @p root tree (transfer of ownership).
  * @param num_sem_entries  Upper bound on emitted semantic-token entries.
  * @param doc_version      Monotonic parse stamp for this snapshot.
  * @return Newly allocated snapshot with refcount 1.
@@ -160,10 +160,7 @@ void docsnap_sem_tokens(doc_snapshot *s, const uint32_t **out_data, size_t *out_
  *  of the project it belongs to. */
 typedef struct ws_doc {
     doc_snapshot *snap;            /**< ref'd; +1 held by the owning workspace_snapshot */
-    char        *task_prefix;     /**< owned; may be NULL */
-    char        *account_prefix;  /**< owned; may be NULL */
-    char        *report_prefix;   /**< owned; may be NULL */
-    char        *resource_prefix; /**< owned; may be NULL */
+    prefix_set   prefixes;        /**< owned per-kind include prefixes */
     int          project_index;   /**< index into workspace_snapshot.projects, or -1 */
     int          disk_only;       /**< 1 for a background (non-editor) document */
 } ws_doc;
@@ -242,10 +239,7 @@ void ws_release(workspace_snapshot *ws);
 typedef struct query_doc {
     const char  *uri;             /**< borrowed canonical file:// URI */
     const char  *text;            /**< borrowed source text */
-    const char  *task_prefix;     /**< borrowed; may be NULL */
-    const char  *account_prefix;  /**< borrowed; may be NULL */
-    const char  *report_prefix;   /**< borrowed; may be NULL */
-    const char  *resource_prefix; /**< borrowed; may be NULL */
+    const prefix_set *prefixes;   /**< borrowed from the ws_doc; may be NULL */
 
     tj_node     *root;            /**< borrowed from snap */
     TokenSpan   *tok_spans;       /**< borrowed from snap */

@@ -106,7 +106,9 @@ void collect_workspace_symbols(yyjson_mut_doc *doc, const char *query,
 
 yyjson_mut_val *handle_workspace_symbol(yyjson_mut_doc *doc, yyjson_val *id,
                                         yyjson_val *params,
-                                        const query_context *qc) {
+                                        const query_context *qc,
+                                        const query_doc *d) {
+    (void)d;
     const char *query = params ? json_str(params, "query") : NULL;
     if (!query) query = "";
 

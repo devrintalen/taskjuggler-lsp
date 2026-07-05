@@ -27,15 +27,16 @@
 #include <yyjson.h>
 
 /**
- * Return a copy of the TokenSpan that spans @p pos, or a token with kind
- * TK_EOF if none.  Caller must free result.text (if non-NULL).
+ * Return the TokenSpan that spans @p pos, or NULL when @p pos is not on
+ * any token.  The pointer borrows into @p tokens — valid as long as the
+ * span array is, never freed by the caller.
  *
  * @param tokens      Token spans of the current document.
  * @param num_tokens  Length of @p tokens.
  * @param pos         Cursor position.
- * @return Copy of the matching token, or one with `token_kind == TK_EOF`.
+ * @return Borrowed pointer to the matching token, or NULL.
  */
-TokenSpan tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
+const TokenSpan *tok_span_at(const TokenSpan *tokens, int num_tokens, LspPos pos);
 
 /** One entry in the keyword stack produced by scan_kw_stack(). */
 typedef struct {

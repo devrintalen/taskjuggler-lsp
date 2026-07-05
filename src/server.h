@@ -90,12 +90,3 @@ void server_run_query(Job *job);
  * @param job  Cancelled job to acknowledge; worker frees it after return.
  */
 void server_dispatch_cancelled(Job *job);
-
-/**
- * Write one LSP-framed message to stdout, prepending the required
- * `Content-Length` header.  Safe to call from any thread; serialized
- * internally by a mutex.
- *
- * @param msg  NUL-terminated JSON message body.
- */
-void lsp_send_message(const char *msg);

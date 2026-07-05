@@ -78,15 +78,6 @@ typedef struct {
                           *   freed via the token; strdup it to keep it. */
 } Token;
 
-/**
- * Drop a Token's borrowed lexeme pointer (sets `text` to NULL).  The text is
- * arena-owned (see Token.text), so nothing is freed here; this only exists so
- * grammar discard paths and the bison destructor have a uniform call.
- *
- * @param t  Token whose `text` field should be nulled out.
- */
-void token_free(Token *t);
-
 
 /* ── tj_node ─────────────────────────────────────────────────────────────── *
  *
@@ -95,11 +86,13 @@ void token_free(Token *t);
  * declarations), or project.  The node kind is encoded by the `keyword`
  * field — a raw KW_* / TK_* constant from grammar.tab.h.
  *
- * Memory ownership: Documents own every tj_node they parse.  When this
- * Document is freed, the entire owned subtree is freed.  Per-Document
- * tj_node trees are immutable after parse — cross-Document hoisting
- * lives in a wholly separate global tree built by server.c, not on
- * these nodes.
+ * Memory ownership: every tj_node, its children / dependencies arrays,
+ * and the strings they borrow all live in the parse's token arena, which
+ * travels into the owning doc_snapshot.  Nothing is freed per node — the
+ * whole tree is reclaimed when the snapshot releases the arena.
+ * Per-document tj_node trees are immutable after parse — cross-document
+ * hoisting lives in a wholly separate per-project tree (project_tree.h),
+ * not on these nodes.
  */
 typedef struct tj_node tj_node;
 
@@ -117,9 +110,10 @@ typedef enum {
  * resolution runs against the assembled per-Project ProjectNode tree
  * and is memoized there (ProjectDep.resolved, see project_tree.h).
  *
- * Memory ownership: the enclosing tj_node owns the `dependencies` array;
- * `path` borrows the parse's token arena (built by the dep_path rule) and
- * is reclaimed in bulk with it, never freed per dependency.
+ * Memory ownership: the `dependencies` array and `path` both live in the
+ * parse's token arena (the array via tj_node_push_dependency, the path via
+ * the dep_path rule) and are reclaimed in bulk with it, never freed per
+ * dependency.
  */
 typedef struct Dependency {
     DepKind   kind;             /**< whether this dep is `depends` or `precedes` */
@@ -137,11 +131,11 @@ typedef struct Dependency {
  * folding, and dependency resolution — handlers branch on `keyword`
  * when they need to distinguish kinds.
  *
- * Memory: `dependencies`, `children`, and every transitively reachable
- * child node are owned by the tj_node and freed by tj_node_free().
- * `id` and `name` instead borrow the parse's token arena (which outlives
- * the tree within the same doc_snapshot), so they are not freed per node.
- * The cross-tree `parent_node` pointer is borrowed and never freed here.
+ * Memory: the node itself, `dependencies`, `children`, every reachable
+ * child node, and the `id` / `name` lexemes all live in the parse's token
+ * arena and are reclaimed with it when the owning doc_snapshot is
+ * released; nothing is freed per node.  The cross-tree `parent_node`
+ * pointer is borrowed.
  */
 struct tj_node {
     /* ── Identity ── */
@@ -163,8 +157,8 @@ struct tj_node {
      *
      * Captured at parse time from `depends` / `precedes` attributes,
      * one entry per dep_ref in source order.  Empty on tasks that
-     * declare no dependencies and on every non-task node.  Owned by
-     * this node; freed by tj_node_free(). */
+     * declare no dependencies and on every non-task node.  Arena-owned,
+     * reclaimed with the parse's token arena. */
     Dependency *dependencies;     /**< owned array; @see num_dependencies */
     int         num_dependencies; /**< number of valid entries in `dependencies` */
     int         dependencies_cap; /**< allocated capacity of `dependencies` */
@@ -180,7 +174,7 @@ struct tj_node {
      *                  NULL on the document's synthetic root.
      *
      * children       — locally declared children in source order.
-     *                  Owned by this node; freed by tj_node_free().
+     *                  Arena-owned, reclaimed with the token arena.
      */
     tj_node   *parent_node;  /**< borrowed; see comment above */
     tj_node  **children;     /**< owned array; @see num_children */
@@ -189,27 +183,28 @@ struct tj_node {
 };
 
 /**
- * Recursively free a tj_node subtree.  Frees the node's own strings, its
- * children (recursively, via the owned `children` array), and the node
- * itself.  Does NOT walk `parent_node` upward.
+ * Allocate a zeroed tj_node from the current parse's token arena.  Only
+ * valid during a parse (the arena exists between install and harvest of
+ * the parser globals); the node is reclaimed with the arena.
  *
- * @param n  Root of the subtree to free.  Safe to call with NULL.
+ * @return Arena-owned zeroed node; never NULL (aborts on OOM).
  */
-void tj_node_free(tj_node *n);
+tj_node *tj_node_new(void);
 
 /**
  * Append @p child as a locally declared child of @p parent (growing the
- * `children` array as needed) and set @p child's `parent_node` to @p parent.
+ * arena-backed `children` array as needed) and set @p child's
+ * `parent_node` to @p parent.
  *
  * @param parent  Owning node.
- * @param child   Child to attach (transfer of ownership).
+ * @param child   Child to attach.
  */
 void tj_node_append_child(tj_node *parent, tj_node *child);
 
 /**
- * Append a captured dependency reference onto @p task's `dependencies`
- * array, growing it as needed.  Takes ownership of @p dep.path.
- * `resolved_target` is initialized to NULL.
+ * Append a captured dependency reference onto @p task's arena-backed
+ * `dependencies` array, growing it as needed.  @p dep.path is arena-owned
+ * and simply recorded.
  *
  * @param task  Task tj_node (caller guarantees keyword == KW_TASK).
  * @param dep   Source-position-bearing Dependency whose `path` is heap-owned.
@@ -259,21 +254,73 @@ typedef struct {
  */
 void tok_spans_release(TokenSpan *buf);
 
+/* ── Include prefixes ────────────────────────────────────────────────────── *
+ *
+ * TaskJuggler's include directive can prefix the includee's declarations
+ * into one dotted namespace per kind (`taskprefix`, `accountprefix`,
+ * `resourceprefix` — shared with shifts — and `reportprefix`).  The same
+ * four-slot set travels from the IncludeRef captured at parse time onto
+ * the includee's Document and into every workspace snapshot, so it gets
+ * one type instead of four parallel fields on each struct.
+ */
+
+/**
+ * The per-kind id namespace a prefix applies to.  The enumerators MUST
+ * stay in the same order as project_tree.h's NodeKind (task, account,
+ * resource, report), so a NodeKind can index a prefix_set directly;
+ * workspace.c static-asserts the correspondence.
+ */
+typedef enum {
+    PREFIX_TASK,        /**< `taskprefix` — task namespace */
+    PREFIX_ACCOUNT,     /**< `accountprefix` — account namespace */
+    PREFIX_RESOURCE,    /**< `resourceprefix` — resource and shift namespace */
+    PREFIX_REPORT,      /**< `reportprefix` — report-family namespace */
+    PREFIX_KIND_COUNT   /**< number of prefix kinds */
+} prefix_kind;
+
+/** One owned dotted-path prefix per kind; a NULL slot means "no prefix". */
+typedef struct {
+    char *by_kind[PREFIX_KIND_COUNT]; /**< owned strings, or NULL */
+} prefix_set;
+
+/**
+ * Free every owned string in @p ps and NULL the slots.  Safe on a
+ * zero-initialized set.
+ *
+ * @param ps  Set to clear; must be non-NULL.
+ */
+void prefix_set_clear(prefix_set *ps);
+
+/**
+ * Replace @p dst's contents with a deep copy of @p src (releasing whatever
+ * @p dst held).  @p src may be NULL, which just clears @p dst.
+ *
+ * @param dst  Destination set; must be non-NULL.
+ * @param src  Source set to copy, or NULL.
+ */
+void prefix_set_copy(prefix_set *dst, const prefix_set *src);
+
+/**
+ * Read one slot of a possibly-NULL prefix_set.
+ *
+ * @param ps  Set to read, or NULL.
+ * @param k   Which kind's prefix to fetch.
+ * @return    Borrowed prefix string, or NULL when absent.
+ */
+static inline const char *prefix_get(const prefix_set *ps, prefix_kind k) {
+    return ps ? ps->by_kind[k] : NULL;
+}
+
 /**
  * One entry per `include` directive seen in the source.  `filename` is the
- * unquoted target as it appeared in the include statement.  The four
- * `*_prefix` fields carry the matching attribute from the include body
- * (e.g. `include "bar.tji" { taskprefix t1.t2 }` produces
- * `task_prefix = "t1.t2"`); each is NULL when the corresponding attribute
- * was not present.  All strings are heap-allocated and owned by the
- * ParseOutput / Document that holds the IncludeRef.
+ * unquoted target as it appeared in the include statement; `prefixes`
+ * carries the per-kind prefix attributes from the include body (e.g.
+ * `include "bar.tji" { taskprefix t1.t2 }`).  All strings are
+ * heap-allocated and owned by the ParseOutput that holds the IncludeRef.
  */
 typedef struct {
-    char *filename;        /**< owned unquoted target as it appeared in the include statement */
-    char *task_prefix;     /**< owned `taskprefix` argument, or NULL when not present */
-    char *resource_prefix; /**< owned `resourceprefix` argument, or NULL when not present */
-    char *account_prefix;  /**< owned `accountprefix` argument, or NULL when not present */
-    char *report_prefix;   /**< owned `reportprefix` argument, or NULL when not present */
+    char       *filename; /**< owned unquoted target as it appeared in the include statement */
+    prefix_set  prefixes; /**< owned per-kind prefixes from the include body */
 } IncludeRef;
 
 /**
@@ -328,23 +375,17 @@ ParseOutput *parse(const char *src);
 void parse_output_free(ParseOutput *po);
 
 /**
- * Append an `include` directive entry to @p po->includes.  The four prefix
- * pointers may be NULL (attribute not present); when non-NULL each is
- * deep-copied so the caller retains ownership of its inputs.
+ * Append an `include` directive entry to @p po->includes.  The prefix set
+ * is deep-copied, so the caller retains ownership of its input.
  *
- * @param po              ParseOutput being populated.
- * @param quoted_text     Raw `include` argument as it appears in source;
- *                        the surrounding quotes are stripped before storing.
- * @param task_prefix     Value of `taskprefix` attribute, or NULL.
- * @param resource_prefix Value of `resourceprefix` attribute, or NULL.
- * @param account_prefix  Value of `accountprefix` attribute, or NULL.
- * @param report_prefix   Value of `reportprefix` attribute, or NULL.
+ * @param po           ParseOutput being populated.
+ * @param quoted_text  Raw `include` argument as it appears in source;
+ *                     the surrounding quotes are stripped before storing.
+ * @param prefixes     Per-kind prefix attributes from the include body;
+ *                     may be NULL (no prefixes).
  */
 void push_include(ParseOutput *po, const char *quoted_text,
-                  const char *task_prefix,
-                  const char *resource_prefix,
-                  const char *account_prefix,
-                  const char *report_prefix);
+                  const prefix_set *prefixes);
 
 /**
  * Parse a `YYYY-MM-DD` date prefix from a TaskJuggler `TK_DATE` token's
