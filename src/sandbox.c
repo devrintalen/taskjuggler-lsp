@@ -18,7 +18,7 @@
 
 /** @file */
 
-/* O_PATH is a GNU extension not exposed under the project-wide _DEFAULT_SOURCE. */
+/** O_PATH is a GNU extension not exposed under the project-wide _DEFAULT_SOURCE. */
 #define _GNU_SOURCE 1
 
 #include "sandbox.h"
@@ -96,12 +96,12 @@ int sandbox_confine_writes_to(const char *dir) {
     uint64_t writes = write_access_mask(abi);
 
     /* Only handle the write-family rights: unhandled rights (read, execute,
-     * ioctl) stay fully permitted, so tj3 and its Ruby runtime load normally. */
-    struct landlock_ruleset_attr rattr;
+     * ioctl) stay fully permitted, so tj3 and its Ruby runtime load normally.
+     * Zero-initialize the whole struct: the header may declare fields newer
+     * than the ones set here (handled_access_net, scoped, ...) and the kernel
+     * rejects a ruleset whose unhandled tail bytes are non-zero. */
+    struct landlock_ruleset_attr rattr = {0};
     rattr.handled_access_fs = writes;
-#ifdef LANDLOCK_ACCESS_NET_BIND_TCP
-    rattr.handled_access_net = 0;
-#endif
     int ruleset_fd = (int)ll_create_ruleset(&rattr, sizeof(rattr), 0);
     if (ruleset_fd < 0) return -1;
 
