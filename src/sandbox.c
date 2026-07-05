@@ -116,6 +116,18 @@ int sandbox_confine_writes_to(const char *dir) {
     close(dir_fd);
     if (rc != 0) { close(ruleset_fd); return -1; }
 
+    /* RubyGems' binstub opens /dev/null for writing while activating the
+     * taskjuggler gem, so tj3 dies on startup unless it is writable.  It is
+     * a pure data sink, so allowing it does not weaken the confinement.
+     * Only WRITE_FILE: a file rule must not carry directory-only rights. */
+    int null_fd = open("/dev/null", O_PATH | O_CLOEXEC);
+    if (null_fd < 0) { close(ruleset_fd); return -1; }
+    pb.allowed_access = LANDLOCK_ACCESS_FS_WRITE_FILE;
+    pb.parent_fd      = null_fd;
+    rc = (int)ll_add_rule(ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &pb, 0);
+    close(null_fd);
+    if (rc != 0) { close(ruleset_fd); return -1; }
+
     /* Landlock requires no_new_privs for unprivileged use. */
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) { close(ruleset_fd); return -1; }
     if (ll_restrict_self(ruleset_fd, 0) != 0) { close(ruleset_fd); return -1; }
