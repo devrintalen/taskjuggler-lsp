@@ -20,7 +20,7 @@ jobs:
     steps:
     - uses: actions/checkout@v6
     - run: sudo apt update
-    - run: sudo apt install flex bison cmake
+    - run: sudo apt install flex bison cmake autoconf automake
     - name: install yyjson
       run: |
         git clone --depth 1 https://github.com/ibireme/yyjson.git
@@ -28,7 +28,11 @@ jobs:
         sudo cmake --build yyjson/build --target install
     - name: install TaskJuggler (tj3 for diagnostics tests)
       run: sudo gem install taskjuggler --version "${TASKJUGGLER_VERSION}" --no-document
+    - name: bootstrap
+      run: autoreconf -i
+    - name: configure
+      run: ./configure
     - name: make
       run: make
     - name: test
-      run: python tools/lsp_test.py ./taskjuggler-lsp --all test/cases/
+      run: make check

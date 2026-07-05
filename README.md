@@ -38,6 +38,9 @@ This program implements that for TaskJuggler.
 
 Build-time:
 
+- [Autoconf](https://www.gnu.org/software/autoconf/) and
+  [Automake](https://www.gnu.org/software/automake/) (when building from
+  a git checkout)
 - [yyjson](https://github.com/ibireme/yyjson)
 - [Flex](https://github.com/westes/flex)
 - [Bison](https://www.gnu.org/software/bison/)
@@ -57,13 +60,13 @@ diagnostics are missing.
 On Debian/Ubuntu:
 
 ```sh
-apt install libyyjson-dev flex bison taskjuggler
+apt install autoconf automake libyyjson-dev flex bison taskjuggler
 ```
 
 On Gentoo:
 
 ```sh
-emerge -a dev-libs/yyjson sys-devel/flex sys-devel/bison dev-lang/ruby
+emerge -a dev-build/autoconf dev-build/automake dev-libs/yyjson sys-devel/flex sys-devel/bison dev-lang/ruby
 gem install taskjuggler
 ```
 
@@ -73,14 +76,30 @@ pull `taskjuggler` from rubygems.org.
 
 ## Building
 
+The build system is GNU autotools. From a git checkout, bootstrap once
+with `autoreconf`, then configure and build:
+
 ```sh
+autoreconf -i
+./configure
 make
 ```
 
-This produces the `taskjuggler-lsp` binary. To clean build artifacts:
+This produces the `taskjuggler-lsp` binary. Out-of-tree (VPATH) builds
+work too:
 
 ```sh
+mkdir build && cd build
+../configure
+make
+```
+
+To run the test suite, clean build artifacts, or install:
+
+```sh
+make check
 make clean
+make install
 ```
 
 ## Testing

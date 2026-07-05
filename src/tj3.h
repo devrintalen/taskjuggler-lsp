@@ -33,7 +33,11 @@
 
 /** Which tj3 invocation to use for a project's worker class. */
 typedef enum tj3_mode {
-    TJ3_FULL,          /**< full `tj3 <root>`: schedules, so scheduling errors surface too */
+    TJ3_FULL,          /**< schedules and generates reports, so scheduling and
+                            report errors surface too.  Report generation writes
+                            files at project-controlled paths, so the run is
+                            confined to its staging dir via Landlock; without
+                            Landlock it degrades to `--no-reports`. */
     TJ3_SYNTAX_ONLY    /**< `tj3 --check-syntax <root>`: parse-level validation only */
 } tj3_mode;
 

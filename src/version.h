@@ -21,9 +21,9 @@
 /**
  * @file version.h
  * @brief Build-time version constants embedded into the `initialize`
- * response's `serverInfo.version` field.  Bumped together with the
- * `VERSION` variable in the Makefile (see the release checklist in
- * CLAUDE.md).
+ * response's `serverInfo.version` field.  This file is the single source
+ * of truth for the version: configure.ac extracts VERSION_STRING at
+ * autoreconf time (see the release checklist in CLAUDE.md).
  */
 
 #define VERSION_MAJOR 0           /**< Major component of the server version. */

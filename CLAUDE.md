@@ -15,13 +15,31 @@ Generated Doxygen API documentation is published at
 
 ## Dependencies
 
+- Autoconf + Automake (build system bootstrap)
 - yyjson (`-lyyjson`)
 - Flex
 - Bison
 - Python 3 (test harness and benchmark tooling)
 - Valgrind (optional, for callgrind profiling)
+- Linux Landlock (optional, kernel 5.13+): when available, full `tj3`
+  report-generating runs are confined so they can only write beneath
+  their temporary staging directory (`src/sandbox.{c,h}`). Without it,
+  those runs fall back to `tj3 --no-reports`. Non-Linux builds compile
+  the sandbox as a no-op.
 
 ## Common Commands
+
+The build system is GNU autotools: `configure.ac` + `Makefile.am`.
+The `Makefile` is generated — never edit it directly; edit
+`Makefile.am` (or `configure.ac`) and re-run `./config.status`
+(automake re-runs automatically when `Makefile.am` changes).
+
+Bootstrap (once per fresh checkout, or after editing configure.ac):
+
+```sh
+autoreconf -i
+./configure
+```
 
 Build / clean:
 
@@ -31,9 +49,10 @@ make debug     # produces ./taskjuggler-lsp-debug with -g, -no-pie (for perf/val
 make clean
 ```
 
-Run the full test suite:
+Run the full test suite (equivalent commands):
 
 ```sh
+make check
 python3 tools/lsp_test.py ./taskjuggler-lsp --all test/cases
 ```
 
@@ -59,9 +78,9 @@ make lexer-test       # builds ./lexer-test, links only flex output
 ```
 
 The build order matters: bison runs first to emit `src/grammar.tab.h`,
-then flex consumes it. Every `.o` depends on `grammar.tab.h`, so
-`make clean` followed by `make` is the safe way to recover from a
-stale generated header.
+then flex consumes it. `BUILT_SOURCES` guarantees the header exists
+before any object is compiled, so `make clean` followed by `make` is
+the safe way to recover from a stale generated header.
 
 ## Debug logging
 
@@ -217,7 +236,7 @@ in its own `.c` / `.h` pair under `src/`, and the mapping from
 the top of `src/server.c` ("QUERY DISPATCH"). When adding a feature,
 follow the same pattern: a header declaring a `build_*_json()` entry
 point that returns a `yyjson_mut_val *`, a corresponding `.c` with the
-implementation, a new entry in the `Makefile`'s `SRC` list, and a
+implementation, a new entry in `Makefile.am`'s `server_sources` list, and a
 `handle_*` dispatch arm in `server.c`.
 
 ## Test harness
@@ -265,9 +284,11 @@ When cutting a new release, perform every step below:
 
 1. Bump `VERSION_MAJOR` / `VERSION_MINOR` / `VERSION_PATCH` and
    `VERSION_STRING` in `src/version.h`.
-2. Bump `VERSION` in the `Makefile` to match.
-3. Rebuild (`make`) and run the full test suite:
-   `python3 tools/lsp_test.py ./taskjuggler-lsp --all test/cases`.
+2. Re-run `autoreconf && ./configure` — configure.ac extracts the
+   package version from `src/version.h` at autoreconf time, so this is
+   what propagates the bump into the build system.
+3. Rebuild (`make`) and run the full test suite (`make check`, or
+   `python3 tools/lsp_test.py ./taskjuggler-lsp --all test/cases`).
    The `initialize` response embeds `VERSION_STRING` in `serverInfo`,
    so every `expected.json` that captures an initialize reply must be
    updated to the new version. Use `--record` to regenerate them, or
