@@ -21,7 +21,14 @@ EXCLUDE                = src/lexer.yy.c src/grammar.tab.c src/grammar.tab.h
 # can't be cleanly associated with their preceding comment.  `PUSH` is a
 # BFS-local growable-array push used inside one server.c helper; SIG /
 # SIG0 are lexer-state aliases.
-EXCLUDE_SYMBOLS        = SIG SIG0 PUSH
+#
+# `_Static_assert` is here because older Doxygen (1.9.1, as shipped on the
+# Read the Docs ubuntu-22.04 build image) misparses a file-scope
+# _Static_assert as an undocumented member function and, under
+# WARN_IF_UNDOCUMENTED + WARN_AS_ERROR, fails the build.  Newer Doxygen
+# (1.9.8, used by the GitHub Pages workflow) handles it correctly; excluding
+# the symbol keeps both toolchains warning-free.
+EXCLUDE_SYMBOLS        = SIG SIG0 PUSH _Static_assert
 
 # Strip C11 _Atomic qualifiers before Doxygen ever sees them.  Doxygen
 # handles the keyword internally but propagates it verbatim into its
