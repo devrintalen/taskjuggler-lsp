@@ -71,11 +71,11 @@ static int    g_cc_attempted   = 0;
  *  so diagnostics workers can emit per-file warnings when the file is absent or malformed. */
 static cc_status g_cc_status   = CC_STATUS_OK;
 
-/* The currently published immutable workspace snapshot.  Touched only by
- * the coordinator thread (notifications swap it; query coordination acquires
- * a ref from it), so the pointer itself needs no atomic; only the snapshot's
- * refcount is atomic, for the worker-side release.  NULL until the first
- * revalidate builds one. */
+/** The currently published immutable workspace snapshot.  Touched only by
+ *  the coordinator thread (notifications swap it; query coordination acquires
+ *  a ref from it), so the pointer itself needs no atomic; only the snapshot's
+ *  refcount is atomic, for the worker-side release.  NULL until the first
+ *  revalidate builds one. */
 static workspace_snapshot *g_ws = NULL;
 
 void workspace_set_root_from_uri(const char *root_uri) {

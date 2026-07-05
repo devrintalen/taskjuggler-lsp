@@ -305,7 +305,8 @@ typedef struct {
     const char *docs;     /**< Markdown hover text */
 } keyword_doc_entry;
 
-/* Sorted by keyword for bsearch(); keep it that way when adding entries. */
+/** Hover documentation for every supported keyword, sorted by keyword for
+ *  bsearch(); keep it that way when adding entries. */
 static const keyword_doc_entry keyword_doc_table[] = {
     { "account",
       "**`account`** *(declaration)*\n\n"
@@ -509,7 +510,10 @@ static const keyword_doc_entry keyword_doc_table[] = {
       "**Example:** `workinghours mon-fri 9:00 - 17:00`" },
 };
 
-/** bsearch comparator: key is the keyword string, element a keyword_doc_entry. */
+/** bsearch comparator over keyword_doc_table.
+ *  @param key  The keyword string being looked up.
+ *  @param elem The keyword_doc_entry to compare against.
+ *  @return strcmp() ordering of the keyword strings. */
 static int keyword_doc_cmp(const void *key, const void *elem) {
     return strcmp((const char *)key,
                   ((const keyword_doc_entry *)elem)->keyword);

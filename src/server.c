@@ -96,14 +96,21 @@ typedef struct {
     int                     want_all_docs; /**< METHOD_QUERY: context spans every doc */
 } method_entry;
 
-/* handle_initialized takes no params; adapt it to the table signature. */
+/** handle_initialized takes no params; adapt it to the table signature.
+ *  @param params Ignored. */
 static void notify_initialized(yyjson_val *params) {
     (void)params;
     handle_initialized();
 }
 
-/* initialize / shutdown have lifecycle-shaped signatures (no query context);
- * adapt them to the uniform handler signature for the table. */
+/** initialize has a lifecycle-shaped signature (no query context); adapt it
+ *  to the uniform handler signature for the table.
+ *  @param doc    Mutable response document.
+ *  @param id     JSON-RPC request id.
+ *  @param params The initialize params object.
+ *  @param qc     Ignored.
+ *  @param d      Ignored.
+ *  @return The handler's result value. */
 static yyjson_mut_val *inline_initialize(yyjson_mut_doc *doc, yyjson_val *id,
                                          yyjson_val *params,
                                          const query_context *qc,
@@ -112,6 +119,13 @@ static yyjson_mut_val *inline_initialize(yyjson_mut_doc *doc, yyjson_val *id,
     return handle_initialize(doc, id, params);
 }
 
+/** shutdown, adapted to the uniform handler signature like inline_initialize.
+ *  @param doc    Mutable response document.
+ *  @param id     JSON-RPC request id.
+ *  @param params Ignored.
+ *  @param qc     Ignored.
+ *  @param d      Ignored.
+ *  @return The handler's result value. */
 static yyjson_mut_val *inline_shutdown(yyjson_mut_doc *doc, yyjson_val *id,
                                        yyjson_val *params,
                                        const query_context *qc,
@@ -120,6 +134,8 @@ static yyjson_mut_val *inline_shutdown(yyjson_mut_doc *doc, yyjson_val *id,
     return handle_shutdown(doc, id);
 }
 
+/** Every JSON-RPC method the server understands, with its execution class
+ *  and handler.  Adding an LSP feature means adding one row here. */
 static const method_entry methods[] = {
     { "initialized",                     METHOD_NOTIFICATION, .notify = notify_initialized },
     { "textDocument/didOpen",            METHOD_NOTIFICATION, .notify = handle_didopen },
